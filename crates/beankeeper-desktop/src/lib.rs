@@ -3,6 +3,7 @@
 pub mod boundary;
 pub mod browser;
 pub mod cli;
+pub mod pairing;
 pub mod server;
 mod ui;
 
@@ -23,11 +24,14 @@ pub enum DesktopError {
     NotRunning(String),
     /// The bounded local health probe failed.
     Probe(reqwest::Error),
+    /// Browser capabilities could not be created.
+    Pairing(pairing::PairingError),
 }
 
 impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Pairing(error) => write!(f, "{error}"),
             Self::UnsafeBind(bind) => write!(
                 f,
                 "non-loopback bind {bind} requires --allow-remote (plaintext HTTP, no TLS)"
@@ -53,11 +57,18 @@ impl fmt::Display for DesktopError {
 impl Error for DesktopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Pairing(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::Ledger(error) => Some(error),
             Self::Probe(error) => Some(error),
             Self::UnsafeBind(_) | Self::UnsupportedLoopback(_) | Self::NotRunning(_) => None,
         }
+    }
+}
+
+impl From<pairing::PairingError> for DesktopError {
+    fn from(error: pairing::PairingError) -> Self {
+        Self::Pairing(error)
     }
 }
 

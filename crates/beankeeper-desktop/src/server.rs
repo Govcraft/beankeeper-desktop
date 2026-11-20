@@ -7,11 +7,13 @@ use beankeeper_cli::{
     cli::Cli,
     mcp::{StreamableHttpServerConfig, http_router},
 };
+use secrecy::ExposeSecret;
 
 use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
     cli::ServeOptions,
+    pairing::{self, AgentKey, PairingState},
     ui,
 };
 
@@ -56,14 +58,24 @@ pub fn application(
     read_only: bool,
     bound: SocketAddr,
     config: StreamableHttpServerConfig,
+    pairing: PairingState,
 ) -> Result<Router, DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
         .with_allowed_hosts(boundary.authorities())
         .with_allowed_origins(boundary.origins())
         .enforce_origin_validation();
-    Ok(ui::router()
-        .merge(http_router(cli, read_only, config)?)
+    let fallback = cli
+        .agent_token
+        .as_ref()
+        .map(|token| AgentKey::from_verified_token(token.expose_secret()));
+    let mcp = http_router(cli, read_only, config)?.layer(middleware::from_fn_with_state(
+        (pairing.clone(), fallback),
+        pairing::mcp_guard,
+    ));
+    Ok(ui::router(pairing.clone())
+        .merge(pairing::router(pairing))
+        .merge(mcp)
         .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
 }
 
@@ -81,7 +93,9 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
-    let app = application(cli, options.read_only, bound, config)?;
+    let (pairing, pairing_url) = PairingState::new(bound)?;
+    let app = application(cli, options.read_only, bound, config, pairing)?;
+    eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
     eprintln!(
         "Beankeeper Desktop listening on {} (MCP: /mcp)",
         local_url(bound)

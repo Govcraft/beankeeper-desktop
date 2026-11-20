@@ -96,6 +96,7 @@ pub struct Server {
     pub base: String,
     pub client: Client,
     pub session: Option<String>,
+    pub pairing_url: Option<String>,
     _cwd: TempDir,
 }
 
@@ -124,6 +125,7 @@ impl Server {
             .spawn()?;
         let client = Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .build()?;
         let mut server = Self {
@@ -131,6 +133,7 @@ impl Server {
             base: String::new(),
             client,
             session: None,
+            pairing_url: None,
             _cwd: cwd,
         };
         let stderr = server.child.stderr.take().ok_or("missing stderr")?;
@@ -142,6 +145,11 @@ impl Server {
         });
         loop {
             let line = receive.recv_timeout(Duration::from_secs(15))?;
+            if let Some(url) =
+                line.strip_prefix("Pair this browser (one use, expires in 5 minutes): ")
+            {
+                server.pairing_url = Some(url.to_owned());
+            }
             if let Some((_, url)) = line.split_once("listening on ") {
                 server.base = url
                     .split_whitespace()
@@ -157,6 +165,37 @@ impl Server {
             }
         }
         Ok(server)
+    }
+
+    pub fn pair(&mut self) -> TestResult {
+        let response = self
+            .client
+            .get(self.pairing_url.as_deref().ok_or("missing pairing URL")?)
+            .send()?;
+        assert_eq!(response.status(), 303);
+        let attributes = response
+            .headers()
+            .get("set-cookie")
+            .ok_or("missing cookie")?
+            .to_str()?;
+        assert!(attributes.contains("HttpOnly"));
+        assert!(attributes.contains("SameSite=Strict"));
+        assert!(attributes.contains("Path=/"));
+        assert!(attributes.contains("Max-Age=43200"));
+        assert!(!attributes.contains("Domain="));
+        assert_eq!(response.headers()["location"], "/");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        let cookie = attributes.split(';').next().ok_or("cookie")?.to_owned();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::COOKIE, cookie.parse()?);
+        self.client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .default_headers(headers)
+            .build()?;
+        Ok(())
     }
 
     pub fn request(
