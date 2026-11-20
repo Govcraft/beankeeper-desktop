@@ -86,6 +86,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - name: Select native Windows Perl for vendored OpenSSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Git Bash's perl shadows Strawberry and lacks native build modules.
+          $perl = 'C:/Strawberry/perl/bin/perl.exe'
+          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -e 'print "$^X\n"'
+          if ($LASTEXITCODE -ne 0) { throw 'Native Perl prerequisites are missing' }
+          "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build Desktop binary and embedded UI
         run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
       - name: Stage binary and documents

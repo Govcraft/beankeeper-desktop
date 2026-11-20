@@ -73,7 +73,11 @@ python3 -B -m unittest discover -s scripts/tests -v
 Use `aarch64-unknown-linux-gnu` on native ARM Linux. If `CARGO_TARGET_DIR` is set,
 pass its binary path to `--binary`. Python 3.11+ is required; packaging uses only
 the standard library. Native `.pkg` creation additionally needs Xcode command
-line tools; Windows EXE creation needs Inno Setup 6. No Node toolchain is used.
+line tools; Windows EXE creation needs Inno Setup 6. Windows builds select the
+runner's native Strawberry Perl through `OPENSSL_SRC_PERL` to avoid Git Bash's
+incompatible Perl when compiling vendored OpenSSL. See
+[OpenSSL's Perl requirements](https://github.com/openssl/openssl/blob/master/NOTES-PERL.md).
+No Node toolchain is used.
 
 Actual release publication is reserved for an authorized push of a matching
 `beankeeper-cli-vVERSION` tag. This implementation PR does not create such a tag.
