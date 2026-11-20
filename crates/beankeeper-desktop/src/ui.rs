@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Extension, Router,
-    middleware,
     extract::{Query, State},
     http::{StatusCode, Uri, header},
+    middleware,
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -100,13 +100,16 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
             db: Arc::new(Mutex::new(db)),
             company,
         });
-    data.route_layer(middleware::from_fn_with_state(pairing, pairing::human_guard))
-        .route(
-            "/assets/style.css",
-            get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE) }),
-        )
-        .route("/health", get(|| async { HEALTH }))
-        .fallback(|| async { (StatusCode::NOT_FOUND, "Page not found") })
+    data.route_layer(middleware::from_fn_with_state(
+        pairing,
+        pairing::human_guard,
+    ))
+    .route(
+        "/assets/style.css",
+        get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE) }),
+    )
+    .route("/health", get(|| async { HEALTH }))
+    .fallback(|| async { (StatusCode::NOT_FOUND, "Page not found") })
 }
 
 async fn view(
@@ -143,9 +146,13 @@ async fn view(
     })
     .await;
     match result {
-        Ok(Ok(Ok(view))) => {
-            page(view.title, view.description, view.nav, &format!("{}{}", view.content, session_controls(&session))).into_response()
-        }
+        Ok(Ok(Ok(view))) => page(
+            view.title,
+            view.description,
+            view.nav,
+            &format!("{}{}", view.content, session_controls(&session)),
+        )
+        .into_response(),
         Ok(Ok(Err(error))) => {
             if error.status().is_server_error() {
                 eprintln!("Ledger view failed: {error:?}");

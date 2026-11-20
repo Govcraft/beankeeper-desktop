@@ -65,6 +65,7 @@ pub(crate) async fn guard(
     request: Request,
     next: Next,
 ) -> Response {
+    let pairing_url = request.uri().path() == "/pair";
     let mut response = if boundary.accepts(request.headers()) {
         next.run(request).await
     } else {
@@ -74,6 +75,14 @@ pub(crate) async fn guard(
         )
             .into_response()
     };
+    // Hide the pairing secret on redemption redirects and error responses.
+    // Successful invite confirmation pages contain a same-origin POST form;
+    // no-referrer would cause browsers to send Origin: null for that form.
+    let referrer_policy = if pairing_url && response.status() != StatusCode::OK {
+        "no-referrer"
+    } else {
+        "same-origin"
+    };
     for (name, value) in [
         (
             "content-security-policy",
@@ -81,9 +90,7 @@ pub(crate) async fn guard(
         ),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        // Preserve Origin on same-origin HTML form POSTs; no-referrer
-        // makes browsers send Origin: null, which this boundary rejects.
-        ("referrer-policy", "same-origin"),
+        ("referrer-policy", referrer_policy),
         ("cross-origin-resource-policy", "same-origin"),
         ("cache-control", "no-store"),
     ] {

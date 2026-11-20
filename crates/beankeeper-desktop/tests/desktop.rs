@@ -106,13 +106,17 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
 #[test]
 fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult {
     let ledger = Ledger::new()?;
-    let mut server = Server::start(&ledger, &["serve"], None)?;
+    let server = Server::start(&ledger, &["serve"], None)?;
     let authority = server.base.trim_start_matches("http://");
     for path in [
         "/",
         "/assets/style.css",
         "/health",
+        "/accounts",
         "/transactions",
+        "/transactions/txn_missing",
+        "/reports",
+        "/review",
         "/missing",
         "/pair",
         "/api/session/logout",
@@ -643,6 +647,7 @@ fn authenticated_mcp_invites_require_human_confirmation_and_keep_agents_isolated
     assert_eq!(server.request("tools/list", json!({}), None)?.status(), 401);
     let response = server.client.get(&invite).send()?;
     assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["referrer-policy"], "same-origin");
     assert!(response.headers().get("set-cookie").is_none());
     let html = response.text()?;
     let csrf = csrf_from(&html)?;
@@ -728,26 +733,81 @@ fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> Tes
         assert!(!body.contains(server.pairing_url.as_deref().ok_or("pairing URL")?));
     }
     // The removed access-code path cannot mint credentials.
-    assert_eq!(server.client.post(format!("{}/unlock", server.base)).send()?.status(), 404);
+    assert_eq!(
+        server
+            .client
+            .post(format!("{}/unlock", server.base))
+            .send()?
+            .status(),
+        404
+    );
     server.pair()?;
     for path in paths {
         let response = server.client.get(format!("{}{path}", server.base)).send()?;
-        assert_eq!(response.status(), if path.contains("txn_missing") { 404 } else { 200 }, "{path}");
+        assert_eq!(
+            response.status(),
+            if path.contains("txn_missing") {
+                404
+            } else {
+                200
+            },
+            "{path}"
+        );
         let html = response.text()?;
-        assert_eq!(html, server.client.get(format!("{}{path}", server.base)).send()?.text()?);
+        assert_eq!(
+            html,
+            server
+                .client
+                .get(format!("{}{path}", server.base))
+                .send()?
+                .text()?
+        );
         // Even a paired browser cannot mix agent authority into a page request.
-        assert_eq!(server.client.get(format!("{}{path}", server.base)).bearer_auth(token(&ledger.reader)?).send()?.status(), 401);
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}{path}", server.base))
+                .bearer_auth(token(&ledger.reader)?)
+                .send()?
+                .status(),
+            401
+        );
     }
-    assert!(server.client.get(format!("{}/accounts?company=acme", server.base)).send()?.text()?.contains("Acme"));
+    assert!(
+        server
+            .client
+            .get(format!("{}/accounts?company=acme", server.base))
+            .send()?
+            .text()?
+            .contains("Acme")
+    );
     // A browser cookie alone cannot authorize MCP; invalid bearers also fail.
     for bearer in [None, Some("invalid")] {
-        assert_eq!(server.request("tools/list", json!({}), bearer)?.status(), 401);
+        assert_eq!(
+            server.request("tools/list", json!({}), bearer)?.status(),
+            401
+        );
     }
-    for path in ["/transactions?from=2026-02-30", "/transactions?offset=garbage"] {
-        assert_eq!(server.client.get(format!("{}{path}", server.base)).send()?.status(), 400);
+    for path in [
+        "/transactions?from=2026-02-30",
+        "/transactions?offset=garbage",
+    ] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}{path}", server.base))
+                .send()?
+                .status(),
+            400
+        );
     }
     let html = server.client.get(&server.base).send()?.text()?;
-    assert_eq!(human_post(&server, "/accounts", format!("csrf={}", csrf_from(&html)?)).send()?.status(), 405);
+    assert_eq!(
+        human_post(&server, "/accounts", format!("csrf={}", csrf_from(&html)?))
+            .send()?
+            .status(),
+        405
+    );
     Ok(())
 }
 
@@ -770,7 +830,9 @@ fn one_shot_passphrase_commands_are_consumed_once_for_both_transports() -> TestR
         .arg("--db")
         .arg(&ledger.path)
         .args(["serve", "--bind", "127.0.0.1:0"])
-        .env("BEANKEEPER_PASSPHRASE_CMD", source);
+        .env("BEANKEEPER_PASSPHRASE_CMD", source)
+        // A nonexistent temp directory makes any secret-file bridge fail.
+        .env("TMPDIR", directory.path().join("no-temp-files"));
     let mut server = Server::launch(command)?;
     assert!(marker.exists());
     std::fs::remove_file(&ledger.secret)?;

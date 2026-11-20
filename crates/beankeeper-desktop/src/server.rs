@@ -6,8 +6,8 @@ use axum::{Router, middleware};
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
-    passphrase::resolve_passphrase,
     mcp::{StreamableHttpServerConfig, http_router},
+    passphrase::resolve_passphrase,
 };
 use clap::Parser;
 use secrecy::ExposeSecret;
@@ -178,4 +178,36 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
             .await
     })?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passphrase_pipe_drains_large_secrets_when_router_startup_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("missing.db");
+        let cli = Cli::try_parse_from([
+            std::ffi::OsStr::new("bk"),
+            std::ffi::OsStr::new("--db"),
+            path.as_os_str(),
+            std::ffi::OsStr::new("mcp"),
+            std::ffi::OsStr::new("serve"),
+        ])?;
+        // Larger than the pipe buffer: a synchronous write would deadlock.
+        let passphrase = secrecy::SecretString::from("x".repeat(1024 * 1024));
+        let result = ledger_router(
+            &cli,
+            true,
+            StreamableHttpServerConfig::default(),
+            Some(&passphrase),
+        );
+        // Reaching the missing-ledger error requires draining and closing the
+        // pipe first; startup must not create a ledger or a secret file.
+        assert!(matches!(result, Err(DesktopError::Ledger(_))));
+        assert_eq!(directory.path().read_dir()?.count(), 0);
+        Ok(())
+    }
 }

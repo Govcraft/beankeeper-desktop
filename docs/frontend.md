@@ -21,12 +21,13 @@ Edit `ui/index.html` or `ui/style.css`, then rebuild `bk`. Cargo tracks both
 CI's clippy and test builds compile these exact sources on every PR. There are
 no checked-in generated assets to drift from their inputs. Integration tests
 request both the HTML and CSS from a server started with an empty current
-working directory, and verify pairing followed by direct navigation to each view URL.
+working directory, and verify pairing followed by direct navigation to each
+view URL.
 The released binary needs no adjacent `ui/` or `dist/` directory.
 
 The server owns explicit routes for `/`, `/accounts`, `/transactions`,
-`/transactions/{id}`, `/reports`, and `/review`, with real 404s for unknown paths. New Rust handlers or a future SPA
-can replace individual routes without changing the listener or MCP router.
+`/transactions/{id}`, `/reports`, and `/review`, with real 404s for unknown paths.
+New Rust handlers or a future SPA can replace individual routes without changing the listener or MCP router.
 Each page uses a shared shell, accessible navigation, a skip link and a visible
 current-page indicator. Only authenticated HTML responses contain ledger data.
 All ledger values are escaped as text or encoded into local links. Authenticated
@@ -56,7 +57,8 @@ startup. Both pipe ends close before serving; the resolved secret is never
 written to a temporary file. This preserves one-shot passphrase FDs and commands
 although the upstream factory accepts sources rather than a resolved secret.
 Encrypted Desktop startup currently requires Unix, as upstream's passphrase FD
-reader is Unix-only.
+reader is Unix-only. [Upstream issue #109](https://github.com/Govcraft/beankeeper/issues/109)
+tracks a router factory accepting an already-resolved secret for other platforms.
 
 `/`, `/accounts`, `/transactions`, `/transactions/{id}`, `/reports` and `/review`
 all use D3's paired human-session middleware. The harness redeems the terminal's
@@ -64,11 +66,13 @@ one-time pairing link and uses its host-bound cookie for saved view URLs.
 Agent bearer tokens never authorize browser pages, even alongside a valid human
 cookie; browser cookies never authorize MCP. Host/Origin checks wrap all routes.
 `Referrer-Policy: same-origin` preserves Origin for same-origin form POSTs while
-suppressing cross-origin referrers. Pairing URLs retain `no-referrer` because they
-carry single-use secrets. Health and CSS remain public and contain no ledger data.
+suppressing cross-origin referrers. Pairing redemptions and errors retain
+`no-referrer`; authenticated invite confirmation forms use `same-origin` so their
+POSTs retain Origin. Health and CSS remain public and contain no ledger data.
 
 Integration tests launch a real server against a temporary encrypted ledger and
-exercise D3 pairing, protected deep links, errors, security headers and MCP isolation.
+exercise D3 pairing, protected deep links, errors, security headers and MCP
+isolation.
 Renderer tests seed accounts and posted transactions using upstream APIs and
 cover dashboard, complete account lists, filters, source-cursor pagination,
 transaction metadata, audit and agent identity, and company isolation.

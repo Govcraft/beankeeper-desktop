@@ -35,6 +35,9 @@ prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
 `bk mcp serve` for stdio and `bk mcp serve --http` for MCP-only HTTP. Desktop
 extends upstream's command parser and delegates those commands to its dispatcher.
 Use `bk --help` or `bk serve --help` for options.
+Encrypted Desktop startup uses an in-memory passphrase pipe and currently requires
+Unix; [beankeeper#109](https://github.com/Govcraft/beankeeper/issues/109) tracks a
+resolved-secret router factory for other platforms.
 
 ```sh
 bk --db /path/to/books.db serve --bind 127.0.0.1:8751 --read-only
