@@ -22,3 +22,8 @@ h2 { font-size: 1.1rem; margin-top: 0; }
 .skip { position: absolute; left: 1rem; top: -10rem; padding: .75rem; background: white; z-index: 1; }
 .skip:focus { top: 1rem; }
 @media (max-width: 640px) { header { padding: 1rem; flex-wrap: wrap; } .workspace { grid-template-columns: 1fr; } nav { display: flex; flex-wrap: wrap; padding: .75rem; border-right: 0; border-bottom: 1px solid #c6cec5; } nav a { padding: .6rem .75rem; } main { padding: 2rem 1.25rem; } section { padding: 1.25rem; } }
+
+form { margin-top: 1rem; }
+button { font: inherit; color: #fff; background: #244e40; border: 1px solid #244e40; border-radius: .35rem; padding: .6rem 1rem; cursor: pointer; }
+button:hover { background: #17392d; }
+main a { overflow-wrap: anywhere; }

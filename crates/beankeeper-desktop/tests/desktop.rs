@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
     // Startup consumes the passphrase once. Requests no longer need the file.
     std::fs::remove_file(&ledger.secret)?;
     for (path, heading) in [
@@ -112,6 +113,10 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
         "/health",
         "/transactions",
         "/missing",
+        "/pair",
+        "/api/session/logout",
+        "/api/session/pairing",
+        "/api/session/associate",
         "/mcp",
     ] {
         let url = format!("{}{path}", server.base);
@@ -184,7 +189,8 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
         .header("Host", format!("localhost:{port}"))
         .header("Origin", format!("http://localhost:{port}"))
         .send()?;
-    assert_eq!(response.status(), 200);
+    // Raw access on another allowed hostname has no paired session.
+    assert_eq!(response.status(), 401);
     assert!(
         response
             .headers()
@@ -428,7 +434,8 @@ fn ctrl_c_cancels_live_mcp_sessions_and_releases_the_listener() -> TestResult {
 #[test]
 fn explicit_remote_consent_keeps_the_same_local_host_boundary() -> TestResult {
     let ledger = Ledger::new()?;
-    let server = Server::start_at(&ledger, &["serve", "--allow-remote"], None, "0.0.0.0:0")?;
+    let mut server = Server::start_at(&ledger, &["serve", "--allow-remote"], None, "0.0.0.0:0")?;
+    server.pair()?;
     assert_eq!(server.client.get(&server.base).send()?.status(), 200);
     assert_eq!(
         server
@@ -448,5 +455,236 @@ fn explicit_remote_consent_keeps_the_same_local_host_boundary() -> TestResult {
             .status(),
         403
     );
+    Ok(())
+}
+
+fn csrf_from(html: &str) -> TestResult<&str> {
+    html.split_once("name=\"csrf\" value=\"")
+        .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value))
+        .ok_or_else(|| "missing CSRF form field".into())
+}
+
+fn human_post(server: &Server, path: &str, body: String) -> reqwest::blocking::RequestBuilder {
+    server
+        .client
+        .post(format!("{}{path}", server.base))
+        .header("Origin", &server.base)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+}
+
+#[test]
+fn raw_origin_and_bearer_tokens_cannot_grant_a_browser_session() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], Some(token(&ledger.writer)?))?;
+    for path in ["/", "/transactions", "/reports", "/review"] {
+        let response = server.client.get(format!("{}{path}", server.base)).send()?;
+        assert_eq!(response.status(), 401);
+        assert!(response.headers().get("set-cookie").is_none());
+        let html = response.text()?;
+        assert!(html.contains("<h1>Pair this browser</h1>"));
+        assert!(!html.contains("name=\"csrf\""));
+        assert!(!html.contains("?token="));
+        assert!(!html.contains(token(&ledger.writer)?));
+    }
+    let response = server
+        .client
+        .get(server.pairing_url.as_deref().ok_or("pairing URL")?)
+        .bearer_auth(token(&ledger.writer)?)
+        .send()?;
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("set-cookie").is_none());
+    server.pair()?;
+    let response = server
+        .client
+        .get(server.pairing_url.as_deref().ok_or("pairing URL")?)
+        .send()?;
+    assert_eq!(response.status(), 410);
+    assert!(response.headers().get("set-cookie").is_none());
+    assert_eq!(server.client.get(&server.base).send()?.status(), 200);
+    assert_eq!(
+        server
+            .client
+            .get(&server.base)
+            .bearer_auth(token(&ledger.writer)?)
+            .send()?
+            .status(),
+        401
+    );
+    // Explicit process fallback credentials work only on MCP.
+    server.initialize(None)?;
+    assert!(
+        server
+            .request("tools/list", json!({}), None)?
+            .status()
+            .is_success()
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_writes_require_origin_and_csrf_and_logout_revokes_the_cookie() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let html = server.client.get(&server.base).send()?.text()?;
+    let csrf = csrf_from(&html)?;
+    for (origin, candidate, expected) in [
+        (None, csrf, 401),
+        (Some("null"), csrf, 403),
+        (Some("https://evil.example"), csrf, 403),
+        (Some(server.base.as_str()), "wrong", 401),
+        (Some(server.base.as_str()), "", 401),
+    ] {
+        for path in [
+            "/api/session/logout",
+            "/api/session/pairing",
+            "/api/session/associate",
+        ] {
+            let mut request = server
+                .client
+                .post(format!("{}{path}", server.base))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(format!("csrf={candidate}"));
+            if let Some(origin) = origin {
+                request = request.header("Origin", origin);
+            }
+            assert_eq!(request.send()?.status(), expected, "{path}");
+        }
+    }
+    assert_eq!(server.client.get(&server.base).send()?.status(), 200);
+    assert_eq!(
+        human_post(&server, "/api/session/pairing", format!("csrf={csrf}"))
+            .bearer_auth(token(&ledger.writer)?)
+            .send()?
+            .status(),
+        401
+    );
+    assert_eq!(
+        human_post(
+            &server,
+            "/api/session/pairing",
+            format!("csrf={csrf}&csrf={csrf}")
+        )
+        .send()?
+        .status(),
+        401
+    );
+    // The actual successful write creates a new one-use link, never an agent token.
+    let response = human_post(&server, "/api/session/pairing", format!("csrf={csrf}")).send()?;
+    assert_eq!(response.status(), 200);
+    let html = response.text()?;
+    let link = html
+        .split_once("href=\"http://")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(rest, _)| format!("http://{rest}"))
+        .ok_or("new browser link")?;
+    let other = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let response = other.get(&link).send()?;
+    assert_eq!(response.status(), 303);
+    assert!(response.headers().get("set-cookie").is_some());
+    assert_eq!(other.get(&link).send()?.status(), 410);
+    let response = server
+        .client
+        .post(format!("{}/api/session/logout", server.base))
+        .header("Origin", &server.base)
+        .header("X-CSRF-Token", csrf)
+        .send()?;
+    assert_eq!(response.status(), 303);
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()?
+            .contains("Max-Age=0")
+    );
+    assert_eq!(server.client.get(&server.base).send()?.status(), 401);
+    assert_eq!(
+        human_post(&server, "/api/session/pairing", format!("csrf={csrf}"))
+            .send()?
+            .status(),
+        401
+    );
+    Ok(())
+}
+
+#[test]
+fn authenticated_mcp_invites_require_human_confirmation_and_keep_agents_isolated() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    let response = server.request("tools/list", json!({}), Some("invalid"))?;
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("beankeeper-pairing-url").is_none());
+    server.initialize(Some(token(&ledger.reader)?))?;
+    let response = server.request("tools/list", json!({}), Some(token(&ledger.reader)?))?;
+    let invite = response.headers()["beankeeper-pairing-url"]
+        .to_str()?
+        .to_owned();
+    assert!(!invite.contains(token(&ledger.reader)?));
+    assert!(rpc(response)?["result"]["tools"].is_array());
+    let response = server.client.get(&invite).send()?;
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("set-cookie").is_none());
+    let landing = response.text()?;
+    assert!(landing.contains("Continue in this browser"));
+    assert!(!landing.contains("name=\"csrf\""));
+    assert_eq!(
+        server
+            .client
+            .get(invite.replace("?invite=", "?token="))
+            .send()?
+            .status(),
+        410
+    );
+    server.pair()?;
+    // Cookie authentication alone cannot call the ledger MCP endpoint.
+    assert_eq!(server.request("tools/list", json!({}), None)?.status(), 401);
+    let response = server.client.get(&invite).send()?;
+    assert_eq!(response.status(), 200);
+    assert!(response.headers().get("set-cookie").is_none());
+    let html = response.text()?;
+    let csrf = csrf_from(&html)?;
+    let invite_token = invite.split_once('=').ok_or("invite")?.1;
+    let form = format!("csrf={csrf}&invite={invite_token}");
+    assert_eq!(
+        human_post(&server, "/api/session/associate", form.clone())
+            .send()?
+            .status(),
+        303
+    );
+    assert_eq!(
+        human_post(&server, "/api/session/associate", form)
+            .send()?
+            .status(),
+        410
+    );
+    assert!(
+        server
+            .client
+            .get(&server.base)
+            .send()?
+            .text()?
+            .contains("Your agent is connected")
+    );
+    assert!(
+        server
+            .request("tools/list", json!({}), Some(token(&ledger.reader)?))?
+            .headers()
+            .get("beankeeper-pairing-url")
+            .is_none()
+    );
+    // A second valid bearer on the same transport session never inherits pairing.
+    let response = server.request("tools/list", json!({}), Some(token(&ledger.writer)?))?;
+    assert!(response.status().is_success());
+    assert!(response.headers().get("beankeeper-pairing-url").is_some());
+    identity::revoke(
+        ledger.db()?.conn(),
+        &Actor::new("owner"),
+        ledger.reader["token_jti"].as_str().ok_or("jti")?,
+    )?;
+    let response = server.request("tools/list", json!({}), Some(token(&ledger.reader)?))?;
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("beankeeper-pairing-url").is_none());
     Ok(())
 }

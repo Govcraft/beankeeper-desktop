@@ -77,7 +77,7 @@ pub(crate) async fn guard(
     for (name, value) in [
         (
             "content-security-policy",
-            "default-src 'self'; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'self'; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         ),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),

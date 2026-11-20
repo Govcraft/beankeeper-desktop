@@ -3,7 +3,8 @@
 Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
 initial preview includes a running-status page and placeholders for transactions,
-reports and human review. Pairing, live views and browser approvals come later.
+reports and human review. Browser pairing and agent associations protect the
+workspace; live views and browser approvals come later.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -18,14 +19,15 @@ SQLCipher/OpenSSL. See [the frontend/toolchain decision](docs/frontend.md).
 cargo build --release --locked
 # Initialize and configure a ledger with the upstream bk commands first.
 ./target/release/bk --db /path/to/books.db --passphrase-file /secure/passphrase serve
-# From another terminal:
+# Open the one-time pairing URL printed in this terminal.
+# Later, reopen the paired workspace from another terminal:
 ./target/release/bk open
 ```
 
 One process serves the embedded UI at `http://127.0.0.1:8750/` and Streamable HTTP
 MCP at `http://127.0.0.1:8750/mcp`. No external asset directory or Node.js is
 needed at runtime or build time. Direct links to `/transactions`, `/reports`,
-and `/review` work. Unknown URLs return 404.
+and `/review` work after pairing. Unknown URLs return 404.
 
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
@@ -65,7 +67,27 @@ exactly one allowed Host with the actual bound port: `127.0.0.1:PORT`,
 native clients. Nonlocal, malformed, duplicate or null origins are rejected,
 as are rebinding hostnames and wrong ports. There is no permissive CORS layer.
 UI responses also forbid framing and inline/external scripts through CSP.
-These checks do not replace MCP credentials or the browser pairing planned in D3.
+These checks complement MCP credentials and the separate browser session.
+
+## Pair the browser and connect your agent
+
+Open the one-time URL printed by `bk serve` within five minutes. It exchanges a
+256-bit launch secret for an `HttpOnly`, `SameSite=Strict` cookie, then redirects
+to the workspace. The URL cannot be reused. Opening the raw origin or `bk open`
+without a valid cookie shows a pairing screen. Sessions expire after 12 hours
+and all links and sessions are invalidated when the server restarts. The paired
+workspace can create another browser link or unpair the current browser.
+
+MCP works before any browser is paired. Successful authenticated responses
+include a `Beankeeper-Pairing-Url` header until the agent has a browser target.
+Open that association link in a paired browser and confirm the connection.
+The association link alone cannot create a human session. Browser writes require
+both the exact Origin and a per-session CSRF token; MCP bearer tokens cannot
+act as human credentials. Plain HTTP loopback cookies omit `Secure` for browser
+compatibility and are not suitable for a remote deployment.
+
+See [browser pairing and session design](docs/browser-pairing.md) for expiry,
+credential separation, localhost cookie policy and the D4 integration API.
 
 Non-loopback binds fail unless `--allow-remote` is explicit. That flag permits a
 plaintext listener, **without TLS**, and keeps the same strict local Host/Origin

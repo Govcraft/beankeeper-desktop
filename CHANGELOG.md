@@ -4,6 +4,11 @@
 
 ### Added
 
+- Per-launch, expiring, single-use browser pairing links, host-bound human
+  session cookies, CSRF/Origin checks, and browser unpairing and additional links.
+- Agent association invites issued only after successful upstream MCP
+  authentication, with human confirmation and routing APIs for D4 navigation.
+
 - Cargo workspace for the source-available Desktop `bk` binary, with stable
   format/lint/test CI and a Rust 1.91 compatibility check.
 - `bk serve` hosting embedded status and placeholder views beside upstream's
