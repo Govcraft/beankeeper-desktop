@@ -4,6 +4,8 @@
 import argparse
 import hashlib
 import io
+import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -146,9 +148,29 @@ def checksums(output):
     (output / "checksums-sha256.txt").write_text("".join(lines), encoding="utf-8")
 
 
+def update_manifest(output, release_version, released_at=None):
+    """Emit exact JSON bytes before Sigstore signing, using the archive layout."""
+    if released_at is None:
+        released_at = subprocess.check_output(
+            ["git", "show", "-s", "--format=%ct", "HEAD"], cwd=ROOT, text=True).strip()
+        released_at = datetime.fromtimestamp(int(released_at), timezone.utc).isoformat().replace("+00:00", "Z")
+    artifacts = {}
+    for target in TARGETS:
+        extension = "zip" if "windows" in target else "tar.gz"
+        archive = output / f"{name(release_version, target)}.{extension}"
+        if archive.exists():
+            artifacts[target] = {"sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+    if not artifacts:
+        raise ValueError("no update archives found")
+    manifest = {"schema_version": 1, "version": release_version,
+                "released_at": released_at, "artifacts": artifacts}
+    (output / "update-manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "checksums"])
+    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "checksums", "update-manifest"])
     parser.add_argument("--tag")
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary", type=Path)
@@ -158,6 +180,8 @@ def main():
     release_version = version(args.tag)
     if args.command == "version":
         print(release_version)
+    elif args.command == "update-manifest":
+        update_manifest(args.output, release_version)
     elif args.command == "checksums":
         checksums(args.output)
     else:

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -97,6 +98,20 @@ class PackagingTests(unittest.TestCase):
         for line in manifest:
             digest, filename = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.output / filename).read_bytes()).hexdigest())
+
+    def test_update_manifest_hashes_matching_archives_and_uses_trusted_release_date(self):
+        for target in release.TARGETS:
+            directory = release.stage(self.binary, "0.1.0", target, self.root / "work")
+            release.compress(directory, "0.1.0", target, self.output)
+        release.update_manifest(self.output, "0.1.0", "2026-11-20T12:00:00Z")
+        manifest = json.loads((self.output / "update-manifest.json").read_text())
+        self.assertEqual(manifest["version"], "0.1.0")
+        self.assertEqual(manifest["released_at"], "2026-11-20T12:00:00Z")
+        self.assertEqual(set(manifest["artifacts"]), set(release.TARGETS))
+        for target, artifact in manifest["artifacts"].items():
+            extension = "zip" if "windows" in target else "tar.gz"
+            archive = self.output / f"bk-0.1.0-{target}.{extension}"
+            self.assertEqual(artifact["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
 
     def test_missing_assets_and_invalid_names_are_rejected(self):
         with self.assertRaises(ValueError):

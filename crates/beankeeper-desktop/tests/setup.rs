@@ -30,6 +30,7 @@ impl Setup {
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("bk"));
+        cmd.env("BEANKEEPER_NO_UPDATE_CHECK", "1");
         for name in [
             "BK_AGENT_TOKEN",
             "BEANKEEPER_PASSPHRASE_CMD",
