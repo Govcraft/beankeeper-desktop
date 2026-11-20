@@ -56,10 +56,11 @@ connection for browser review. A scoped writer runs while
 the factory reads the pipe, so secrets larger than the pipe buffer cannot block
 startup. Both pipe ends close before serving; the resolved secret is never
 written to a temporary file. This preserves one-shot passphrase FDs and commands
-although the upstream factory accepts sources rather than a resolved secret.
-Encrypted Desktop startup currently requires Unix, as upstream's passphrase FD
-reader is Unix-only. [Upstream issue #109](https://github.com/Govcraft/beankeeper/issues/109)
-tracks a router factory accepting an already-resolved secret for other platforms.
+with the source-based upstream factory Desktop currently uses. Encrypted Desktop
+startup currently requires Unix because this bridge uses Unix passphrase FDs.
+Upstream added a resolved-passphrase router factory in
+[beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111), closing #109;
+Desktop has not yet integrated it.
 
 `/`, `/accounts`, `/transactions`, `/transactions/{id}`, `/reports` and `/review`
 all use D3's paired human-session middleware. The harness redeems the terminal's
