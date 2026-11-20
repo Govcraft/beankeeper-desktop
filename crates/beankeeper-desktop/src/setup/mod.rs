@@ -326,6 +326,16 @@ fn run_with_store(
         super_start(cli, options, &temporary)?;
     }
     if !options.no_open {
+        if options.no_start {
+            keychain::validate_private_file(&token_file)?;
+            let token = fs::read_to_string(&token_file)?;
+            if !running_for_ledger(options.bind, &token)? {
+                return Err(crate::DesktopError::NotRunning(crate::server::local_url(
+                    options.bind,
+                ))
+                .into());
+            }
+        }
         crate::browser::open(options.bind)?;
     }
     Ok(())

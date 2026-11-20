@@ -427,6 +427,21 @@ fn setup_starts_detached_server_and_reuses_only_the_matching_ledger() -> TestRes
         .output()?;
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("did not accept this ledger's token"));
+    // --no-start must not open the wrong ledger's healthy UI either.
+    let output = other
+        .command()
+        .args([
+            "setup",
+            "--force",
+            "--non-interactive",
+            "--no-start",
+            "--config-home",
+        ])
+        .arg(other.path("home"))
+        .args(["--bind", &bind.to_string()])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("did not accept this ledger's token"));
     let log = fs::read_to_string(setup.path("books.desktop.log"))?;
     assert!(!log.contains(SECRET));
     assert!(!log.contains(&fs::read_to_string(setup.path("books.agent-token"))?));
