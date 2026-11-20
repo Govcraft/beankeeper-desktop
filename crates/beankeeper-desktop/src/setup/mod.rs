@@ -548,7 +548,7 @@ fn super_start(
     }
     set_private(&log)?;
     let output = fs::OpenOptions::new().append(true).open(log)?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let child = Command::new(std::env::current_exe()?)
         .arg("--db")
         .arg(&cli.db)
         .arg("--passphrase-file")
@@ -559,20 +559,23 @@ fn super_start(
         .stdout(Stdio::null())
         .stderr(output)
         .spawn()?;
+    let mut pending = PendingServer {
+        child,
+        ready: false,
+    };
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if child.try_wait()?.is_some() {
+        if pending.child.try_wait()?.is_some() {
             return Err(SetupError::Invalid(
                 "Desktop startup failed; inspect the private .desktop.log file",
             ));
         }
         if running_for_ledger(options.bind, &token)? {
-            eprintln!("Desktop started (PID {}).", child.id());
+            eprintln!("Desktop started (PID {}).", pending.child.id());
+            pending.ready = true;
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             return Err(SetupError::Invalid(
                 "Desktop startup timed out; inspect the private .desktop.log file",
             ));
@@ -701,5 +704,43 @@ fn future_path(path: &Path) -> io::Result<PathBuf> {
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+// Until readiness succeeds, every error path must terminate and reap the child.
+struct PendingServer {
+    child: std::process::Child,
+    ready: bool,
+}
+impl Drop for PendingServer {
+    fn drop(&mut self) {
+        if !self.ready {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_startup_reaps_its_background_process() -> Result<(), Box<dyn Error>> {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sleep").arg("30").spawn()?;
+        let id = child.id();
+        drop(PendingServer {
+            child,
+            ready: false,
+        });
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &id.to_string()])
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+        );
+        Ok(())
     }
 }
