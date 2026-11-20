@@ -29,7 +29,12 @@ New companies need owner-configured spend limits before agent use.
 
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from
 the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
-terminal. A paired browser can browse the dashboard, accounts and transactions.
+terminal. A paired browser can browse the dashboard, accounts, transactions,
+financial reports, tax summaries and read-only reconciliation. Use the stable
+view IDs and query filters in [docs/reports.md](docs/reports.md) for saved report
+links. Tax CSV/JSON downloads require the human browser session; agent bearer
+tokens cannot authorize them. These summaries are not filed tax forms.
+
 The review queue at `/review?company=SLUG` lists pending agent proposals. Link
 the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and
 current spend caps, then approve or reject using their paired browser session.

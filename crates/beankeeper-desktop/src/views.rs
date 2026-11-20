@@ -37,6 +37,7 @@ pub(crate) struct ViewPage {
 #[derive(Debug)]
 pub(crate) enum ViewError {
     Invalid(&'static str),
+    ReportOptions(String),
     Ledger(CliError),
     NotFound,
 }
@@ -44,7 +45,7 @@ pub(crate) enum ViewError {
 impl ViewError {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::Invalid(_) | Self::ReportOptions(_) => StatusCode::BAD_REQUEST,
             Self::NotFound | Self::Ledger(CliError::NotFound(_)) => StatusCode::NOT_FOUND,
             Self::Ledger(CliError::Validation(_)) => StatusCode::BAD_REQUEST,
             Self::Ledger(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -56,6 +57,7 @@ impl fmt::Display for ViewError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => f.write_str(message),
+            Self::ReportOptions(message) => f.write_str(message),
             Self::NotFound | Self::Ledger(CliError::NotFound(_)) => {
                 f.write_str("The requested company, account or transaction was not found.")
             }
@@ -105,11 +107,11 @@ pub(crate) fn encode(value: &str) -> String {
     encoded
 }
 
-fn nonempty(value: &Option<String>) -> Option<&str> {
+pub(crate) fn nonempty(value: &Option<String>) -> Option<&str> {
     value.as_deref().filter(|value| !value.is_empty())
 }
 
-fn valid_date(value: &str) -> bool {
+pub(crate) fn valid_date(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 10
         || bytes[4] != b'-'
@@ -155,7 +157,7 @@ fn amount(value: &Option<String>) -> Result<Option<i64>, ViewError> {
 }
 
 impl ViewQuery {
-    fn validate(&self) -> Result<(), ViewError> {
+    pub(crate) fn validate(&self) -> Result<(), ViewError> {
         if [nonempty(&self.from), nonempty(&self.to)]
             .into_iter()
             .flatten()
@@ -213,7 +215,7 @@ impl ViewQuery {
     }
 }
 
-fn input(name: &str, label: &str, kind: &str, value: &Option<String>) -> String {
+pub(crate) fn input(name: &str, label: &str, kind: &str, value: &Option<String>) -> String {
     format!(
         "<label>{label}<input name=\"{name}\" type=\"{kind}\" value=\"{}\"></label>",
         escape(value.as_deref().unwrap_or_default())

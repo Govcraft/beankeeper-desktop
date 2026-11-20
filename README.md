@@ -2,9 +2,9 @@
 
 Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
-preview shows your dashboard, accounts and transactions, with read-only ledger
-views and a browser review queue for agent proposals. Live agent navigation
-comes later.
+preview shows your dashboard, accounts, transactions, financial reports, tax
+summaries and reconciliation, with read-only ledger views and a browser review
+queue for agent proposals. Live agent navigation comes later.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -36,8 +36,9 @@ cargo build --release --locked
 One process serves the embedded UI at `http://127.0.0.1:8750/` and Streamable HTTP
 MCP at `http://127.0.0.1:8750/mcp`. No external asset directory or Node.js is
 needed at runtime or build time. Direct links to `/transactions`, `/reports`,
-`/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, `/review`, and
-`/review/PROPOSAL_ID?company=SLUG` work after pairing.
+`/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, `/reports/REPORT_ID`,
+`/reconciliation`, `/review`, and `/review/PROPOSAL_ID?company=SLUG` work after
+pairing.
 Unknown URLs return 404.
 
 `bk setup` creates an encrypted ledger, stores its passphrase in the native OS
@@ -133,7 +134,7 @@ bk --db ./desktop-demo.db serve
 ```
 
 After starting `bk serve`, open its one-time pairing URL as described above.
-Every ledger page, including reports and proposal review, requires D3's
+Every ledger page, report download and proposal review requires D3's
 paired human session. Agent credentials cannot unlock browser views, and browser
 cookies cannot authorize MCP. Health and CSS remain public and data-free behind
 Host/Origin checks. After pairing, reopen a saved view URL to restore its filters.
@@ -147,12 +148,21 @@ Host/Origin checks. After pairing, reopen a saved view URL to restore its filter
   status. Filters stay in the URL and restore on reload.
 - **Detail** (`/transactions/ID?company=acme`): entries, metadata and audit history,
   including agent identity and token ID when the ledger records them.
+- **Reports** (`/reports`): income statement, balance sheet, cash flow, spending
+  and net-worth trends, and budget variance. Date and currency filters use the
+  CLI report rules; every report offers a JSON download.
+- **Tax summaries** (`/reports/schedule-c` and `/reports/1099`): tables and CSV/JSON
+  downloads, including unmatched Schedule C categories and payee thresholds.
+  These are bookkeeping summaries, not tax advice or filed forms.
+- **Reconciliation** (`/reconciliation`): account and statement clearance balances,
+  outstanding items and bank or settlement mode. This view is read-only.
 
 Choose a company in each view. Without a URL company filter, `--company` or
 `BEANKEEPER_COMPANY` supplies the default; otherwise the first listed company is
 selected visibly. No company data is combined silently. These pages never edit
 the ledger. Ask your agent to prepare changes and review its proposals in the
-browser. Reports remain a placeholder for a later issue.
+browser. See [report URLs and filters](docs/reports.md) for stable navigation
+IDs, date defaults, budget month constraints and download formats.
 
 Register pages show at most 50 matches. Search and clearance use bounded scans
 of existing upstream transaction queries, so a page can have fewer matches while

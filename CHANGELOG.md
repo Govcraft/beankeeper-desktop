@@ -11,6 +11,12 @@
   verification before decisions. Enforced ledgers use an ephemeral server-only
   local-human identity; incoming agent credentials never authorize browser review.
 
+- URL-addressable income statement, balance sheet, cash flow, spending/net-worth
+  trends and budget variance using upstream's CLI report contract.
+- Schedule C and 1099 summary tables and paired-browser CSV/JSON downloads, with
+  bookkeeping-only disclaimers and preserved report filters.
+- Read-only bank and settlement reconciliation with account, statement, as-of
+  date and currency filters. Stable report view IDs for agent navigation.
 - Per-launch, expiring, single-use browser pairing links, host-bound human
   session cookies, CSRF/Origin checks, and browser unpairing and additional links.
 - Agent association invites issued only after successful upstream MCP
