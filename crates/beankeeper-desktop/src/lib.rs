@@ -6,11 +6,13 @@ pub mod browser;
 pub mod cli;
 pub mod license;
 pub mod pairing;
+pub mod product;
 pub mod reports;
 mod review;
 pub mod server;
 pub mod setup;
 mod ui;
+pub mod updates;
 mod views;
 
 use std::{error::Error, fmt, io, net::SocketAddr};
@@ -18,6 +20,8 @@ use std::{error::Error, fmt, io, net::SocketAddr};
 /// Startup and browser-launch failures owned by the Desktop host.
 #[derive(Debug)]
 pub enum DesktopError {
+    /// License or update command failed.
+    Product(product::ProductError),
     /// Onboarding could not finish safely.
     Setup(Box<setup::SetupError>),
     /// The stdio-to-HTTP bridge failed.
@@ -41,6 +45,7 @@ pub enum DesktopError {
 impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Product(error) => write!(f, "{error}"),
             Self::Pairing(error) => write!(f, "{error}"),
             Self::Setup(error) => write!(f, "{error}"),
             Self::Bridge(error) => write!(f, "{error}"),
@@ -69,6 +74,7 @@ impl fmt::Display for DesktopError {
 impl Error for DesktopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Product(error) => Some(error),
             Self::Pairing(error) => Some(error),
             Self::Setup(error) => Some(error),
             Self::Bridge(error) => Some(error),

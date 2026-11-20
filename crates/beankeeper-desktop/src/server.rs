@@ -165,6 +165,12 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
     let app = application(cli, options.read_only, bound, config, pairing)?;
+    if let Ok(directory) = crate::product::state_dir() {
+        crate::updates::background(
+            directory.join("updates.json"),
+            crate::product::updates_disabled(),
+        );
+    }
     eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
     eprintln!(
         "Beankeeper Desktop listening on {} (MCP: /mcp)",

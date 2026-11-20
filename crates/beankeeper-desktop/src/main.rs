@@ -8,13 +8,42 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
-    server, setup,
+    product, server, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
 fn main() -> ExitCode {
     let matches = cli::command().get_matches();
     let result = match matches.subcommand() {
+        Some(("license", options)) => {
+            let options =
+                product::LicenseOptions::from_arg_matches(options).unwrap_or_else(|e| e.exit());
+            product::run_license(options).map_err(DesktopError::Product)
+        }
+        Some(("update-check", _)) => product::state_dir()
+            .and_then(|dir| {
+                let status = updates::check(
+                    &dir.join("updates.json"),
+                    product::updates_disabled(),
+                    updates::now(),
+                )?;
+                println!("{status}");
+                Ok(())
+            })
+            .map_err(DesktopError::Product),
+        Some(("self-update", _)) => product::state_dir()
+            .and_then(|dir| {
+                if product::updates_disabled() {
+                    return Err(product::ProductError::Configuration(
+                        "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
+                    ));
+                }
+                updates::check(&dir.join("updates.json"), false, updates::now())?;
+                updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
+                println!("Desktop updated. Restart bk serve to use the installed version.");
+                Ok(())
+            })
+            .map_err(DesktopError::Product),
         Some(("serve", options)) => {
             let options =
                 ServeOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());

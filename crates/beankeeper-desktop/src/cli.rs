@@ -53,6 +53,17 @@ pub fn command() -> Command {
             Command::new("setup")
                 .about("Create an encrypted ledger and configure your MCP clients"),
         ))
+        .subcommand(crate::product::LicenseOptions::augment_args(
+            Command::new("license").about("Show or activate an offline Desktop license"),
+        ))
+        .subcommand(
+            Command::new("update-check")
+                .about("Check the signed Desktop release feed, at most daily"),
+        )
+        .subcommand(
+            Command::new("self-update")
+                .about("Verify and install an eligible Desktop release (requires cosign)"),
+        )
         .mut_subcommand("mcp", |command| {
             command.subcommand(crate::bridge::BridgeOptions::augment_args(
                 Command::new("bridge").about("Forward stdio MCP to the running Desktop server"),

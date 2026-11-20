@@ -80,6 +80,7 @@ impl Ledger {
 
 pub fn clean_command() -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("bk"));
+    command.env("BEANKEEPER_NO_UPDATE_CHECK", "1");
     for name in [
         "BK_AGENT_TOKEN",
         "BEANKEEPER_PASSPHRASE_CMD",
@@ -123,6 +124,10 @@ impl Server {
         let cwd = tempfile::tempdir()?;
         let child = command
             .current_dir(cwd.path())
+            .env(
+                "BEANKEEPER_DESKTOP_STATE_DIR",
+                cwd.path().join("desktop-state"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

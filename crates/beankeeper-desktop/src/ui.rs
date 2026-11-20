@@ -72,6 +72,20 @@ struct ViewState {
 pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> Router {
     let data = Router::new()
         .route("/", get(view))
+        .route(
+            "/settings",
+            get(|| async {
+                let status = tokio::task::spawn_blocking(crate::product::status_text)
+                    .await
+                    .unwrap_or_else(|_| "Desktop status unavailable.".into());
+                page(
+                    "License and updates",
+                    "Offline license and last update check",
+                    "/settings",
+                    &format!("<pre>{}</pre>", escape(&status)),
+                )
+            }),
+        )
         .route("/accounts", get(view))
         .route("/transactions", get(view))
         .route("/transactions/{id}", get(view))

@@ -25,6 +25,7 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
         ("/accounts", "Accounts"),
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),
+        ("/settings", "License and updates"),
         ("/review", "Review queue"),
     ] {
         let response = server.client.get(format!("{}{path}", server.base)).send()?;
@@ -116,6 +117,7 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
         "/transactions",
         "/transactions/txn_missing",
         "/reports",
+        "/settings",
         "/review",
         "/missing",
         "/pair",
@@ -482,7 +484,7 @@ fn human_post(server: &Server, path: &str, body: String) -> reqwest::blocking::R
 fn raw_origin_and_bearer_tokens_cannot_grant_a_browser_session() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], Some(token(&ledger.writer)?))?;
-    for path in ["/", "/transactions", "/reports", "/review"] {
+    for path in ["/", "/transactions", "/reports", "/review", "/settings"] {
         let response = server.client.get(format!("{}{path}", server.base)).send()?;
         assert_eq!(response.status(), 401);
         assert!(response.headers().get("set-cookie").is_none());
@@ -705,6 +707,7 @@ fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> Tes
         "/transactions?company=acme&offset=50",
         "/transactions/txn_missing?company=acme",
         "/reports",
+        "/settings",
         "/review",
     ];
     // All ledger and placeholder routes reject both anonymous and bearer reads.
