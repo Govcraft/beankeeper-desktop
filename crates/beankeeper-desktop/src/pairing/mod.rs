@@ -76,7 +76,7 @@ struct Link {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Session {
-    id: BrowserSessionId,
+    pub(crate) id: BrowserSessionId,
     pub(crate) csrf: Secret,
     authority: String,
     expires: Instant,
@@ -252,7 +252,11 @@ impl PairingState {
         found.ok_or(PairingError::Unauthorized)
     }
 
-    fn session(&self, headers: &HeaderMap, now: Instant) -> Result<Session, PairingError> {
+    pub(crate) fn session(
+        &self,
+        headers: &HeaderMap,
+        now: Instant,
+    ) -> Result<Session, PairingError> {
         // Bearer credentials never confer human authority, even with a cookie.
         if headers.contains_key(header::AUTHORIZATION) {
             return Err(PairingError::Unauthorized);
@@ -438,8 +442,8 @@ mod tests {
     -> TestResult {
         let (state, launch) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
-        let agent = AgentKey::from_verified_token("verified-agent-one");
-        let other = AgentKey::from_verified_token("verified-agent-two");
+        let agent = AgentKey::for_test("verified-agent-one");
+        let other = AgentKey::for_test("verified-agent-two");
         assert!(state.paired_sessions(&agent, now)?.is_empty());
         let invite = state.agent_pairing_url(agent.clone(), now)?;
         assert_eq!(
@@ -506,7 +510,7 @@ mod tests {
     fn agent_invite_expiry_is_not_extended_by_repeat_requests() -> TestResult {
         let (state, _) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
-        let agent = AgentKey::from_verified_token("verified-token");
+        let agent = AgentKey::for_test("verified-token");
         let invite = state.agent_pairing_url(agent.clone(), now)?;
         assert_eq!(
             invite,

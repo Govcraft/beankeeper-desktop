@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::secret::Secret;
 
-/// A non-reversible credential fingerprint used to route an agent to browsers.
+/// A non-reversible verified identity fingerprint used to route an agent to browsers.
 ///
 /// This is not an authentication credential. Upstream must verify the bearer
 /// token on every MCP request, including after a browser has been associated.
@@ -10,10 +10,19 @@ use super::secret::Secret;
 pub struct AgentKey([u8; 32]);
 
 impl AgentKey {
-    /// Derive a routing key from an upstream-verified agent bearer credential.
+    /// Derive a routing key from a request identity verified by upstream.
     #[must_use]
-    pub fn from_verified_token(token: &str) -> Self {
-        Self(Secret::digest(token))
+    pub fn from_verified_identity(identity: &beankeeper_cli::identity::VerifiedAgent) -> Self {
+        Self(Secret::digest(&format!(
+            "{}:{}",
+            identity.uri(),
+            identity.jti()
+        )))
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(seed: &str) -> Self {
+        Self(Secret::digest(seed))
     }
 }
 

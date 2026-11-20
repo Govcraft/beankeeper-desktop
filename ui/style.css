@@ -65,3 +65,5 @@ article + article { border-top: 1px solid #c6cec5; margin-top: 2rem; padding-top
 details { margin: 1.5rem 0; }
 summary { cursor: pointer; font-weight: 650; }
 @media (max-width: 640px) { .report-results dl { grid-template-columns: 1fr; } }
+
+.agent-highlight { outline: 3px solid #985700; outline-offset: 4px; background-color: #fff0c2; color: #242019; }
