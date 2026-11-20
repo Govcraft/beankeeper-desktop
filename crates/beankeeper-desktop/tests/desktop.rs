@@ -689,3 +689,190 @@ fn authenticated_mcp_invites_require_human_confirmation_and_keep_agents_isolated
     assert!(response.headers().get("beankeeper-pairing-url").is_none());
     Ok(())
 }
+
+#[test]
+fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    let paths = [
+        "/",
+        "/accounts?company=acme",
+        "/transactions?company=acme&offset=50",
+        "/transactions/txn_missing?company=acme",
+        "/reports",
+        "/review",
+    ];
+    // All ledger and placeholder routes reject both anonymous and bearer reads.
+    for path in paths {
+        for bearer in [None, Some(token(&ledger.reader)?)] {
+            let mut request = server.client.get(format!("{}{path}", server.base));
+            if let Some(bearer) = bearer {
+                request = request.bearer_auth(bearer);
+            }
+            let response = request.send()?;
+            assert_eq!(response.status(), 401, "{path}");
+            assert_eq!(response.headers()["referrer-policy"], "same-origin");
+            let html = response.text()?;
+            assert!(html.contains("Pair this browser"));
+            assert!(!html.contains("Acme"));
+            assert!(!html.contains(token(&ledger.reader)?));
+        }
+    }
+    // Health and CSS remain public and contain no ledger or pairing secret.
+    for path in ["/health", "/assets/style.css"] {
+        let response = server.client.get(format!("{}{path}", server.base)).send()?;
+        assert_eq!(response.status(), 200);
+        assert!(response.headers().get("set-cookie").is_none());
+        let body = response.text()?;
+        assert!(!body.contains("Acme"));
+        assert!(!body.contains(server.pairing_url.as_deref().ok_or("pairing URL")?));
+    }
+    // The removed access-code path cannot mint credentials.
+    assert_eq!(server.client.post(format!("{}/unlock", server.base)).send()?.status(), 404);
+    server.pair()?;
+    for path in paths {
+        let response = server.client.get(format!("{}{path}", server.base)).send()?;
+        assert_eq!(response.status(), if path.contains("txn_missing") { 404 } else { 200 }, "{path}");
+        let html = response.text()?;
+        assert_eq!(html, server.client.get(format!("{}{path}", server.base)).send()?.text()?);
+        // Even a paired browser cannot mix agent authority into a page request.
+        assert_eq!(server.client.get(format!("{}{path}", server.base)).bearer_auth(token(&ledger.reader)?).send()?.status(), 401);
+    }
+    assert!(server.client.get(format!("{}/accounts?company=acme", server.base)).send()?.text()?.contains("Acme"));
+    // A browser cookie alone cannot authorize MCP; invalid bearers also fail.
+    for bearer in [None, Some("invalid")] {
+        assert_eq!(server.request("tools/list", json!({}), bearer)?.status(), 401);
+    }
+    for path in ["/transactions?from=2026-02-30", "/transactions?offset=garbage"] {
+        assert_eq!(server.client.get(format!("{}{path}", server.base)).send()?.status(), 400);
+    }
+    let html = server.client.get(&server.base).send()?.text()?;
+    assert_eq!(human_post(&server, "/accounts", format!("csrf={}", csrf_from(&html)?)).send()?.status(), 405);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn one_shot_passphrase_commands_are_consumed_once_for_both_transports() -> TestResult {
+    let ledger = Ledger::new()?;
+    let directory = tempfile::tempdir()?;
+    let marker = directory.path().join("consumed");
+    let quote = |value: &std::path::Path| {
+        format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
+    };
+    let source = format!(
+        "test ! -e {0} || exit 1; touch {0}; cat {1}",
+        quote(&marker),
+        quote(&ledger.secret)
+    );
+    let mut command = clean_command();
+    command
+        .arg("--db")
+        .arg(&ledger.path)
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("BEANKEEPER_PASSPHRASE_CMD", source);
+    let mut server = Server::launch(command)?;
+    assert!(marker.exists());
+    std::fs::remove_file(&ledger.secret)?;
+    server.pair()?;
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/accounts", server.base))
+            .send()?
+            .status(),
+        200
+    );
+    server.initialize(Some(token(&ledger.reader)?))?;
+    assert!(rpc(server.request("tools/list", json!({}), Some(token(&ledger.reader)?))?)?["result"]["tools"].is_array());
+    Ok(())
+}
+
+#[test]
+fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> TestResult {
+    use beankeeper_cli::db::{self, ConflictStrategy, PostEntryParams, PostTransactionParams};
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    db::create_company(db.conn(), "other", "Other Books", None)?;
+    db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
+    db::create_account(db.conn(), "acme", "4000", "Sales", "revenue", None)?;
+    let actor =
+        Actor::new("owner").with_identity(identity::verify(db.conn(), token(&ledger.writer)?)?);
+    let entries = [
+        PostEntryParams {
+            account_code: "1000".into(),
+            direction: "debit".into(),
+            amount: 2500,
+            memo: None,
+            tax_category: None,
+        },
+        PostEntryParams {
+            account_code: "4000".into(),
+            direction: "credit".into(),
+            amount: 2500,
+            memo: None,
+            tax_category: None,
+        },
+    ];
+    let db::PostResult::Created(id) = db::post_transaction(
+        db.conn(),
+        &PostTransactionParams {
+            company_slug: "acme",
+            description: "Coffee <shop>",
+            metadata: Some("{\"source\":\"fixture\"}"),
+            currency: "USD",
+            date: "2026-11-20",
+            entries: &entries,
+            correlate: None,
+            reference: Some("inv&1"),
+            on_conflict: ConflictStrategy::Error,
+            actor: &actor,
+        },
+    )?
+    else {
+        return Err("transaction was not created".into());
+    };
+    drop(db);
+    let mut server = Server::start(&ledger, &["--company", "other", "serve"], None)?;
+    server.pair()?;
+    let default = server
+        .client
+        .get(format!("{}/", server.base))
+        .send()?
+        .text()?;
+    assert!(default.contains("value=\"other\" selected"));
+    assert!(!default.contains("Coffee &lt;shop&gt;"));
+    let url = format!(
+        "{}/transactions?company=acme&account=1000&from=2026-11-20&to=2026-11-20&min_amount=2500&max_amount=2500&status=uncleared&search=inv%261",
+        server.base
+    );
+    let html = server.client.get(&url).send()?.error_for_status()?.text()?;
+    assert!(html.contains("Coffee &lt;shop&gt;"));
+    assert!(html.contains(&format!("/transactions/{id}?company=acme")));
+    assert_eq!(html, server.client.get(&url).send()?.text()?);
+    let detail = server
+        .client
+        .get(format!("{}/transactions/{id}?company=acme", server.base))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    for content in [
+        "Entries",
+        "fixture",
+        "Audit trail",
+        "agent://",
+        ledger.writer["token_jti"].as_str().ok_or("jti")?,
+    ] {
+        assert!(detail.contains(content), "{content}");
+    }
+    assert!(!detail.contains(token(&ledger.writer)?));
+    assert!(!detail.contains("<shop>"));
+    let dashboard = server
+        .client
+        .get(format!("{}/?company=acme", server.base))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(dashboard.contains("2500"));
+    Ok(())
+}
