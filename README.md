@@ -2,9 +2,8 @@
 
 Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
-initial preview includes a running-status page and placeholders for transactions,
-reports and human review. Browser pairing and agent associations protect the
-workspace; live views and browser approvals come later.
+preview shows your dashboard, accounts and transactions, with read-only ledger
+views. Live agent navigation and browser approvals come later.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -27,7 +26,8 @@ cargo build --release --locked
 One process serves the embedded UI at `http://127.0.0.1:8750/` and Streamable HTTP
 MCP at `http://127.0.0.1:8750/mcp`. No external asset directory or Node.js is
 needed at runtime or build time. Direct links to `/transactions`, `/reports`,
-and `/review` work after pairing. Unknown URLs return 404.
+`/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, and `/review` work after pairing.
+Unknown URLs return 404.
 
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
@@ -35,6 +35,9 @@ prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
 `bk mcp serve` for stdio and `bk mcp serve --http` for MCP-only HTTP. Desktop
 extends upstream's command parser and delegates those commands to its dispatcher.
 Use `bk --help` or `bk serve --help` for options.
+Encrypted Desktop startup uses an in-memory passphrase pipe and currently requires
+Unix; [beankeeper#109](https://github.com/Govcraft/beankeeper/issues/109) tracks a
+resolved-secret router factory for other platforms.
 
 ```sh
 bk --db /path/to/books.db serve --bind 127.0.0.1:8751 --read-only
@@ -97,6 +100,46 @@ default `127.0.0.1` bind (or `[::1]` for IPv6). Other loopback aliases are
 rejected because they are outside the UI Host allowlist. A wildcard listener accepts local
 connections; a specific remote-interface listener needs a client supplying an
 allowed Host and network access to that interface.
+
+## Browse your books
+
+To try the views with fictional data, initialize a separate demo ledger:
+
+```sh
+bk init --demo --path ./desktop-demo.db
+bk --db ./desktop-demo.db serve
+```
+
+After starting `bk serve`, open its one-time pairing URL as described above.
+Every ledger page, including reports and review placeholders, requires D3's
+paired human session. Agent credentials cannot unlock browser views, and browser
+cookies cannot authorize MCP. Health and CSS remain public and data-free behind
+Host/Origin checks. After pairing, reopen a saved view URL to restore its filters.
+
+- **Dashboard** (`/`): company balances and recent activity, with links to
+  accounts and the register. Multi-currency books require a currency selection.
+- **Accounts** (`/accounts?company=acme`): all accounts for the selected company,
+  grouped by account type, with links to each account's register.
+- **Register** (`/transactions?company=acme`): filter by account, inclusive date
+  range, amount bounds in integer minor units, payee/reference text and clearance
+  status. Filters stay in the URL and restore on reload.
+- **Detail** (`/transactions/ID?company=acme`): entries, metadata and audit history,
+  including agent identity and token ID when the ledger records them.
+
+Choose a company in each view. Without a URL company filter, `--company` or
+`BEANKEEPER_COMPANY` supplies the default; otherwise the first listed company is
+selected visibly. No company data is combined silently. These pages never edit
+the ledger. Ask your agent to prepare changes; reports and proposal review
+remain placeholders for later issues.
+
+Register pages show at most 50 matches. Search and clearance use bounded scans
+of existing upstream transaction queries, so a page can have fewer matches while
+more source transactions remain. Follow **Continue** until the register reports
+completion. Pagination links preserve all filters; changing filters restarts
+from the beginning. Page counts and scan/truncation notices describe the source
+query rather than claiming an exact post-filter match count. Audit history also
+signals truncation. An empty ledger, no matching transactions, invalid filters,
+missing records and read failures have explicit states.
 
 ## Development checks
 

@@ -63,6 +63,7 @@ pub fn ledger_options(matches: &ArgMatches) -> Result<Cli, clap::Error> {
     if let Some(path) = matches.get_one::<PathBuf>("db") {
         cli.db.clone_from(path);
     }
+    cli.company = matches.get_one("company").cloned();
     cli.passphrase = PassphraseOptions::from_arg_matches(matches)?;
     cli.agent_token = matches.get_one("agent_token").cloned();
     Ok(cli)

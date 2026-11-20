@@ -6,6 +6,7 @@ pub mod cli;
 pub mod pairing;
 pub mod server;
 mod ui;
+mod views;
 
 use std::{error::Error, fmt, io, net::SocketAddr};
 
