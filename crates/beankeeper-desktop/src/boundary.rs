@@ -81,7 +81,9 @@ pub(crate) async fn guard(
         ),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        ("referrer-policy", "no-referrer"),
+        // Preserve Origin on same-origin HTML form POSTs; no-referrer
+        // makes browsers send Origin: null, which this boundary rejects.
+        ("referrer-policy", "same-origin"),
         ("cross-origin-resource-policy", "same-origin"),
         ("cache-control", "no-store"),
     ] {

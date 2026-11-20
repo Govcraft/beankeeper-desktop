@@ -111,12 +111,16 @@ impl Server {
         fallback: Option<&str>,
         bind: &str,
     ) -> TestResult<Self> {
-        let cwd = tempfile::tempdir()?;
         let mut command = ledger.command();
         command.args(args).args(["--bind", bind]);
         if let Some(token) = fallback {
             command.env("BK_AGENT_TOKEN", token);
         }
+        Self::launch(command)
+    }
+
+    pub fn launch(mut command: Command) -> TestResult<Self> {
+        let cwd = tempfile::tempdir()?;
         let child = command
             .current_dir(cwd.path())
             .stdin(Stdio::null())

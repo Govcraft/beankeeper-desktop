@@ -21,7 +21,8 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
     // Startup consumes the passphrase once. Requests no longer need the file.
     std::fs::remove_file(&ledger.secret)?;
     for (path, heading) in [
-        ("/", "Beankeeper is running"),
+        ("/", "Dashboard"),
+        ("/accounts", "Accounts"),
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),
         ("/review", "Review queue"),
@@ -105,7 +106,7 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
 #[test]
 fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult {
     let ledger = Ledger::new()?;
-    let server = Server::start(&ledger, &["serve"], None)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
     let authority = server.base.trim_start_matches("http://");
     for path in [
         "/",

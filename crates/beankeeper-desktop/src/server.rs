@@ -5,8 +5,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use axum::{Router, middleware};
 use beankeeper_cli::{
     cli::Cli,
+    db::Db,
+    passphrase::resolve_passphrase,
     mcp::{StreamableHttpServerConfig, http_router},
 };
+use clap::Parser;
 use secrecy::ExposeSecret;
 
 use crate::{
@@ -65,18 +68,79 @@ pub fn application(
         .with_allowed_hosts(boundary.authorities())
         .with_allowed_origins(boundary.origins())
         .enforce_origin_validation();
+    let passphrase = resolve_passphrase(
+        cli.passphrase.passphrase_fd,
+        cli.passphrase.passphrase_file.as_deref(),
+        false,
+    )?;
+    let mcp = ledger_router(cli, read_only, config, passphrase.as_ref())?;
+    let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
+    drop(passphrase);
     let fallback = cli
         .agent_token
         .as_ref()
         .map(|token| AgentKey::from_verified_token(token.expose_secret()));
-    let mcp = http_router(cli, read_only, config)?.layer(middleware::from_fn_with_state(
+    let mcp = mcp.layer(middleware::from_fn_with_state(
         (pairing.clone(), fallback),
         pairing::mcp_guard,
     ));
-    Ok(ui::router(pairing.clone())
+    Ok(ui::router(db, cli.company.clone(), pairing.clone())
         .merge(pairing::router(pairing))
         .merge(mcp)
         .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
+}
+
+// The upstream factory resolves a source itself. Feed the already-resolved
+// secret through an anonymous pipe so one-shot commands and FDs run only once.
+fn ledger_router(
+    cli: &Cli,
+    read_only: bool,
+    config: StreamableHttpServerConfig,
+    passphrase: Option<&secrecy::SecretString>,
+) -> Result<Router, DesktopError> {
+    let Some(passphrase) = passphrase else {
+        return Ok(http_router(cli, read_only, config)?);
+    };
+    let mut options = Cli::try_parse_from(["bk", "mcp", "serve"])
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    options.db.clone_from(&cli.db);
+    options.agent_token.clone_from(&cli.agent_token);
+    router_with_passphrase(&mut options, read_only, config, passphrase)
+}
+
+#[cfg(unix)]
+fn router_with_passphrase(
+    options: &mut Cli,
+    read_only: bool,
+    config: StreamableHttpServerConfig,
+    passphrase: &secrecy::SecretString,
+) -> Result<Router, DesktopError> {
+    use std::{io::Write, os::fd::AsRawFd};
+
+    let (reader, mut writer) = std::io::pipe()?;
+    options.passphrase.passphrase_fd = Some(reader.as_raw_fd());
+    std::thread::scope(|scope| {
+        let writing = scope.spawn(move || writer.write_all(passphrase.expose_secret().as_bytes()));
+        let router = http_router(options, read_only, config);
+        drop(reader);
+        writing
+            .join()
+            .map_err(|_| std::io::Error::other("passphrase pipe writer failed"))??;
+        Ok(router?)
+    })
+}
+
+#[cfg(not(unix))]
+fn router_with_passphrase(
+    _options: &mut Cli,
+    _read_only: bool,
+    _config: StreamableHttpServerConfig,
+    _passphrase: &secrecy::SecretString,
+) -> Result<Router, DesktopError> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "encrypted Desktop ledgers require Unix passphrase FDs until the upstream router accepts a resolved secret",
+    ).into())
 }
 
 /// Run the combined listener until Ctrl-C, then cancel MCP and drain HTTP.

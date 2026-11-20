@@ -8,6 +8,10 @@
   session cookies, CSRF/Origin checks, and browser unpairing and additional links.
 - Agent association invites issued only after successful upstream MCP
   authentication, with human confirmation and routing APIs for D4 navigation.
+- Read-only dashboard, company-scoped accounts, filterable transaction register
+  and transaction details with entries, metadata, audit and agent identity.
+- Stable view URLs, bounded register pagination, explicit empty/error states and
+  D3 paired human sessions on every ledger page. No schema changes.
 
 - Cargo workspace for the source-available Desktop `bk` binary, with stable
   format/lint/test CI and a Rust 1.91 compatibility check.

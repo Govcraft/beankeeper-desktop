@@ -27,3 +27,28 @@ form { margin-top: 1rem; }
 button { font: inherit; color: #fff; background: #244e40; border: 1px solid #244e40; border-radius: .35rem; padding: .6rem 1rem; cursor: pointer; }
 button:hover { background: #17392d; }
 main a { overflow-wrap: anywhere; }
+/* Ledger views keep the paper-and-ink palette, with dense, readable figures. */
+main { width: 100%; max-width: 90rem; min-width: 0; }
+form { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 1.25rem 0; }
+label { display: flex; flex-direction: column; gap: .35rem; font-size: .9rem; font-weight: 600; }
+input, select, button { font: inherit; line-height: 1.4; border: 1px solid #658273; border-radius: .25rem; padding: .6rem .75rem; max-width: 100%; }
+input, select { background: #fffef9; color: #203c34; }
+button { cursor: pointer; background: #244e40; color: white; font-weight: 650; }
+button:hover { background: #173e30; }
+table { border-collapse: collapse; width: 100%; background: #fffef9; font-size: .95rem; }
+caption { text-align: left; font-weight: 700; margin: .75rem 0; }
+th, td { text-align: left; vertical-align: top; border-bottom: 1px solid #c6cec5; padding: .8rem; overflow-wrap: anywhere; }
+th { background: #e7ebe1; font-weight: 650; }
+tbody tr:hover { background: #f1f3eb; }
+td.amount, .amount, .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.table-wrap, .table-scroll { overflow-x: auto; margin: 1.5rem 0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+code { overflow-wrap: anywhere; }
+.accounts-tree, .accounts-tree ul { padding-left: 1.5rem; }
+.accounts-tree li { margin: .5rem 0; }
+.metrics, .summary { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+dl { display: grid; grid-template-columns: minmax(7rem, auto) 1fr; gap: .5rem 1.5rem; }
+dt { font-weight: 650; }
+dd { margin: 0; overflow-wrap: anywhere; }
+.pagination { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.5rem 0; }
+@media (max-width: 640px) { th, td { padding: .6rem; } dl { grid-template-columns: 1fr; } form label { width: 100%; } }
