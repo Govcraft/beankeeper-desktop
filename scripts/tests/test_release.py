@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +75,17 @@ class PackagingTests(unittest.TestCase):
                 self.assertEqual(payload.getmember("usr/bin/bk").uid, 0)
             if shutil.which("dpkg-deb"):
                 subprocess.run(["dpkg-deb", "--info", str(package)], check=True, capture_output=True)
+
+    def test_macos_installer_root_contains_binary_and_license(self):
+        target = "aarch64-apple-darwin"
+        directory = release.stage(self.binary, "0.1.0", target, self.root / "work")
+        with patch.object(release.subprocess, "run") as run:
+            release.installer(directory, "0.1.0", target, self.output)
+        arguments = run.call_args.args[0]
+        root = Path(arguments[arguments.index("--root") + 1])
+        self.assertEqual((root / "usr/local/bin/bk").read_bytes(), self.binary.read_bytes())
+        self.assertEqual((root / "usr/local/share/doc/beankeeper-desktop/LICENSE.md").read_bytes(),
+                         (ROOT / "LICENSE.md").read_bytes())
 
     def test_checksums_cover_every_final_asset_and_exclude_bundles(self):
         for suffix in ("tar.gz", "deb", "pkg", "exe", "zip"):

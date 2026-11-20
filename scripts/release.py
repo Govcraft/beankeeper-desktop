@@ -104,6 +104,10 @@ def installer(directory, release_version, target, output):
         root = directory.parent / f"pkg-root-{target}"
         (root / "usr/local/bin").mkdir(parents=True, exist_ok=True)
         shutil.copy2(directory / "bk", root / "usr/local/bin/bk")
+        documents = root / "usr/local/share/doc/beankeeper-desktop"
+        documents.mkdir(parents=True, exist_ok=True)
+        for document in ("README.md", "LICENSE.md"):
+            shutil.copy2(directory / document, documents / document)
         subprocess.run(["pkgbuild", "--root", str(root), "--identifier",
                         "ai.govcraft.beankeeper-desktop", "--version", release_version,
                         "--install-location", "/", str(output / f"{stem}.pkg")], check=True)

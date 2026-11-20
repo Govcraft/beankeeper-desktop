@@ -32,6 +32,8 @@ codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$A
 codesign --verify --strict --verbose=2 "$stage/bk"
 mkdir -p "$temporary/root/usr/local/bin"
 cp "$stage/bk" "$temporary/root/usr/local/bin/bk"
+mkdir -p "$temporary/root/usr/local/share/doc/beankeeper-desktop"
+cp "$stage/README.md" "$stage/LICENSE.md" "$temporary/root/usr/local/share/doc/beankeeper-desktop/"
 pkgbuild --root "$temporary/root" --identifier ai.govcraft.beankeeper-desktop --version "$version" --install-location / "$temporary/unsigned.pkg"
 productsign --keychain "$keychain" --sign "$APPLE_INSTALLER_IDENTITY" "$temporary/unsigned.pkg" "$temporary/signed.pkg"
 xcrun notarytool submit "$temporary/signed.pkg" --key "$temporary/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER" --wait
