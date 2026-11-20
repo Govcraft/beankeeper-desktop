@@ -23,7 +23,6 @@ use beankeeper_cli::{
     error::CliError,
     identity::{self, IssueRequest},
 };
-use mti::prelude::*;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -84,12 +83,12 @@ pub(crate) fn router(
     pairing: PairingState,
 ) -> Result<Router, CliError> {
     let human_token = if db::policy::get(db.conn())?.enforce {
-        let name = "human".create_type_id::<V7>().to_string();
         let issued = identity::issue(
             db.conn(),
             &Actor::new("desktop-local-human"),
             &IssueRequest {
-                name: &name,
+                // Upstream generates a unique TypeID from this name prefix.
+                name: "desktop_human",
                 capabilities: &["ledger/read".into(), "ledger/approve".into()],
                 ttl: Duration::from_secs(12 * 60 * 60),
                 public_key: None,
@@ -234,6 +233,8 @@ async fn resolve(state: ReviewState, id: String, form: Decision, approve: bool) 
                 "a proposer cannot approve or reject as the local human".into(),
             ));
         }
+        // A failed fresh check must not leave an older intact result visible.
+        review.verification = None;
         // Full verification and resolution share one upstream savepoint.
         db::audit::atomically(review.db.conn(), || {
             verify::execute_json(&review.db)?;
@@ -317,55 +318,67 @@ fn render(
             escape(selected.unwrap_or_default())
         );
     }
-    if let Some(company) = selected {
-        if !companies.iter().any(|item| item.slug == company) {
-            return Err(CliError::NotFound("company not found".into()));
-        }
-        html.push_str(
-            "<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">",
-        );
-        for item in &companies {
-            let _ = write!(
-                html,
-                "<option value=\"{}\"{}>{} ({})</option>",
-                escape(&item.slug),
-                if item.slug == company {
-                    " selected"
-                } else {
-                    ""
-                },
-                escape(&item.name),
-                escape(&item.slug)
-            );
-        }
-        html.push_str("</select></label><button type=\"submit\">Show queue</button></form>");
-        if let Some(id) = id {
-            let id: ProposalId = id
-                .parse()
-                .map_err(|_| CliError::NotFound("proposal not found".into()))?;
-            let proposal = proposals::get(review.db.conn(), company, id.as_str())?;
-            proposal_detail(review, &proposal, session, &mut html)?;
-        } else {
-            let pending = proposals::list(review.db.conn(), company, &actor, false)?;
-            html.push_str("<section><h2>Pending proposals</h2>");
-            if pending.is_empty() {
-                html.push_str("<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>");
+    let panel_length = html.len();
+    let result = (|| -> Result<(), CliError> {
+        if let Some(company) = selected {
+            if !companies.iter().any(|item| item.slug == company) {
+                return Err(CliError::NotFound("company not found".into()));
             }
-            for proposal in &pending {
+            html.push_str(
+                "<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">",
+            );
+            for item in &companies {
                 let _ = write!(
                     html,
-                    "<article><h3><a href=\"/review/{}?company={}\">{}</a></h3>",
-                    proposal.id,
-                    encode(company),
-                    escape(&proposal.payload.description)
+                    "<option value=\"{}\"{}>{} ({})</option>",
+                    escape(&item.slug),
+                    if item.slug == company {
+                        " selected"
+                    } else {
+                        ""
+                    },
+                    escape(&item.name),
+                    escape(&item.slug)
                 );
-                summary(review, proposal, &mut html)?;
-                html.push_str("</article>");
             }
-            html.push_str("</section>");
+            html.push_str("</select></label><button type=\"submit\">Show queue</button></form>");
+            if let Some(id) = id {
+                let id: ProposalId = id
+                    .parse()
+                    .map_err(|_| CliError::NotFound("proposal not found".into()))?;
+                let proposal = proposals::get(review.db.conn(), company, id.as_str())?;
+                proposal_detail(review, &proposal, session, &mut html)?;
+            } else {
+                let pending = proposals::list(review.db.conn(), company, &actor, false)?;
+                html.push_str("<section><h2>Pending proposals</h2>");
+                if pending.is_empty() {
+                    html.push_str("<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>");
+                }
+                for proposal in &pending {
+                    let _ = write!(
+                        html,
+                        "<article><h3><a href=\"/review/{}?company={}\">{}</a></h3>",
+                        proposal.id,
+                        encode(company),
+                        escape(&proposal.payload.description)
+                    );
+                    summary(review, proposal, &mut html)?;
+                    html.push_str("</article>");
+                }
+                html.push_str("</section>");
+            }
+        } else {
+            html.push_str("<p>No companies yet. Ask your agent to create your books.</p>");
         }
-    } else {
-        html.push_str("<p>No companies yet. Ask your agent to create your books.</p>");
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if matches!(error, CliError::NotFound(_) | CliError::Validation(_)) {
+            return Err(error);
+        }
+        eprintln!("Browser proposal data failed: {error}");
+        html.truncate(panel_length);
+        html.push_str("<section><h2>Proposal data unavailable</h2><p>The ledger could not supply trustworthy proposal data. Review the verification result above, then check the server log and repair the ledger before deciding.</p></section>");
     }
     html.push_str(&ui::session_controls(session));
     Ok(ui::page(
