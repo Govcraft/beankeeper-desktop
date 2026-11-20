@@ -33,6 +33,13 @@ installer in `%LOCALAPPDATA%\Programs\Beankeeper Desktop`, with an uninstaller.
 The installer does not change PATH. Windows ARM64 is not yet supported.
 Installers do not start a server, register services or access accounting data.
 
+Desktop main currently uses Unix passphrase FDs for encrypted startup. Windows
+packages build and include the CLI/UI host, but encrypted `bk serve` remains
+unsupported by this Desktop integration. Upstream added a resolved-passphrase
+router factory in [beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111),
+closing #109; Desktop has not yet integrated it. Packaging does not change that
+boundary. See [the frontend integration notes](frontend.md).
+
 `checksums-sha256.txt` contains every final archive and installer. The tag-release
 job uses the existing [D13 approach](https://github.com/Govcraft/beankeeper/pull/108):
 `cosign sign-blob` creates `ARTIFACT.sigstore` for every asset and the checksum

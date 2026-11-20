@@ -54,9 +54,10 @@ All upstream CLI commands remain available, including
 extends upstream's command parser and delegates those commands to its dispatcher.
 Use `bk --help` or `bk serve --help` for options.
 The MCP router receives the resolved passphrase through an in-memory pipe.
-Encrypted Desktop startup currently requires Unix;
-[beankeeper#109](https://github.com/Govcraft/beankeeper/issues/109) tracks a
-resolved-secret router factory for other platforms.
+Encrypted Desktop startup currently requires Unix because Desktop still uses
+this pipe bridge. Upstream added a resolved-passphrase router factory in
+[beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111), closing #109;
+Desktop has not yet integrated it.
 
 ```sh
 bk --db /path/to/books.db serve --bind 127.0.0.1:8751 --read-only
