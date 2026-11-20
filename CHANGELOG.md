@@ -4,6 +4,13 @@
 
 ### Added
 
+- Company-scoped browser review queue and proposal deep links with complete
+  posting details, proposer identity and current spend caps. Paired, CSRF/Origin
+  protected human approval and rejection use upstream atomic audited operations.
+- Full `bk verify` status with check time and explicit recheck, plus fresh
+  verification before decisions. Enforced ledgers use an ephemeral server-only
+  local-human identity; incoming agent credentials never authorize browser review.
+
 - Per-launch, expiring, single-use browser pairing links, host-bound human
   session cookies, CSRF/Origin checks, and browser unpairing and additional links.
 - Agent association invites issued only after successful upstream MCP

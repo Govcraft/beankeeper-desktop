@@ -33,7 +33,7 @@ current-page indicator. Only authenticated HTML responses contain ledger data.
 All ledger values are escaped as text or encoded into local links. Authenticated
 pages retain D3 session controls and session-bound CSRF fields. The public pairing
 screen contains no ledger data, session cookie or agent credentials. There are
-no external fonts, analytics, third-party assets or proposal controls.
+no external fonts, analytics, third-party assets. Proposal controls use protected HTML forms.
 See [browser pairing](browser-pairing.md).
 
 If future views need an asset bundler, adopt a small TypeScript/Vite build with
@@ -51,7 +51,8 @@ connection and credential enforcement on the same listener.
 
 At startup Desktop resolves the original passphrase source once, supplies the
 same secret to upstream's router factory through an anonymous in-memory pipe FD
-(`passphrase_fd`), and opens the read-only snapshot. A scoped writer runs while
+(`passphrase_fd`), and opens the read-only snapshot plus a separate upstream
+connection for browser review. A scoped writer runs while
 the factory reads the pipe, so secrets larger than the pipe buffer cannot block
 startup. Both pipe ends close before serving; the resolved secret is never
 written to a temporary file. This preserves one-shot passphrase FDs and commands
@@ -76,3 +77,30 @@ isolation.
 Renderer tests seed accounts and posted transactions using upstream APIs and
 cover dashboard, complete account lists, filters, source-cursor pagination,
 transaction metadata, audit and agent identity, and company isolation.
+
+## Browser review
+
+D7 adds `/review`, `/review/{id}`, POST `/review/{id}/approve`, POST
+`/review/{id}/reject`, and POST `/review/verify`. All inherit D3's human guard;
+reads reject bearer headers, and writes additionally require Origin and CSRF.
+Review uses upstream proposal queries and atomic audited resolutions without
+custom mutation SQL. Full verification and resolution run in the same savepoint.
+The read-only core view connection stays separate. Review pages read one SQLite
+snapshot on a blocking worker.
+
+Enforced ledgers require a verified approval identity. Desktop issues one unique
+12-hour, read/approve-only identity per server launch from the local trust root,
+keeps its token in memory, and verifies it again for each review operation. The
+actor name is `desktop-local-human`; request bearer tokens, MCP fallback tokens
+and offline owner-token files never supply that authority. Identity issuance is
+audited. The browser guard is the human authorization boundary. Policy-disabled
+ledgers use the same actor name without a token. `--read-only` remains an MCP
+tool ceiling, independent of human decisions. No MCP approval handlers change.
+
+The queue labels spend caps as current and uses the posting description as its
+purpose because upstream stores no separate proposal rationale. It offers reject
+rather than withdraw, which belongs to the proposer. Resolved detail URLs persist
+for receipt/reload. The verification panel caches its last complete `bk verify`
+result in memory, provides a protected explicit recheck, and invalidates after a
+browser decision. External writes require a recheck; decisions always verify
+fresh regardless of this cache.
