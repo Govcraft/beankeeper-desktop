@@ -4,6 +4,7 @@ pub mod boundary;
 pub mod bridge;
 pub mod browser;
 pub mod cli;
+pub mod license;
 pub mod pairing;
 pub mod reports;
 mod review;

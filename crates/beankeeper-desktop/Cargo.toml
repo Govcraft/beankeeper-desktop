@@ -16,20 +16,27 @@ workspace = true
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "query", "tokio"] }
+base64 = "0.23.1"
 beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", branch = "main", version = "0.26.1" }
+chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
+ed25519-dalek = "3.0.0"
+flate2 = "1.1.11"
 getrandom = { version = "0.4.3", features = ["std"] }
 keyring = "4.2.0"
 mti = "1.1.2"
 open = "5.4.5"
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 secrecy = "0.10.3"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+tar = "0.4.46"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "signal", "time", "macros"] }
 toml_edit = "0.25.19"
+zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
@@ -38,4 +45,5 @@ serde_json = "1.0.154"
 tempfile = "3.27.0"
 
 [target."cfg(windows)".dependencies]
+self-replace = "1.5.1"
 windows-permissions = "0.2.4"
