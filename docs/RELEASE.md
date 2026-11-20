@@ -1,0 +1,174 @@
+# Desktop release packaging
+
+The release workflow builds the Desktop `bk` binary, including its embedded UI,
+from this repository and the upstream revision pinned by `Cargo.lock`. It does
+not publish crates, modify ledgers or run schema migrations. Apple Developer
+Program and Azure Artifact Signing accounts are **pending Roland's setup**.
+Paid signing hooks are disabled by default. No production credentials are
+required to build or merge this work.
+
+## Artifacts and versions
+
+Desktop uses its own workspace version, currently `0.1.0`, rather than upstream's
+CLI version. Keep the upstream tag convention `beankeeper-cli-vVERSION` and
+archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
+can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
+A tag must exactly match `[workspace.package].version` in `Cargo.toml`.
+Prerelease version strings are not yet supported by the installer packaging.
+
+| Target | Assets |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | `bk-VERSION-x86_64-unknown-linux-gnu.tar.gz`, `bk-VERSION-x86_64-unknown-linux-gnu.deb` |
+| `aarch64-unknown-linux-gnu` | `bk-VERSION-aarch64-unknown-linux-gnu.tar.gz`, `bk-VERSION-aarch64-unknown-linux-gnu.deb` |
+| `x86_64-apple-darwin` | `bk-VERSION-x86_64-apple-darwin.tar.gz`, `bk-VERSION-x86_64-apple-darwin.pkg` |
+| `aarch64-apple-darwin` | `bk-VERSION-aarch64-apple-darwin.tar.gz`, `bk-VERSION-aarch64-apple-darwin.pkg` |
+| `x86_64-pc-windows-msvc` | `bk-VERSION-x86_64-pc-windows-msvc.zip`, `bk-VERSION-x86_64-pc-windows-msvc-setup.exe` |
+
+Linux binaries are built natively on Ubuntu 24.04 (glibc 2.39 or newer). Debian
+packages use `amd64` / `arm64`, install `/usr/bin/bk`, and conflict with the
+upstream CLI packages that own that path. macOS packages are architecture
+specific, install `/usr/local/bin/bk`, and replace an existing binary at that
+path. Windows uses Inno Setup 6 on the Windows runner to create an x64, per-user
+installer in `%LOCALAPPDATA%\Programs\Beankeeper Desktop`, with an uninstaller.
+The installer does not change PATH. Windows ARM64 is not yet supported.
+Installers do not start a server, register services or access accounting data.
+
+`checksums-sha256.txt` contains every final archive and installer. The tag-release
+job uses the existing [D13 approach](https://github.com/Govcraft/beankeeper/pull/108):
+`cosign sign-blob` creates `ARTIFACT.sigstore` for every asset and the checksum
+manifest, and `actions/attest-build-provenance` attests all those same files.
+OS signing and stapling finish **before** archives, hashes, bundles and provenance
+are produced. Sigstore bundles do not go into the checksum manifest themselves.
+
+## Dry runs without credentials
+
+PRs touching packaging run the release build matrix automatically. All paid
+signing and publication are disabled for PRs and manual runs. Alternatively,
+after this workflow is on main, run from GitHub Actions, or:
+
+```sh
+gh workflow run release.yml --ref main
+```
+
+This builds all OS archives and installers, validates Linux `.deb` files using
+`dpkg-deb`, inspects macOS package payloads, and silently installs the Windows
+EXE into a runner temporary directory. It also runs the offline installer tests.
+Download the `release-assets` workflow artifact for all packages and the checksum
+manifest. A dry run creates no GitHub Release, Sigstore signatures, attestations
+or release tags. It requires no signing secrets.
+
+A local Linux packaging smoke test, from the repository root:
+
+```sh
+cargo build --release --locked
+python3 scripts/release.py stage --target x86_64-unknown-linux-gnu --binary target/release/bk
+python3 scripts/release.py installer --target x86_64-unknown-linux-gnu
+python3 scripts/release.py archive --target x86_64-unknown-linux-gnu
+python3 scripts/release.py checksums
+dpkg-deb --info dist/bk-0.1.0-x86_64-unknown-linux-gnu.deb
+(cd dist && sha256sum --check checksums-sha256.txt)
+python3 -B -m unittest discover -s scripts/tests -v
+```
+
+Use `aarch64-unknown-linux-gnu` on native ARM Linux. If `CARGO_TARGET_DIR` is set,
+pass its binary path to `--binary`. Python 3.11+ is required; packaging uses only
+the standard library. Native `.pkg` creation additionally needs Xcode command
+line tools; Windows EXE creation needs Inno Setup 6. No Node toolchain is used.
+
+Actual release publication is reserved for an authorized push of a matching
+`beankeeper-cli-vVERSION` tag. This implementation PR does not create such a tag.
+The tag job uses GitHub OIDC for Sigstore and provenance, without stored signing
+keys. Invalid tags fail preflight before any package builds or publication.
+
+## Optional Apple hook, disabled by default
+
+Set repository variable `ENABLE_APPLE_SIGNING=true` **only after** account setup
+and review of a real signing run. The hook runs only for tag pushes and requires
+all the following repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATES_P12_BASE64` | Base64 PKCS#12 export containing both Developer ID Application and Developer ID Installer certificates and their private keys |
+| `APPLE_CERTIFICATES_PASSWORD` | Password protecting that PKCS#12 export |
+| `APPLE_APPLICATION_IDENTITY` | Full Developer ID Application signing identity, including team ID |
+| `APPLE_INSTALLER_IDENTITY` | Full Developer ID Installer signing identity, including team ID |
+| `APPLE_NOTARY_KEY_BASE64` | Base64 App Store Connect notarization API `.p8` key |
+| `APPLE_NOTARY_KEY_ID` | Notarization API key ID |
+| `APPLE_NOTARY_ISSUER` | App Store Connect issuer ID for that key |
+
+`scripts/sign-macos.sh` imports the identities into a temporary keychain, signs
+`bk` with hardened runtime and a timestamp, rebuilds and signs the `.pkg`, submits
+it with `notarytool --wait`, then staples and validates the ticket. It removes
+the temporary keychain and key material on exit. See Apple's
+[Developer ID distribution guidance](https://developer.apple.com/developer-id/).
+
+If the opt-in variable is absent/false **or any secret is missing**, the script
+prints `Apple signing/notarization skipped` with the reason and keeps the
+unsigned package. No Apple tools or network calls are needed for the skip path.
+When explicitly enabled with complete credentials, signing/notarization errors
+fail the job, so a broken signing configuration cannot silently publish an
+apparently signed package.
+
+## Optional Azure hook, disabled by default
+
+Set repository variable `ENABLE_AZURE_SIGNING=true` only after the Artifact
+Signing account and certificate profile exist. The Windows job requires:
+
+| Secret | Value |
+| --- | --- |
+| `AZURE_TENANT_ID` | Microsoft Entra tenant ID |
+| `AZURE_CLIENT_ID` | Signing app registration client ID |
+| `AZURE_CLIENT_SECRET` | App registration secret |
+| `AZURE_SIGNING_ENDPOINT` | Regional Artifact Signing endpoint URL |
+| `AZURE_SIGNING_ACCOUNT` | Artifact Signing account name |
+| `AZURE_CERTIFICATE_PROFILE` | Public-trust certificate profile name |
+
+The app registration needs the Artifact Signing Certificate Profile Signer role.
+See the [official action](https://github.com/Azure/artifact-signing-action) and
+[account setup guide](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart).
+The hook signs `bk.exe` before ZIP/installer creation, then signs the finished
+setup EXE. With the opt-in disabled or incomplete credentials, logs say
+`Authenticode signing skipped` and both the ZIP and installer remain unsigned.
+An explicitly enabled signing attempt with complete credentials fails on errors.
+
+Sigstore proves release origin; it does not replace Apple notarization or
+Authenticode. Until paid signing is enabled, browser-downloaded packages may
+show Gatekeeper or SmartScreen warnings. Even signed Windows downloads can need
+time to establish reputation. Do not disable OS security checks automatically.
+
+## Checksum-verifying command-line installers
+
+`install.sh` retains upstream D13's verification behavior, adapted to the Desktop
+repository. `install.ps1` follows the same contract on x64 Windows (PowerShell
+5.1+). After a release is available:
+
+```sh
+# Download and inspect the script before running it.
+curl -fsSLO https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh
+BK_VERSION=0.1.0 BK_INSTALL="$HOME/.local/bin" sh install.sh
+```
+
+The shell install directory must already exist. Its default is `/usr/local/bin`
+and installation uses sudo when needed. On Windows, download `install.ps1`,
+inspect it, then use:
+
+```powershell
+./install.ps1 -Version 0.1.0 -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
+```
+
+Both scripts accept `BK_VERSION` (default: latest release) and `BK_INSTALL`.
+They always require a matching SHA-256 checksum before extracting or installing.
+If `cosign` is on PATH, they also verify the archive and manifest bundles with
+this exact certificate identity:
+
+```text
+https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-cli-vVERSION
+```
+
+The OIDC issuer must be `https://token.actions.githubusercontent.com`. A bundle
+HTTP 404 permits checksum-only verification for older unsigned releases and
+prints a warning. Missing cosign also warns and uses checksums. An invalid
+bundle, verification failure, or any other bundle download error stops installation.
+Checksum-only installation detects corruption but does not authenticate the
+release publisher. These scripts never change the user's execution policy or
+PATH, and do not start `bk serve`.

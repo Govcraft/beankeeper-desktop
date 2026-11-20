@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  push:
+    tags: ["beankeeper-cli-v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/**'
+      - 'packaging/**'
+      - 'install.sh'
+      - 'install.ps1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate version against tag (dispatch uses workspace version)
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ "$IS_TAG" == true ]]; then
+            version=$(python scripts/release.py version --tag "$RELEASE_TAG")
+          else
+            version=$(python scripts/release.py version)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: python -B -m unittest discover -s scripts/tests -v
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      # Always build unsigned on manual dry runs, even if accounts exist later.
+      ENABLE_APPLE_SIGNING: ${{ github.event_name == 'push' && vars.ENABLE_APPLE_SIGNING == 'true' }}
+      ENABLE_AZURE_SIGNING: ${{ github.event_name == 'push' && vars.ENABLE_AZURE_SIGNING == 'true' }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+      AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build Desktop binary and embedded UI
+        run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
+      - name: Stage binary and documents
+        run: |
+          binary="target/$TARGET/release/bk"
+          if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
+          python scripts/release.py stage --target "$TARGET" --binary "$binary"
+      - name: Detect optional Windows signing credentials
+        if: runner.os == 'Windows'
+        id: azure
+        run: |
+          enabled=false
+          if [[ "$ENABLE_AZURE_SIGNING" == true && -n "$AZURE_TENANT_ID" && -n "$AZURE_CLIENT_ID" && -n "$AZURE_CLIENT_SECRET" && -n "$AZURE_SIGNING_ENDPOINT" && -n "$AZURE_SIGNING_ACCOUNT" && -n "$AZURE_CERTIFICATE_PROFILE" ]]; then
+            enabled=true
+          else
+            echo 'Authenticode signing skipped: disabled or missing Azure credentials; account is pending. Keeping unsigned exe and installer.'
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+      - name: Sign Windows binary (disabled by default)
+        if: runner.os == 'Windows' && steps.azure.outputs.enabled == 'true'
+        uses: Azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ env.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}/staging/bk-${{ env.VERSION }}-${{ matrix.target }}
+          files-folder-filter: exe
+      - name: Smoke-test staged Desktop binary
+        run: |
+          binary="staging/bk-$VERSION-$TARGET/bk"
+          if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
+          test "$("$binary" --version)" = "bk $VERSION"
+          "$binary" serve --help
+      - name: Build OS installer
+        run: python scripts/release.py installer --target "$TARGET"
+      - name: Optional Apple signing, notarization and stapling
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATES_P12_BASE64: ${{ secrets.APPLE_CERTIFICATES_P12_BASE64 }}
+          APPLE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_CERTIFICATES_PASSWORD }}
+          APPLE_APPLICATION_IDENTITY: ${{ secrets.APPLE_APPLICATION_IDENTITY }}
+          APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: scripts/sign-macos.sh "staging/bk-$VERSION-$TARGET" "$VERSION" "dist/bk-$VERSION-$TARGET.pkg"
+      - name: Sign Windows installer (disabled by default)
+        if: runner.os == 'Windows' && steps.azure.outputs.enabled == 'true'
+        uses: Azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ env.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}/dist
+          files-folder-filter: exe
+      - name: Archive final binary
+        run: python scripts/release.py archive --target "$TARGET"
+      - name: Validate Linux package contents
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info "dist/bk-$VERSION-$TARGET.deb"
+          dpkg-deb --contents "dist/bk-$VERSION-$TARGET.deb"
+          mkdir unpacked
+          dpkg-deb --extract "dist/bk-$VERSION-$TARGET.deb" unpacked
+          test "$(unpacked/usr/bin/bk --version)" = "bk $VERSION"
+          unpacked/usr/bin/bk serve --help
+      - name: Inspect macOS installer payload
+        if: runner.os == 'macOS'
+        run: pkgutil --payload-files "dist/bk-$VERSION-$TARGET.pkg" | grep 'usr/local/bin/bk'
+      - name: Test Windows EXE installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'bk-installer-test'
+          $installer = Get-Item "dist/bk-$env:VERSION-$env:TARGET-setup.exe"
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$destination" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'EXE installer failed' }
+          $reported = & "$destination/bk.exe" --version
+          if ($LASTEXITCODE -ne 0 -or $reported -ne "bk $env:VERSION") { throw 'Installed binary failed' }
+      - name: Test Windows checksum installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/tests/install-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  collect:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bk-*
+          path: dist
+          merge-multiple: true
+      - name: Hash all final archives and installers
+        run: python scripts/release.py checksums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # workflow_dispatch builds/uploads unsigned artifacts only. Never publishes.
+    if: github.event_name == 'push'
+    needs: [preflight, collect]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release
+      # Same D13 approach as Govcraft/beankeeper#108: bundle per final artifact,
+      # including checksums, then attest precisely those bytes before upload.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign release artifacts with Sigstore
+        working-directory: release
+        run: |
+          for artifact in *; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore" "$artifact"
+          done
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.deb
+            release/*.pkg
+            release/*.zip
+            release/*.exe
+            release/checksums-sha256.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Beankeeper Desktop v${{ needs.preflight.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/*

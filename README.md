@@ -9,6 +9,16 @@ Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
 [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
 
+## Release packages
+
+The packaging workflow produces Linux tarballs and `.deb` files, macOS `.pkg`
+files for both architectures, and an x64 Windows ZIP and EXE installer. Paid OS
+signing is disabled while the Apple and Azure accounts are pending. Tag releases
+include SHA-256 checksums, Sigstore bundles and build provenance. The shell and
+PowerShell installers verify checksums and use Sigstore when cosign is available.
+See [release packaging and verification](docs/RELEASE.md) for artifact names,
+installation commands, unsigned dry runs and signing configuration.
+
 ## Build and run
 
 Requires Rust 1.91 or newer and the C build tools needed by upstream's bundled
