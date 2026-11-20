@@ -26,10 +26,12 @@ view URL.
 The released binary needs no adjacent `ui/` or `dist/` directory.
 
 The server owns explicit routes for `/`, `/accounts`, `/transactions`,
-`/transactions/{id}`, `/reports`, and `/review`, with real 404s for unknown paths.
+`/transactions/{id}`, `/reports`, `/reports/{id}`, `/reconciliation`, and `/review`,
+with real 404s for unknown paths.
 New Rust handlers or a future SPA can replace individual routes without changing the listener or MCP router.
 Each page uses a shared shell, accessible navigation, a skip link and a visible
-current-page indicator. Only authenticated HTML responses contain ledger data.
+current-page indicator. Only authenticated view and download responses contain
+ledger data.
 All ledger values are escaped as text or encoded into local links. Authenticated
 pages retain D3 session controls and session-bound CSRF fields. The public pairing
 screen contains no ledger data, session cookie or agent credentials. There are
@@ -62,7 +64,8 @@ Upstream added a resolved-passphrase router factory in
 [beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111), closing #109;
 Desktop has not yet integrated it.
 
-`/`, `/accounts`, `/transactions`, `/transactions/{id}`, `/reports` and `/review`
+`/`, `/accounts`, `/transactions`, `/transactions/{id}`, `/reports`,
+`/reports/{id}`, `/reconciliation` and `/review`
 all use D3's paired human-session middleware. The harness redeems the terminal's
 one-time pairing link and uses its host-bound cookie for saved view URLs.
 Agent bearer tokens never authorize browser pages, even alongside a valid human
@@ -105,3 +108,15 @@ for receipt/reload. The verification panel caches its last complete `bk verify`
 result in memory, provides a protected explicit recheck, and invalidates after a
 browser decision. External writes require a recheck; decisions always verify
 fresh regardless of this cache.
+
+## Reports and reconciliation
+
+D6 uses upstream `commands::report::execute_json` on the same read-only snapshot
+and blocking-worker boundary. HTML renders every payload field as escaped
+text, definition lists and tables, including nested reconciliation details. JSON
+downloads return the CLI envelope's `data` value. Tax CSV projects that payload
+into upstream's column order without repeating classification or arithmetic;
+integration tests compare its output with CLI CSV, including quoted payee names.
+No subprocess, temporary export file, browser JSON credentials or schema change
+is involved. The public `reports::VIEW_IDS` list and [URL reference](reports.md)
+provide the D4 integration contract. Reconciliation exposes no mutation path.
