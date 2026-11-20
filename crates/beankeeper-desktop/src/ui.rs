@@ -12,6 +12,7 @@ use beankeeper_cli::db::Db;
 
 use crate::{
     pairing::{self, PairingState, Session},
+    reports::{self, ReportQuery, ReportResponse},
     views::{self, ViewQuery},
 };
 
@@ -74,17 +75,9 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
         .route("/accounts", get(view))
         .route("/transactions", get(view))
         .route("/transactions/{id}", get(view))
-        .route(
-            "/reports",
-            get(|Extension(session): Extension<Session>| async move {
-                page(
-                    "Reports",
-                    "Financial reports will be available in a future update.",
-                    "/reports",
-                    &session_controls(&session),
-                )
-            }),
-        )
+        .route("/reports", get(report))
+        .route("/reports/{id}", get(report))
+        .route("/reconciliation", get(report))
         .with_state(ViewState {
             db: Arc::new(Mutex::new(db)),
             company,
@@ -99,6 +92,87 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
     )
     .route("/health", get(|| async { HEALTH }))
     .fallback(|| async { (StatusCode::NOT_FOUND, "Page not found") })
+}
+
+async fn report(
+    State(state): State<ViewState>,
+    Extension(session): Extension<Session>,
+    uri: Uri,
+    query: Result<Query<ReportQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let mut query = match query {
+        Ok(Query(query)) => query,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                page(
+                    "Invalid report filters",
+                    "Check the URL filters and try again.",
+                    "/reports",
+                    "<p><a href=\"/reports\">Choose a report</a></p>",
+                ),
+            )
+                .into_response();
+        }
+    };
+    if query.filters.company.is_none() {
+        query.filters.company = state.company;
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let db = state.db.lock().map_err(|_| ())?;
+        let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
+        Ok::<_, ()>(reports::render(&db, uri.path(), &query))
+    })
+    .await;
+    match result {
+        Ok(Ok(Ok(ReportResponse::Page(view)))) => page(
+            view.title,
+            view.description,
+            view.nav,
+            &format!("{}{}", view.content, session_controls(&session)),
+        )
+        .into_response(),
+        Ok(Ok(Ok(ReportResponse::Download {
+            body,
+            content_type,
+            filename,
+        }))) => (
+            [
+                (header::CONTENT_TYPE, content_type.to_owned()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{filename}\""),
+                ),
+            ],
+            body,
+        )
+            .into_response(),
+        Ok(Ok(Err(error))) => {
+            if error.status().is_server_error() {
+                eprintln!("Report view failed: {error:?}");
+            }
+            (
+                error.status(),
+                page(
+                    "Unable to display this report",
+                    &error.to_string(),
+                    "/reports",
+                    "<p><a href=\"/reports\">Choose a report</a> and check your filters.</p>",
+                ),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            page(
+                "Ledger unavailable",
+                "The ledger could not be read. Check the server terminal and try again.",
+                "/reports",
+                "",
+            ),
+        )
+            .into_response(),
+    }
 }
 
 async fn view(

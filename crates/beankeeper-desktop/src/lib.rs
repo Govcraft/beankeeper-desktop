@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod browser;
 pub mod cli;
 pub mod pairing;
+pub mod reports;
 mod review;
 pub mod server;
 pub mod setup;
