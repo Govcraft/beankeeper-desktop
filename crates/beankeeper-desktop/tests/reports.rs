@@ -209,9 +209,10 @@ fn rendered_scalars(value: &Value, html: &str) {
 #[test]
 fn every_report_matches_cli_json_and_url_filters_restore_the_rendered_results() -> TestResult {
     let ledger = fixture()?;
-    let before = fingerprint(&ledger.db()?)?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.pair()?;
+    // Startup audits the review identity; only report reads must be mutation-free.
+    let before = fingerprint(&ledger.db()?)?;
     let cases: &[(&str, &[&str])] = &[
         (
             "/reports/income-statement?from=2026-01-01&to=2026-03-31",
@@ -384,6 +385,54 @@ fn fingerprint(db: &Db) -> TestResult<(i64, i64, i64)> {
         db.conn()
             .query_row("SELECT count(*) FROM audit_log", [], |row| row.get(0))?,
     ))
+}
+
+#[test]
+fn reports_reconciliation_and_review_share_the_workspace_shell() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let destinations = [
+        ("/", "Dashboard"),
+        ("/accounts", "Accounts"),
+        ("/transactions", "Transactions"),
+        ("/reports", "Reports"),
+        ("/reconciliation", "Reconciliation"),
+        ("/review", "Review queue"),
+    ];
+    for (path, _) in destinations {
+        let html = server
+            .client
+            .get(format!("{}{path}", server.base))
+            .send()?
+            .error_for_status()?
+            .text()?;
+        let nav = html
+            .split_once("<nav aria-label=\"Workspace\">")
+            .and_then(|(_, rest)| rest.split_once("</nav>"))
+            .map(|(nav, _)| nav)
+            .ok_or("workspace navigation")?;
+        assert_eq!(nav.matches("aria-current=\"page\"").count(), 1, "{path}");
+        for (destination, label) in destinations {
+            let attribute = if destination == path {
+                "aria-current=\"page\""
+            } else {
+                "data-view"
+            };
+            assert!(
+                nav.contains(&format!(
+                    "<a href=\"{destination}\" {attribute}>{label}</a>"
+                )),
+                "{path}: {destination}"
+            );
+        }
+        if path == "/review" {
+            assert!(html.contains("Ledger verification"));
+            assert!(html.contains("action=\"/review/verify\""));
+            assert!(html.contains("No pending proposals"));
+        }
+    }
+    Ok(())
 }
 
 #[test]
