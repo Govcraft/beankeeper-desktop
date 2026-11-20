@@ -12,6 +12,10 @@
   and transaction details with entries, metadata, audit and agent identity.
 - Stable view URLs, bounded register pagination, explicit empty/error states and
   D3 paired human sessions on every ledger page. No schema changes.
+- `bk setup` for encrypted onboarding, native OS passphrase storage, private
+  recovery kits, least-privilege agent presets with spend limits, merged MCP
+  client configuration and local server/browser startup. Added a stdio-to-HTTP
+  `bk mcp bridge` and automatic stored-passphrase lookup for enrolled ledgers.
 - Cargo workspace for the source-available Desktop `bk` binary, with stable
   format/lint/test CI and a Rust 1.91 compatibility check.
 - `bk serve` hosting embedded status and placeholder views beside upstream's

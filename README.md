@@ -16,9 +16,8 @@ SQLCipher/OpenSSL. See [the frontend/toolchain decision](docs/frontend.md).
 
 ```sh
 cargo build --release --locked
-# Initialize and configure a ledger with the upstream bk commands first.
-./target/release/bk --db /path/to/books.db --passphrase-file /secure/passphrase serve
-# Open the one-time pairing URL printed in this terminal.
+./target/release/bk --db /path/to/books.db setup
+# Open the one-time pairing URL in /path/to/books.desktop.log.
 # Later, reopen the paired workspace from another terminal:
 ./target/release/bk open
 ```
@@ -29,14 +28,24 @@ needed at runtime or build time. Direct links to `/transactions`, `/reports`,
 `/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, and `/review` work after pairing.
 Unknown URLs return 404.
 
+`bk setup` creates an encrypted ledger, stores its passphrase in the native OS
+keychain, writes a private recovery kit and agent token, merges MCP configs for
+Claude Desktop, Claude Code and Codex, and starts the local UI. The default agent
+is read-only; `--preset bookkeeper` adds posting and proposals with spend caps,
+without approval rights. Keep the recovery kit and separate owner credential
+offline. See [the setup reference](docs/setup.md) for flags, exact files touched,
+headless CI usage, recovery and current pairing integration limits.
+
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
-`BEANKEEPER_PASSPHRASE_CMD`. All upstream CLI commands remain available, including
+`BEANKEEPER_PASSPHRASE_CMD`, then the stored credential for setup-enrolled ledgers.
+All upstream CLI commands remain available, including
 `bk mcp serve` for stdio and `bk mcp serve --http` for MCP-only HTTP. Desktop
 extends upstream's command parser and delegates those commands to its dispatcher.
 Use `bk --help` or `bk serve --help` for options.
-Encrypted Desktop startup uses an in-memory passphrase pipe and currently requires
-Unix; [beankeeper#109](https://github.com/Govcraft/beankeeper/issues/109) tracks a
+The MCP router receives the resolved passphrase through an in-memory pipe.
+Encrypted Desktop startup currently requires Unix;
+[beankeeper#109](https://github.com/Govcraft/beankeeper/issues/109) tracks a
 resolved-secret router factory for other platforms.
 
 ```sh
