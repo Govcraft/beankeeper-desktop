@@ -1,0 +1,69 @@
+//! Extend upstream's command tree without copying its ledger commands.
+
+use std::{net::SocketAddr, path::PathBuf};
+
+use beankeeper_cli::cli::{Cli, PassphraseOptions};
+use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser};
+
+/// Options for the combined UI and MCP listener.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct ServeOptions {
+    /// Listen address; port 0 requests an available port.
+    #[arg(long, default_value = "127.0.0.1:8750")]
+    pub bind: SocketAddr,
+    /// Permit a non-loopback listener over plaintext HTTP, without relaxing Host/Origin checks.
+    #[arg(long)]
+    pub allow_remote: bool,
+    /// Expose only upstream tools that read the ledger.
+    #[arg(long)]
+    pub read_only: bool,
+}
+
+/// Address of an already-running Desktop server.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct OpenOptions {
+    /// Loopback address used by `bk serve`.
+    #[arg(long, default_value = "127.0.0.1:8750", value_parser = loopback_address)]
+    pub bind: SocketAddr,
+}
+
+fn loopback_address(value: &str) -> Result<SocketAddr, String> {
+    let address: SocketAddr = value
+        .parse()
+        .map_err(|error| format!("invalid address: {error}"))?;
+    if !crate::server::ui_loopback(address.ip()) || address.port() == 0 {
+        return Err("bk open requires 127.0.0.1 or [::1] with a nonzero port".into());
+    }
+    Ok(address)
+}
+
+/// The upstream CLI with Desktop's two additional subcommands.
+#[must_use]
+pub fn command() -> Command {
+    Cli::command()
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Beankeeper Desktop: local UI and agent-driven accounting")
+        .subcommand(ServeOptions::augment_args(Command::new("serve").about(
+            "Serve the embedded UI and authenticated MCP on one listener",
+        )))
+        .subcommand(OpenOptions::augment_args(
+            Command::new("open").about("Open the running Desktop UI in your default browser"),
+        ))
+}
+
+/// Adapt the shared ledger options to the public upstream router factory.
+///
+/// Upstream owns parsing of these flags, passphrase resolution and token rules.
+/// Its placeholder command is used only to construct the factory's `Cli` input.
+///
+/// # Errors
+/// Returns a clap error if the upstream argument contract changes.
+pub fn ledger_options(matches: &ArgMatches) -> Result<Cli, clap::Error> {
+    let mut cli = Cli::try_parse_from(["bk", "mcp", "serve"])?;
+    if let Some(path) = matches.get_one::<PathBuf>("db") {
+        cli.db.clone_from(path);
+    }
+    cli.passphrase = PassphraseOptions::from_arg_matches(matches)?;
+    cli.agent_token = matches.get_one("agent_token").cloned();
+    Ok(cli)
+}
