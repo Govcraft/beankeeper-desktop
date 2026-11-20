@@ -4,6 +4,14 @@
 
 ### Added
 
+- Isolated offline Ed25519 Desktop license activation compatible with D10,
+  perpetual entitlements and inclusive update windows, plus optional HTTPS
+  storefront-key or claim-code redemption.
+- Daily opt-out signed release checks in CLI and paired browser settings, and
+  explicit self-update requiring matching SHA-256 checksums and mandatory
+  Sigstore bundles before binary replacement. Release packaging emits and signs
+  the update manifest; no ledger or schema changes.
+
 - Company-scoped browser review queue and proposal deep links with complete
   posting details, proposer identity and current spend caps. Paired, CSRF/Origin
   protected human approval and rejection use upstream atomic audited operations.

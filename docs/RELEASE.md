@@ -183,3 +183,44 @@ bundle, verification failure, or any other bundle download error stops installat
 Checksum-only installation detects corruption but does not authenticate the
 release publisher. These scripts never change the user's execution policy or
 PATH, and do not start `bk serve`.
+
+## Signed update feed and self-update
+
+After the final archives are hashed, `scripts/release.py update-manifest`
+generates `update-manifest.json`. The tag job signs it with a detached
+`update-manifest.json.sigstore` bundle and includes it in build provenance and
+release assets. Dry runs produce unsigned metadata only. Schema version 1 is:
+
+```json
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "released_at": "2026-11-20T12:00:00Z",
+  "artifacts": {
+    "x86_64-unknown-linux-gnu": {"sha256": "<64 lowercase hex digits>"}
+  }
+}
+```
+
+`released_at` is the UTC timestamp of the release tag's source commit, emitted
+from Git metadata by the release workflow. This signed timestamp supplies the
+inclusive license update-window comparison. It is independent of the client
+clock. The artifacts map covers the available archive targets from the matrix;
+archive names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. OS installers are not
+self-update inputs. Increment the workspace version before an actual release;
+this feature adds only an Unreleased changelog entry.
+
+The client parses bounded metadata only to select the expected tag identity,
+then runs `cosign verify-blob --bundle ... --certificate-identity ...
+--certificate-oidc-issuer https://token.actions.githubusercontent.com`. The exact
+identity is this repository's `release.yml@refs/tags/beankeeper-cli-vVERSION`,
+as shown above. It uses the [official cosign verification contract](https://docs.sigstore.dev/cosign/verifying/verify/).
+
+`bk self-update` verifies the signed JSON, the archive bundle, the checksum-list
+bundle, and matching SHA-256 values in both signed metadata and the checksum
+list. A missing `.sigstore` file always fails closed. The public download URLs,
+filenames, signer identity and issuer are fixed by the client; metadata cannot
+redirect installation to another repository, workflow, executable path or OS.
+Only after verification does the client extract the exact regular executable
+member and replace its binary. See the [command reference](license-updates.md)
+for opt-out, caching, trust provisioning and private license storage.

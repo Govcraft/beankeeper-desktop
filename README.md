@@ -226,3 +226,26 @@ CI runs fmt, clippy with warnings denied, tests (including the embedded UI build
 on stable, and a separate Rust 1.91 check. `Cargo.lock` pins the development git
 dependency on `Govcraft/beankeeper`'s `main` branch. Update it deliberately with
 `cargo update -p beankeeper-cli` when adopting upstream changes.
+
+## License and updates
+
+`bk license` shows the local entitlement. Activate a D10 license offline with
+`bk license activate /path/to/license.json`. Updates through the signed deadline
+are included; use of an installed eligible release is perpetual. Desktop does
+not contact the license service after activation. Final Desktop licensing terms
+remain Roland's decision; this preview adds no runtime lockout.
+
+`bk update-check` checks the signed GitHub release manifest at most once daily,
+including failed attempts. `bk serve` checks in the background, and paired
+browsers can read the cached result at **License and updates** (`/settings`).
+Set `BEANKEEPER_NO_UPDATE_CHECK=1` to disable checks before any network access.
+Requests contain only the Desktop version and OS, with no ledger information.
+`bk self-update` installs an eligible release only after mandatory checksum and
+Sigstore verification; it requires `cosign` on PATH. It never falls back to an
+unsigned installation. Restart the server after installing.
+
+See the [license/update command reference](docs/license-updates.md),
+[offline license contract](docs/license-format.md), and
+[release verification contract](docs/RELEASE.md#signed-update-feed-and-self-update).
+Production public keys must be provisioned separately; the published fixture key
+is confined to tests and is never a default trust key.
