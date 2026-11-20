@@ -42,7 +42,7 @@ pub(crate) fn page(title: &str, description: &str, path: &str, content: &str) ->
     )
 }
 
-fn session_controls(session: &Session) -> String {
+pub(crate) fn session_controls(session: &Session) -> String {
     let connection = if session.agent.is_some() {
         "Your agent is connected to this browser."
     } else {
@@ -81,17 +81,6 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
                     "Reports",
                     "Financial reports will be available in a future update.",
                     "/reports",
-                    &session_controls(&session),
-                )
-            }),
-        )
-        .route(
-            "/review",
-            get(|Extension(session): Extension<Session>| async move {
-                page(
-                    "Review queue",
-                    "Human review of agent proposals will be available in a future update.",
-                    "/review",
                     &session_controls(&session),
                 )
             }),

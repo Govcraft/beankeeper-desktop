@@ -3,7 +3,8 @@
 Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
 preview shows your dashboard, accounts and transactions, with read-only ledger
-views. Live agent navigation and browser approvals come later.
+views and a browser review queue for agent proposals. Live agent navigation
+comes later.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -25,7 +26,8 @@ cargo build --release --locked
 One process serves the embedded UI at `http://127.0.0.1:8750/` and Streamable HTTP
 MCP at `http://127.0.0.1:8750/mcp`. No external asset directory or Node.js is
 needed at runtime or build time. Direct links to `/transactions`, `/reports`,
-`/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, and `/review` work after pairing.
+`/accounts`, `/transactions/TRANSACTION_ID?company=SLUG`, `/review`, and
+`/review/PROPOSAL_ID?company=SLUG` work after pairing.
 Unknown URLs return 404.
 
 `bk setup` creates an encrypted ledger, stores its passphrase in the native OS
@@ -120,7 +122,7 @@ bk --db ./desktop-demo.db serve
 ```
 
 After starting `bk serve`, open its one-time pairing URL as described above.
-Every ledger page, including reports and review placeholders, requires D3's
+Every ledger page, including reports and proposal review, requires D3's
 paired human session. Agent credentials cannot unlock browser views, and browser
 cookies cannot authorize MCP. Health and CSS remain public and data-free behind
 Host/Origin checks. After pairing, reopen a saved view URL to restore its filters.
@@ -138,8 +140,8 @@ Host/Origin checks. After pairing, reopen a saved view URL to restore its filter
 Choose a company in each view. Without a URL company filter, `--company` or
 `BEANKEEPER_COMPANY` supplies the default; otherwise the first listed company is
 selected visibly. No company data is combined silently. These pages never edit
-the ledger. Ask your agent to prepare changes; reports and proposal review
-remain placeholders for later issues.
+the ledger. Ask your agent to prepare changes and review its proposals in the
+browser. Reports remain a placeholder for a later issue.
 
 Register pages show at most 50 matches. Search and clearance use bounded scans
 of existing upstream transaction queries, so a page can have fewer matches while
@@ -149,6 +151,45 @@ from the beginning. Page counts and scan/truncation notices describe the source
 query rather than claiming an exact post-filter match count. Audit history also
 signals truncation. An empty ledger, no matching transactions, invalid filters,
 missing records and read failures have explicit states.
+
+## Review agent proposals
+
+Open `/review?company=acme` to see pending proposals created through `bk txn
+propose` or MCP. Each item links to `/review/PROPOSAL_ID?company=acme`, showing
+proposer identity, debit total in currency minor units, posting description,
+current spend caps, every entry and the complete frozen payload. Upstream does
+not store a separate proposal rationale or creation-time cap snapshot, so the
+posting description supplies the purpose and caps are labeled as current.
+
+Approve posts once through upstream's atomic approval API. Reject records an
+optional reason without posting. A resolved detail keeps the decision and links
+to the posted transaction. Repeated or competing decisions cannot post twice.
+The local human rejects proposals rather than impersonating the proposer to
+withdraw them.
+
+Only a paired browser with the exact Origin and its CSRF token can decide.
+Bearer credentials fail these routes, even alongside a browser cookie or with
+`ledger/approve`. For enforced ledgers, each server launch uses the decrypted
+local trust root to issue a unique, 12-hour `ledger/read` + `ledger/approve`
+identity solely for the local human. Its token stays in server memory and is
+reverified for expiry and revocation on every review request. The audit names
+`desktop-local-human` and records this identity separately from the proposer.
+No owner-token file is read. Restart and pair again after this authority expires.
+Issuance adds an audited token record per launch; no schema changes are made.
+With policy enforcement off, upstream records the same actor name without a
+token identity. `--read-only` restricts agent MCP tools; human browser decisions
+remain available. Upstream CLI/MCP approval behavior is unchanged, but Desktop's
+supported workflow is **agent proposes, human approves in the browser**.
+
+The queue checks the ledger on first load and displays the last result and UTC
+check time. **Re-run verification** performs the complete `bk verify`, including
+the hash chain, accounting, proposals and policy integrity. Results are cached
+for this server launch and may become stale after external changes. Browser
+decisions invalidate the cache and always run a fresh full verification within
+the resolution savepoint. Failure rolls back the decision. A failed check is
+shown explicitly, without claiming the chain is intact. Tests demonstrate this
+by changing an audit row in a temporary encrypted ledger after removing its
+append-only update trigger; the next explicit check reports failure.
 
 ## Development checks
 

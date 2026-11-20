@@ -30,8 +30,16 @@ New companies need owner-configured spend limits before agent use.
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from
 the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
 terminal. A paired browser can browse the dashboard, accounts and transactions.
-Navigation grants (D4) and browser human approval arrive in separate issues.
-Do not grant the agent owner authority to work around them.
+The review queue at `/review?company=SLUG` lists pending agent proposals. Link
+the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and
+current spend caps, then approve or reject using their paired browser session.
+The queue also shows the last full ledger verification and a recheck button.
+Navigation grants (D4) arrive in a separate issue.
+Desktop's supported workflow is agent proposes, human approves in the browser.
+Do not ask for approval tokens or call MCP approval tools on the human's behalf.
+The server supplies its own ephemeral human authority behind cookie/CSRF checks;
+no agent token is an approver on browser routes. Do not grant the agent owner
+authority to work around these boundaries.
 
 See [docs/setup.md](docs/setup.md) for the full command reference, all config and
 credential paths, headless test options, lifecycle and recovery instructions.

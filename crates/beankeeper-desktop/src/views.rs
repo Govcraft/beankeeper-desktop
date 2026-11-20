@@ -93,7 +93,7 @@ pub(crate) fn escape(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
