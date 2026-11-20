@@ -116,5 +116,6 @@ integration tests compare its output with CLI CSV, including quoted payee names.
 No subprocess, temporary export file, browser JSON credentials or schema change
 is involved. The public `reports::VIEW_IDS` list and [URL reference](reports.md)
 provide the D4 integration contract. Reconciliation exposes no mutation path.
+
 See [agent navigation](navigation.md) for the SSE protocol, tab lifecycle, grant
 contract, embedded receiver and integration tests.

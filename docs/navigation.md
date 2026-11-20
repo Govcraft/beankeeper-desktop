@@ -69,7 +69,7 @@ are retained. A full queue produces a useful busy error.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `ui_show_view` | `view_id`, optional `state`, optional `tab_id` | Queues an addressable view, or describes the unavailable view / no-tab fallback. |
+| `ui_show_view` | `view_id`, optional `state`, optional `tab_id` | Queues an addressable view, or describes invalid filters / the no-tab fallback. |
 | `ui_highlight` | `target`, optional `tab_id` | Queues a highlight by exact DOM ID. Missing targets are a successful no-op. |
 | `ui_status` | Optional `tab_id` | Pairing state, connected tabs, confirmed URLs/titles, highlighted IDs, available targets, pending event counts and an association URL. |
 
@@ -83,14 +83,26 @@ View IDs map to the real server-rendered pages:
 | `transaction` | `/transactions/ID` | Positive `transaction_id`, company. |
 | `review` | `/review` | Optional company. |
 | `review_detail` | `/review/ID` | `proposal_id`, company. |
-| `reports` | Unavailable in this build | Explicit error; no event is sent. |
+| `reports` | `/reports`, or the report selected by `report_kind` | Optional company/currency; report-specific filters below. |
+| `income-statement`, `balance-sheet`, `cash-flow`, `trend`, `budget-variance`, `schedule-c`, `1099` | `/reports/VIEW_ID` | Company/currency and the report's filters. |
+| `reconciliation` | `/reconciliation` | Company/currency, account and reconciliation filters. |
 
 `state` accepts `company`, `account`, `from`, `to`, `min_amount`, `max_amount`,
 `search`, `status`, `offset`, `currency`, `transaction_id`, `proposal_id`,
-`report_kind`, and `period`. Date, amount, clearance and offset validation reuses
-the real view validator. Amount bounds are strings containing nonnegative whole
-minor units. `report_kind` and `period` return an unavailable/validation error;
-register periods use inclusive `from`/`to` dates. Review views accept company and
+`report_kind`, `period`, `metric`, `year`, `threshold`, `cash_account`, `mode`,
+`statement`, `statement_balance`, and `link_key`. Date, amount, clearance and
+offset validation reuses the real view validator. Amount bounds are strings containing nonnegative whole
+minor units. Reports accept the stable [report IDs and URL filters](reports.md),
+either directly as `view_id` or through `view_id: "reports"` with `report_kind`.
+`period` and `metric` apply to trends, `year` to budget variance, `threshold` to
+1099, and `cash_account` to cash flow. Reconciliation accepts `account`, `to`,
+`mode`, `statement`, `statement_balance` and `link_key`. These values restore
+through the view's ordinary GET form. Unsupported filter/view combinations fail
+rather than dropping filters. Report option validation reuses the report query
+contract without reading ledger data. Initial budget and reconciliation pages
+can open without a year or account. Navigation opens HTML views; download formats
+remain in the browser's download links. Register periods use inclusive
+`from`/`to` dates. Review views accept company and
 their detail ID only. Unknown fields and unsupported IDs fail clearly. State is
 encoded into a local URL of at most 4096 bytes; tools accept no arbitrary URL,
 script, CSS selector or approval action.
@@ -99,6 +111,8 @@ Example calls:
 
 ```json
 {"name":"ui_show_view","arguments":{"view_id":"transactions","state":{"company":"acme","account":"1000","from":"2026-01-01","to":"2026-12-31","search":"rent"}}}
+{"name":"ui_show_view","arguments":{"view_id":"reports","state":{"report_kind":"trend","company":"acme","metric":"net-worth","period":"quarter","from":"2026-01-01","to":"2026-12-31"}}}
+{"name":"ui_show_view","arguments":{"view_id":"reconciliation","state":{"company":"acme","account":"1000","to":"2026-03-31","statement":"S1","statement_balance":"1234.56"}}}
 {"name":"ui_status","arguments":{}}
 {"name":"ui_highlight","arguments":{"target":"main","tab_id":"TAB_ID_FROM_STATUS"}}
 ```
@@ -106,7 +120,7 @@ Example calls:
 Every successful call includes readable text as well as structured content.
 With no connected matching tab, navigation/highlight still succeed, say that
 nothing was displayed and return an association link. Requests are not saved for
-a browser that opens later. Error results explain invalid filters or unavailable
+a browser that opens later. Error results explain invalid filters or unknown
 views and include a connection link. No ledger counts or totals are fetched with
 a navigation grant; the text describes the requested view and its exact filters.
 Use the separate ledger connection for financial queries.
@@ -115,7 +129,8 @@ A queued event is not a claim that the browser displayed it. The browser
 acknowledges its loaded URL/title and applied highlight separately. `ui_status`
 reports those acknowledgements. A view's own missing-record or empty-data state
 continues to render normally. Known highlight IDs include `main`,
-`account-CODE`, `transaction-ID`, and review's `verification`; `ui_status` lists
+`account-CODE`, `transaction-ID`, review's `verification`, and reports'
+`report-filters` and `report-results` regions; `ui_status` lists
 only IDs the current page reported. If a target disappears before delivery, the
 browser clears the highlight and reports a no-op. Highlighting never clicks or
 submits controls. Browser approval retains D7's separate human boundary.
@@ -132,7 +147,8 @@ Events are transient and are not replayed as human actions on reconnect.
 
 Tests use a real listener and temporary encrypted ledger. They cover discovery,
 policy-on/off grants, credential switching and revocation, fallback and read-only
-ceilings, readable no-tab results, unavailable reports, filter encoding, SSE
+ceilings, readable no-tab results, report/reconciliation routes and restored
+filters, report region highlights, invalid report options, filter encoding, SSE
 navigation/highlights, acknowledgements, multiple tabs, agent isolation, logout,
 and the cookie/Origin/CSRF boundary. Shutdown drains open UI streams.
 No schema migration is introduced.

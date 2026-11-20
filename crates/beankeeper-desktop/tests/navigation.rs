@@ -78,10 +78,28 @@ fn update(
     url: &str,
     highlight: &str,
 ) -> TestResult<String> {
+    update_targets(
+        server,
+        csrf,
+        id,
+        url,
+        highlight,
+        "main\ntransaction-1\nverification",
+    )
+}
+
+fn update_targets(
+    server: &Server,
+    csrf: &str,
+    id: Option<&str>,
+    url: &str,
+    highlight: &str,
+    targets: &str,
+) -> TestResult<String> {
     let mut form = vec![
         ("csrf", csrf),
         ("url", url),
-        ("targets", "main\ntransaction-1\nverification"),
+        ("targets", targets),
         ("highlight", highlight),
     ];
     if let Some(id) = id {
@@ -164,20 +182,33 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
             }
         }
     }
-    let unavailable = call(
+    let report = call(
         &server,
         nav,
         "ui_show_view",
-        json!({"view_id":"reports","state":{"report_kind":"balance_sheet","period":"2026"}}),
+        json!({"view_id":"reports","state":{"report_kind":"balance-sheet","to":"2026-12-31"}}),
     )?;
-    assert!(text(&unavailable).contains("View not available"));
-    assert!(content(&unavailable)["pairing_url"].as_str().is_some());
+    assert_ne!(report["result"]["isError"], true);
+    assert!(text(&report).contains("/reports/balance-sheet?to=2026-12-31"));
+    assert!(content(&report)["pairing_url"].as_str().is_some());
     for arguments in [
         json!({"view_id":"https://evil.example"}),
         json!({"view_id":"transactions","state":{"from":"2026-02-30"}}),
         json!({"view_id":"transaction"}),
         json!({"view_id":"review","state":{"account":"1000"}}),
         json!({"view_id":"dashboard","injected":true}),
+        json!({"view_id":"reports","state":{"report_kind":"../review"}}),
+        json!({"view_id":"reports","state":{"report_kind":"missing"}}),
+        json!({"view_id":"transactions","state":{"period":"month"}}),
+        json!({"view_id":"income-statement","state":{"search":"ignored"}}),
+        json!({"view_id":"balance-sheet","state":{"from":"2026-01-01"}}),
+        json!({"view_id":"trend","state":{"period":"week"}}),
+        json!({"view_id":"trend","state":{"metric":"missing"}}),
+        json!({"view_id":"budget-variance","state":{"year":"0"}}),
+        json!({"view_id":"budget-variance","state":{"from":"2026-02-02","to":"2026-02-28"}}),
+        json!({"view_id":"reconciliation","state":{"account":"1000","mode":"missing"}}),
+        json!({"view_id":"1099","state":{"period":"year"}}),
+        json!({"view_id":"reports","state":{"format":"json"}}),
     ] {
         assert_eq!(
             call(&server, nav, "ui_show_view", arguments)?["result"]["isError"],
@@ -332,6 +363,169 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
 }
 
 #[test]
+fn report_navigation_restores_filters_and_acknowledges_report_highlights() -> TestResult {
+    let ledger = Ledger::new()?;
+    db::create_account(ledger.db()?.conn(), "acme", "1000", "Cash", "asset", None)?;
+    let navigator = issue(&ledger, "navigator")?;
+    let nav = token(&navigator)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(nav))?;
+    server.pair()?;
+    let csrf = csrf(&server)?;
+    associate(&server, nav, &csrf)?;
+    let tab = update(&server, &csrf, None, "/", "")?;
+    let mut events = stream(&server, &tab)?;
+    event(&mut events, "heartbeat")?;
+    let cases = [
+        ("reports", json!({}), "/reports?company=acme"),
+        (
+            "income-statement",
+            json!({"from":"2026-01-01","to":"2026-03-31"}),
+            "/reports/income-statement?company=acme&from=2026-01-01&to=2026-03-31&currency=USD",
+        ),
+        (
+            "balance-sheet",
+            json!({"to":"2026-03-31"}),
+            "/reports/balance-sheet?company=acme&to=2026-03-31&currency=USD",
+        ),
+        (
+            "cash-flow",
+            json!({"cash_account":"1000"}),
+            "/reports/cash-flow?company=acme&currency=USD&cash_account=1000",
+        ),
+        (
+            "trend",
+            json!({"metric":"net-worth","period":"quarter"}),
+            "/reports/trend?company=acme&currency=USD&period=quarter&metric=net-worth",
+        ),
+        (
+            "budget-variance",
+            json!({"year":"2026"}),
+            "/reports/budget-variance?company=acme&currency=USD&year=2026",
+        ),
+        (
+            "schedule-c",
+            json!({"from":"2026-01-01","to":"2026-12-31"}),
+            "/reports/schedule-c?company=acme&from=2026-01-01&to=2026-12-31&currency=USD",
+        ),
+        (
+            "1099",
+            json!({"threshold":"0"}),
+            "/reports/1099?company=acme&currency=USD&threshold=0",
+        ),
+        (
+            "reconciliation",
+            json!({"account":"1000","to":"2026-03-31","mode":"bank","statement":"S1 & fees","statement_balance":"1234.56"}),
+            "/reconciliation?company=acme&account=1000&to=2026-03-31&currency=USD&mode=bank&statement=S1%20%26%20fees&statement_balance=1234.56",
+        ),
+        (
+            "reconciliation",
+            json!({"account":"1000","mode":"settlement","statement":"S1","link_key":"applies_to"}),
+            "/reconciliation?company=acme&account=1000&currency=USD&mode=settlement&statement=S1&link_key=applies_to",
+        ),
+        (
+            "reconciliation",
+            json!({}),
+            "/reconciliation?company=acme&currency=USD",
+        ),
+        (
+            "budget-variance",
+            json!({}),
+            "/reports/budget-variance?company=acme&currency=USD",
+        ),
+    ];
+    for (view, mut state, expected) in cases {
+        state["company"] = json!("acme");
+        if view != "reports" {
+            state["currency"] = json!("USD");
+        }
+        // Both the stable D6 IDs and the original reports/report_kind API work.
+        for via_reports in [false, true] {
+            if via_reports && view == "reports" {
+                continue;
+            }
+            let mut state = state.clone();
+            if via_reports {
+                state["report_kind"] = json!(view);
+            }
+            let result = call(
+                &server,
+                nav,
+                "ui_show_view",
+                json!({
+                    "view_id": if via_reports { "reports" } else { view },
+                    "state": state,
+                    "tab_id": tab,
+                }),
+            )?;
+            assert_eq!(content(&result)["queued"], true, "{result}");
+            let navigation = event(&mut events, "navigate")?;
+            assert_eq!(navigation["url"], expected);
+            let response = server
+                .client
+                .get(format!("{}{expected}", server.base))
+                .send()?;
+            assert_eq!(response.status(), 200, "{expected}: {}", response.text()?);
+            let html = server
+                .client
+                .get(format!("{}{expected}", server.base))
+                .send()?
+                .text()?;
+            assert!(html.contains("/assets/navigation.js"));
+            assert!(html.contains("id=\"report-filters\""));
+            for (field, value) in state.as_object().ok_or("state")? {
+                let value = value.as_str().ok_or("filter")?.replace('&', "&amp;");
+                if ["company", "mode", "account", "metric", "period"].contains(&field.as_str()) {
+                    let selected = if field == "account" || field == "company" {
+                        format!("<option value=\"{value}\" selected>")
+                    } else {
+                        format!("<option selected>{value}</option>")
+                    };
+                    assert!(html.contains(&selected), "{expected}: {field}={value}");
+                } else if field != "report_kind" {
+                    assert!(
+                        html.contains(&format!("name=\"{field}\"")),
+                        "{expected}: {field}"
+                    );
+                    assert!(
+                        html.contains(&format!("value=\"{value}\"")),
+                        "{expected}: {field}={value}"
+                    );
+                }
+            }
+            let targets = html
+                .split("id=\"")
+                .skip(1)
+                .filter_map(|part| part.split('"').next())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                update_targets(&server, &csrf, Some(&tab), expected, "", &targets)?,
+                tab
+            );
+            let target = if html.contains("id=\"report-results\"") {
+                "report-results"
+            } else {
+                "report-filters"
+            };
+            let highlight = call(
+                &server,
+                nav,
+                "ui_highlight",
+                json!({"target":target,"tab_id":tab}),
+            )?;
+            assert_eq!(content(&highlight)["queued"], true);
+            assert_eq!(event(&mut events, "highlight")?["target"], target);
+            update_targets(&server, &csrf, Some(&tab), expected, target, &targets)?;
+            let status = call(&server, nav, "ui_status", json!({"tab_id":tab}))?;
+            assert_eq!(content(&status)["tabs"][0]["url"], expected);
+            assert_eq!(content(&status)["tabs"][0]["highlight"], target);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn tab_routes_require_cookie_origin_csrf_and_never_accept_bearer_authority() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
@@ -378,6 +572,10 @@ fn tab_routes_require_cookie_origin_csrf_and_never_accept_bearer_authority() -> 
         "//evil.example",
         "/api/session/logout",
         "/review/x/approve",
+        "/reports/missing",
+        "/reports/../review",
+        "/reports/income-statement/export",
+        "/reconciliation/approve",
     ] {
         assert_eq!(
             server

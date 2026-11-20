@@ -46,7 +46,10 @@ association link to the human to open in an already paired browser, then call
 `ui_show_view` with a supported `view_id` and URL-addressable `state`. If several
 tabs are connected, supply a `tab_id` from status. `ui_highlight` accepts exact
 DOM IDs listed by status and never clicks or submits a control. Missing rows are
-a no-op; reports are explicitly unavailable in this build. No tab is required:
+a no-op. Reports and reconciliation accept the stable view IDs and filters in
+[docs/reports.md](docs/reports.md), either directly or via `view_id: "reports"`
+and `state.report_kind`. Use `report-filters` or `report-results` from status to
+highlight those regions. No tab is required:
 read the textual fallback and say clearly when nothing was displayed. A queued
 result is not browser confirmation; use `ui_status` to inspect the loaded view.
 `--read-only` removes navigation/highlight mutations. See the

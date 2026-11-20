@@ -134,9 +134,9 @@ link in a paired browser. With no tab open, tools return useful text and a
 connection link. With multiple connected tabs, choose the `tab_id` from status.
 Navigation/highlight are disabled by `--read-only`; status remains available.
 
-Real dashboard, account, register, transaction and review URLs are supported.
-Reports return an explicit unavailable-view error. Tool results distinguish
-queued requests from the browser's confirmed view. See the [tool catalog, grant
+Real dashboard, account, register, transaction, review, financial report, tax
+summary and reconciliation URLs are supported with restorable filters. Tool
+results distinguish queued requests from the browser's confirmed view. See the [tool catalog, grant
 commands and tab design](docs/navigation.md) for arguments, examples and tests.
 
 ## Browse your books

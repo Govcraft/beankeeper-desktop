@@ -32,6 +32,7 @@ use tokio_stream::{StreamExt, wrappers::IntervalStream};
 
 use crate::{
     pairing::{self, AgentKey, BrowserSessionId, PairingError, PairingState, Session},
+    reports::ReportQuery,
     views::ViewQuery,
 };
 
@@ -57,11 +58,25 @@ enum View {
     Transactions,
     Transaction,
     Reports,
+    #[serde(rename = "income-statement")]
+    IncomeStatement,
+    #[serde(rename = "balance-sheet")]
+    BalanceSheet,
+    #[serde(rename = "cash-flow")]
+    CashFlow,
+    Trend,
+    #[serde(rename = "budget-variance")]
+    BudgetVariance,
+    #[serde(rename = "schedule-c")]
+    ScheduleC,
+    #[serde(rename = "1099")]
+    Vendor1099,
+    Reconciliation,
     Review,
     ReviewDetail,
 }
 
-#[derive(Default, Deserialize, JsonSchema)]
+#[derive(Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddressState {
     company: Option<String>,
@@ -78,6 +93,14 @@ struct AddressState {
     proposal_id: Option<String>,
     report_kind: Option<String>,
     period: Option<String>,
+    metric: Option<String>,
+    year: Option<String>,
+    threshold: Option<String>,
+    cash_account: Option<String>,
+    mode: Option<String>,
+    statement: Option<String>,
+    statement_balance: Option<String>,
+    link_key: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -92,18 +115,66 @@ struct Show {
 impl Show {
     fn url(&self) -> Result<String, &'static str> {
         let state = &self.state;
-        if matches!(self.view_id, View::Reports) {
-            return Err("View not available: reports are not implemented in this Desktop build.");
-        }
-        if state.period.is_some() || state.report_kind.is_some() {
-            return Err(
-                "Period and report_kind require the unavailable reports view. Use from/to for register dates.",
-            );
-        }
         if state.transaction_id.is_some() && !matches!(self.view_id, View::Transaction)
             || state.proposal_id.is_some() && !matches!(self.view_id, View::ReviewDetail)
         {
             return Err("Record IDs require their matching detail view.");
+        }
+        let report_id = match self.view_id {
+            View::Reports => state.report_kind.as_deref(),
+            View::IncomeStatement => Some("income-statement"),
+            View::BalanceSheet => Some("balance-sheet"),
+            View::CashFlow => Some("cash-flow"),
+            View::Trend => Some("trend"),
+            View::BudgetVariance => Some("budget-variance"),
+            View::ScheduleC => Some("schedule-c"),
+            View::Vendor1099 => Some("1099"),
+            View::Reconciliation => Some("reconciliation"),
+            _ => None,
+        };
+        let is_report = report_id.is_some() || matches!(self.view_id, View::Reports);
+        if state.report_kind.is_some() && !matches!(self.view_id, View::Reports) {
+            return Err(
+                "report_kind requires the reports view; direct report IDs need no report_kind.",
+            );
+        }
+        let report_fields = [
+            ("period", &state.period, "trend"),
+            ("metric", &state.metric, "trend"),
+            ("year", &state.year, "budget-variance"),
+            ("threshold", &state.threshold, "1099"),
+            ("cash_account", &state.cash_account, "cash-flow"),
+            ("mode", &state.mode, "reconciliation"),
+            ("statement", &state.statement, "reconciliation"),
+            (
+                "statement_balance",
+                &state.statement_balance,
+                "reconciliation",
+            ),
+            ("link_key", &state.link_key, "reconciliation"),
+        ];
+        if report_fields
+            .iter()
+            .any(|(_, value, required)| value.is_some() && report_id != Some(*required))
+        {
+            return Err(
+                "Report filters require their matching report view. Use from/to for register dates.",
+            );
+        }
+        if is_report {
+            if report_id.is_some_and(|id| !crate::reports::VIEW_IDS.contains(&id)) {
+                return Err("Unknown report_kind. Use a stable report ID from the tool catalog.");
+            }
+            if state.offset.is_some()
+                || state.min_amount.is_some()
+                || state.max_amount.is_some()
+                || state.search.is_some()
+                || state.status.is_some()
+                || (state.account.is_some() && report_id != Some("reconciliation"))
+                || (report_id.is_none() && (state.from.is_some() || state.to.is_some()))
+            {
+                return Err("Unsupported report filters. Use the report's URL-restorable filters.");
+            }
         }
         let path = match self.view_id {
             View::Dashboard => "/".into(),
@@ -126,7 +197,12 @@ impl Show {
                     .map_err(|_| "proposal_id must be a proposal TypeID.")?;
                 format!("/review/{id}")
             }
-            View::Reports => return Err("View not available: reports."),
+            _ if is_report => match report_id {
+                Some("reconciliation") => "/reconciliation".into(),
+                Some(id) => format!("/reports/{id}"),
+                None => "/reports".into(),
+            },
+            _ => return Err("Unknown view."),
         };
         if matches!(self.view_id, View::Review | View::ReviewDetail)
             && (state.offset.is_some()
@@ -162,6 +238,15 @@ impl Show {
         query
             .validate()
             .map_err(|_| "Invalid date, amount, clearance or pagination filters.")?;
+        if is_report {
+            let query: ReportQuery = serde_json::from_value(
+                serde_json::to_value(state).map_err(|_| "Invalid report filters.")?,
+            )
+            .map_err(|_| "Invalid report filters.")?;
+            query.validate_navigation(&path).map_err(
+                |_| "Invalid report date range, period, metric, year or reconciliation mode.",
+            )?;
+        }
         let mut url = path;
         for (name, value) in [
             ("company", &state.company),
@@ -173,7 +258,10 @@ impl Show {
             ("search", &state.search),
             ("status", &state.status),
             ("currency", &state.currency),
-        ] {
+        ]
+        .into_iter()
+        .chain(report_fields.iter().map(|(name, value, _)| (*name, *value)))
+        {
             if let Some(value) = value {
                 url.push(if url.contains('?') { '&' } else { '?' });
                 url.push_str(name);
@@ -408,7 +496,7 @@ fn failure(code: &str, message: &str) -> CallToolResult {
 
 impl HostToolHandler for Navigation {
     fn tools(&self) -> Vec<HostTool> {
-        [("ui_show_view", "Queue a real Desktop view and URL filters. Reports are unavailable. No ledger data is returned. Use ui_status to choose among tabs.", schemars::schema_for!(Show).to_value(), HostToolEffect::Mutation),
+        [("ui_show_view", "Queue a real Desktop view with URL-restorable filters, including financial reports, tax summaries and reconciliation. Use a stable report view_id or reports with state.report_kind. No ledger data is returned. Use ui_status to choose among tabs.", schemars::schema_for!(Show).to_value(), HostToolEffect::Mutation),
          ("ui_highlight", "Highlight an existing DOM ID from ui_status targets. A missing target is a no-op.", schemars::schema_for!(Highlight).to_value(), HostToolEffect::Mutation),
          ("ui_status", "Report paired and live tabs, confirmed view URLs, highlight targets and pairing link. Requires ui/navigate.", schemars::schema_for!(Status).to_value(), HostToolEffect::ReadOnly)]
         .into_iter().map(|(name, description, schema, effect)| HostTool { tool: Tool::new(name, description, schema.as_object().cloned().unwrap_or_default()), capability: Capability::Navigate, effect }).collect()
@@ -472,12 +560,15 @@ fn local_view(url: &str) -> bool {
         && !url.contains(['#', '\\', '\r', '\n'])
         && (matches!(
             path,
-            "/" | "/accounts" | "/transactions" | "/review" | "/reports"
-        ) || ["/transactions/", "/review/"].iter().any(|prefix| {
-            path.strip_prefix(prefix).is_some_and(|id| {
-                !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-            })
-        }))
+            "/" | "/accounts" | "/transactions" | "/review" | "/reports" | "/reconciliation"
+        ) || path
+            .strip_prefix("/reports/")
+            .is_some_and(|id| crate::reports::VIEW_IDS.contains(&id))
+            || ["/transactions/", "/review/"].iter().any(|prefix| {
+                path.strip_prefix(prefix).is_some_and(|id| {
+                    !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                })
+            }))
 }
 
 async fn update(
