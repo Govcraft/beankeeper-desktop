@@ -1,10 +1,12 @@
 //! Local Desktop host for the upstream Beankeeper CLI and MCP router.
 
 pub mod boundary;
+pub mod bridge;
 pub mod browser;
 pub mod cli;
 pub mod pairing;
 pub mod server;
+pub mod setup;
 mod ui;
 mod views;
 
@@ -13,6 +15,10 @@ use std::{error::Error, fmt, io, net::SocketAddr};
 /// Startup and browser-launch failures owned by the Desktop host.
 #[derive(Debug)]
 pub enum DesktopError {
+    /// Onboarding could not finish safely.
+    Setup(Box<setup::SetupError>),
+    /// The stdio-to-HTTP bridge failed.
+    Bridge(bridge::BridgeError),
     /// A non-loopback listener needs explicit consent.
     UnsafeBind(SocketAddr),
     /// The UI supports the canonical IPv4 and IPv6 loopback addresses.
@@ -33,6 +39,8 @@ impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pairing(error) => write!(f, "{error}"),
+            Self::Setup(error) => write!(f, "{error}"),
+            Self::Bridge(error) => write!(f, "{error}"),
             Self::UnsafeBind(bind) => write!(
                 f,
                 "non-loopback bind {bind} requires --allow-remote (plaintext HTTP, no TLS)"
@@ -59,6 +67,8 @@ impl Error for DesktopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Pairing(error) => Some(error),
+            Self::Setup(error) => Some(error),
+            Self::Bridge(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::Ledger(error) => Some(error),
             Self::Probe(error) => Some(error),

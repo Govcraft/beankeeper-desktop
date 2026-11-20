@@ -6,9 +6,9 @@ use beankeeper_cli::{
     error::CliError,
 };
 use beankeeper_desktop::{
-    DesktopError, browser,
+    DesktopError, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
-    server,
+    server, setup,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
@@ -18,13 +18,29 @@ fn main() -> ExitCode {
         Some(("serve", options)) => {
             let options =
                 ServeOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
-            let ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            server::serve(&ledger, options)
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            setup::stored_passphrase(&mut ledger)
+                .map_err(|error| DesktopError::Setup(Box::new(error)))
+                .and_then(|_guard| server::serve(&ledger, options))
         }
         Some(("open", options)) => {
             let options =
                 OpenOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
             browser::open(options.bind)
+        }
+        Some(("setup", options)) => {
+            let options =
+                setup::SetupOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            setup::run(&mut ledger, &options).map_err(|error| DesktopError::Setup(Box::new(error)))
+        }
+        Some(("mcp", mcp)) if mcp.subcommand_name() == Some("bridge") => {
+            let options = bridge::BridgeOptions::from_arg_matches(
+                mcp.subcommand_matches("bridge")
+                    .unwrap_or_else(|| unreachable!()),
+            )
+            .unwrap_or_else(|error| error.exit());
+            bridge::run(&options).map_err(DesktopError::Bridge)
         }
         _ => return upstream(&matches),
     };
@@ -42,7 +58,14 @@ fn main() -> ExitCode {
 }
 
 fn upstream(matches: &clap::ArgMatches) -> ExitCode {
-    let cli = Cli::from_arg_matches(matches).unwrap_or_else(|error| error.exit());
+    let mut cli = Cli::from_arg_matches(matches).unwrap_or_else(|error| error.exit());
+    let _passphrase = match setup::stored_passphrase(&mut cli) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let json_mode = cli.is_json();
     let meta =
         json_mode.then(|| cli.meta(commands::command_name(&cli.command), cli.company.as_deref()));
