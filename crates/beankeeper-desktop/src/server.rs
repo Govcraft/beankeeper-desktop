@@ -17,7 +17,7 @@ use crate::{
     boundary::{self, LocalBoundary},
     cli::ServeOptions,
     pairing::{self, AgentKey, PairingState},
-    ui,
+    review, ui,
 };
 
 /// Refuse remote listeners unless explicitly requested.
@@ -75,6 +75,11 @@ pub fn application(
     )?;
     let mcp = ledger_router(cli, read_only, config, passphrase.as_ref())?;
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
+    let review = review::router(
+        Db::open_existing(&cli.db, passphrase.as_ref())?,
+        cli.company.clone(),
+        pairing.clone(),
+    )?;
     drop(passphrase);
     let fallback = cli
         .agent_token
@@ -85,6 +90,7 @@ pub fn application(
         pairing::mcp_guard,
     ));
     Ok(ui::router(db, cli.company.clone(), pairing.clone())
+        .merge(review)
         .merge(pairing::router(pairing))
         .merge(mcp)
         .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
