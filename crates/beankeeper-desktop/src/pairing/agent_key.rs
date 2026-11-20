@@ -21,7 +21,7 @@ impl AgentKey {
     }
 
     #[cfg(test)]
-    pub(super) fn for_test(seed: &str) -> Self {
+    pub(crate) fn for_test(seed: &str) -> Self {
         Self(Secret::digest(seed))
     }
 }

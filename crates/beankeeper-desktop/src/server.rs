@@ -75,7 +75,7 @@ pub fn application(
         cli.passphrase.passphrase_file.as_deref(),
         false,
     )?;
-    let navigation = Navigation::new(pairing.clone());
+    let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
     let mcp = http_router_with_host_tools(
         cli,
         passphrase.as_ref(),

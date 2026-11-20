@@ -1,7 +1,7 @@
 // Embedded, same-origin enhancement. Ordinary links/forms also work without JS.
 (async () => {
   "use strict";
-  const csrf = document.querySelector('input[name="csrf"]')?.value;
+  const csrf = document.querySelector('section[aria-labelledby="session"] input[name="csrf"]')?.value;
   if (!csrf) return;
   const notice = document.createElement("p");
   notice.setAttribute("role", "status");

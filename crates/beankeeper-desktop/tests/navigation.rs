@@ -171,6 +171,7 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
         json!({"view_id":"reports","state":{"report_kind":"balance_sheet","period":"2026"}}),
     )?;
     assert!(text(&unavailable).contains("View not available"));
+    assert!(content(&unavailable)["pairing_url"].as_str().is_some());
     for arguments in [
         json!({"view_id":"https://evil.example"}),
         json!({"view_id":"transactions","state":{"from":"2026-02-30"}}),
@@ -307,12 +308,12 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
         &server,
         nav,
         "ui_show_view",
-        json!({"view_id":"review_detail","state":{"company":"acme","proposal_id":"prop_example"},"tab_id":second}),
+        json!({"view_id":"review_detail","state":{"company":"acme","proposal_id":"proposal_01h455vb4pex5vsknk084sn02q"},"tab_id":second}),
     )?;
     assert_eq!(content(&exact)["queued"], true);
     assert_eq!(
         event(&mut second_events, "navigate")?["url"],
-        "/review/prop_example?company=acme"
+        "/review/proposal_01h455vb4pex5vsknk084sn02q?company=acme"
     );
     assert_eq!(event(&mut events, "heartbeat")?["kind"], "heartbeat");
     let response = server
@@ -393,7 +394,10 @@ fn tab_routes_require_cookie_origin_csrf_and_never_accept_bearer_authority() -> 
     assert_eq!(
         server
             .client
-            .get(format!("{}/api/ui/events?tab_id=tab_unknown", server.base))
+            .get(format!(
+                "{}/api/ui/events?tab_id=tab_01h455vb4pex5vsknk084sn02q",
+                server.base
+            ))
             .send()?
             .status(),
         401
@@ -407,5 +411,122 @@ fn tab_routes_require_cookie_origin_csrf_and_never_accept_bearer_authority() -> 
             .status(),
         401
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn shutdown_closes_live_browser_stream_and_drains_the_listener() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let csrf = csrf(&server)?;
+    let tab = update(&server, &csrf, None, "/", "")?;
+    let mut events = stream(&server, &tab)?;
+    event(&mut events, "heartbeat")?;
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-INT", &server.child.id().to_string()])
+            .status()?
+            .success()
+    );
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut events, &mut rest)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = server.child.try_wait()? {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Server failed to drain SSE"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[test]
+fn closed_tabs_are_removed_and_another_browser_cannot_claim_their_stream() -> TestResult {
+    let ledger = Ledger::new()?;
+    let navigator = issue(&ledger, "navigator")?;
+    let nav = token(&navigator)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(nav))?;
+    server.pair()?;
+    let csrf = csrf(&server)?;
+    associate(&server, nav, &csrf)?;
+    let tab = update(&server, &csrf, None, "/", "")?;
+    let mut events = stream(&server, &tab)?;
+    event(&mut events, "heartbeat")?;
+    assert_eq!(
+        content(&call(&server, nav, "ui_status", json!({}))?)["tabs"]
+            .as_array()
+            .ok_or("tabs")?
+            .len(),
+        1
+    );
+    let link_html = server
+        .client
+        .post(format!("{}/api/session/pairing", server.base))
+        .header("Origin", &server.base)
+        .form(&[("csrf", &csrf)])
+        .send()?
+        .text()?;
+    let url = link_html
+        .split("href=\"")
+        .filter_map(|value| value.split('"').next())
+        .find(|url| url.starts_with(&format!("{}/pair?token=", server.base)))
+        .ok_or("browser link")?;
+    let other = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let redeemed = other.get(url).send()?;
+    assert_eq!(redeemed.status(), 303);
+    let cookie = redeemed.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("cookie")?;
+    assert_eq!(
+        other
+            .get(format!("{}/api/ui/events?tab_id={tab}", server.base))
+            .header("Cookie", cookie)
+            .send()?
+            .status(),
+        401
+    );
+    drop(events);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let result = call(&server, nav, "ui_status", json!({}))?;
+        if content(&result)["tabs"] == json!([]) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Closed tab remained connected"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let result = call(&server, nav, "ui_show_view", json!({"view_id":"accounts"}))?;
+    assert_eq!(content(&result)["queued"], false);
+    assert!(text(&result).contains("nothing was displayed"));
+    for path in [
+        "/transactions/999999?company=acme",
+        "/review/not_a_proposal?company=acme",
+    ] {
+        let response = server.client.get(format!("{}{path}", server.base)).send()?;
+        assert!(!response.status().is_success());
+        let html = response.text()?;
+        assert!(html.contains("/assets/navigation.js"));
+        assert!(
+            html.contains("aria-labelledby=\"session\""),
+            "Error view lost its navigation session"
+        );
+    }
     Ok(())
 }

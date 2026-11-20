@@ -41,11 +41,11 @@ const MAX_PENDING: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-struct TabId(String);
+struct TabId(#[schemars(with = "String")] MagicTypeId);
 
 impl TabId {
     fn new() -> Self {
-        Self("tab".create_type_id::<V7>().to_string())
+        Self("tab".create_type_id::<V7>())
     }
 }
 
@@ -117,18 +117,15 @@ impl Show {
                     .ok_or("transaction requires a positive transaction_id.")?
             ),
             View::Review => "/review".into(),
-            View::ReviewDetail => format!(
-                "/review/{}",
-                crate::views::encode(
-                    state
-                        .proposal_id
-                        .as_deref()
-                        .filter(|id| !id.is_empty()
-                            && id.len() <= 128
-                            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
-                        .ok_or("review_detail requires proposal_id.")?
-                )
-            ),
+            View::ReviewDetail => {
+                let id = state
+                    .proposal_id
+                    .as_deref()
+                    .ok_or("review_detail requires proposal_id.")?
+                    .parse::<beankeeper_cli::db::proposals::ProposalId>()
+                    .map_err(|_| "proposal_id must be a proposal TypeID.")?;
+                format!("/review/{id}")
+            }
             View::Reports => return Err("View not available: reports."),
         };
         if matches!(self.view_id, View::Review | View::ReviewDetail)
@@ -223,13 +220,18 @@ struct Tab {
 #[derive(Clone)]
 pub(crate) struct Navigation {
     pairing: PairingState,
+    cancellation: tokio_util::sync::CancellationToken,
     tabs: Arc<Mutex<HashMap<TabId, Tab>>>,
 }
 
 impl Navigation {
-    pub(crate) fn new(pairing: PairingState) -> Self {
+    pub(crate) fn new(
+        pairing: PairingState,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
             pairing,
+            cancellation,
             tabs: Arc::default(),
         }
     }
@@ -299,7 +301,13 @@ impl Navigation {
             "ui_status" => {
                 let input: Status = match serde_json::from_value(arguments) {
                     Ok(input) => input,
-                    Err(_) => return Ok(failure("VALIDATION", "Invalid ui_status arguments.")),
+                    Err(_) => {
+                        return self.failure_with_link(
+                            &agent,
+                            "VALIDATION",
+                            "Invalid ui_status arguments.",
+                        );
+                    }
                 };
                 let states: Vec<_> = available.iter().filter(|(id, _)| input.tab_id.as_ref().is_none_or(|wanted| wanted == *id)).map(|(id, tab)| json!({"tab_id":id, "url":tab.url, "title":tab.title, "highlight":tab.highlight, "targets":tab.targets, "pending":tab.pending.len()})).collect();
                 let text = if states.is_empty() {
@@ -544,7 +552,7 @@ async fn events(
     headers: HeaderMap,
     Query(input): Query<Events>,
 ) -> Result<Response, PairingError> {
-    {
+    let epoch = {
         let mut tabs = state.tabs.lock().map_err(|_| PairingError::Unavailable)?;
         let tab = tabs
             .get_mut(&input.tab_id)
@@ -552,20 +560,18 @@ async fn events(
             .ok_or(PairingError::Unauthorized)?;
         tab.connected = true;
         tab.epoch = tab.epoch.wrapping_add(1);
-    }
+        tab.epoch
+    };
     let lease = StreamLease {
         tabs: state.tabs.clone(),
         id: input.tab_id.clone(),
-        epoch: state
-            .tabs
-            .lock()
-            .map_err(|_| PairingError::Unavailable)?
-            .get(&input.tab_id)
-            .ok_or(PairingError::Unauthorized)?
-            .epoch,
+        epoch,
     };
     let stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(250)))
         .map(move |_| {
+            if state.cancellation.is_cancelled() {
+                return None;
+            }
             // Revalidate D3 authority during the stream, including logout and expiry.
             let live = state.pairing.session(&headers, Instant::now()).ok()?;
             let mut tabs = state.tabs.lock().ok()?;
@@ -573,10 +579,7 @@ async fn events(
                 .get_mut(&input.tab_id)
                 .filter(|tab| tab.session == live.id && tab.epoch == lease.epoch)?;
             tab.seen = Instant::now();
-            let event = std::iter::from_fn(|| tab.pending.pop_front())
-                .find(|(agent, _)| live.agent.as_ref() == Some(agent))
-                .map(|(_, event)| event)
-                .unwrap_or_else(|| json!({"kind":"heartbeat"}));
+            let event = next_event(&mut tab.pending, live.agent.as_ref());
             let _keep_lease = &lease;
             Some(Ok::<_, Infallible>(
                 Event::default().event("ui").data(event.to_string()),
@@ -585,4 +588,70 @@ async fn events(
         .take_while(Option::is_some)
         .map(|event| event.unwrap_or_else(|| Ok(Event::default())));
     Ok(Sse::new(stream).into_response())
+}
+
+fn next_event(pending: &mut VecDeque<(AgentKey, Value)>, agent: Option<&AgentKey>) -> Value {
+    std::iter::from_fn(|| pending.pop_front())
+        .find(|(owner, _)| agent == Some(owner))
+        .map(|(_, event)| event)
+        .unwrap_or_else(|| json!({"kind":"heartbeat"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reassociation_discards_pending_events_from_the_previous_agent() {
+        let old = AgentKey::for_test("old");
+        let current = AgentKey::for_test("current");
+        let mut pending = VecDeque::from([
+            (old, json!({"kind":"navigate","url":"/review"})),
+            (current.clone(), json!({"kind":"highlight","target":"main"})),
+        ]);
+        assert_eq!(
+            next_event(&mut pending, Some(&current))["kind"],
+            "highlight"
+        );
+        assert!(pending.is_empty());
+        pending.push_back((current, json!({"kind":"navigate","url":"/accounts"})));
+        assert_eq!(next_event(&mut pending, None)["kind"], "heartbeat");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn view_addresses_use_real_routes_and_validate_detail_identifiers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (input, expected) in [
+            (json!({"view_id":"dashboard"}), "/"),
+            (
+                json!({"view_id":"accounts","state":{"company":"a&b"}}),
+                "/accounts?company=a%26b",
+            ),
+            (
+                json!({"view_id":"transaction","state":{"transaction_id":42,"company":"acme"}}),
+                "/transactions/42?company=acme",
+            ),
+            (
+                json!({"view_id":"review_detail","state":{"proposal_id":"proposal_01h455vb4pex5vsknk084sn02q"}}),
+                "/review/proposal_01h455vb4pex5vsknk084sn02q",
+            ),
+        ] {
+            let show: Show = serde_json::from_value(input)?;
+            assert_eq!(show.url()?, expected);
+            assert!(local_view(expected));
+        }
+        for id in [
+            "../approve",
+            "x/reject",
+            "..",
+            "transaction_01h455vb4pex5vsknk084sn02q",
+        ] {
+            let show: Show = serde_json::from_value(
+                json!({"view_id":"review_detail","state":{"proposal_id":id}}),
+            )?;
+            assert!(show.url().is_err());
+        }
+        Ok(())
+    }
 }

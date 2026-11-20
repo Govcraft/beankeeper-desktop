@@ -14,7 +14,7 @@ pub struct ServeOptions {
     /// Permit a non-loopback listener over plaintext HTTP, without relaxing Host/Origin checks.
     #[arg(long)]
     pub allow_remote: bool,
-    /// Expose only upstream tools that read the ledger.
+    /// Expose only observation tools; disable agent ledger and UI mutations.
     #[arg(long)]
     pub read_only: bool,
 }
