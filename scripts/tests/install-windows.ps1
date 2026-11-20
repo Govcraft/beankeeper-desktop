@@ -71,6 +71,8 @@ try {
     Assert-Rejected 'exactly one SHA-256'
     "$digest  $artifact`n$digest  $artifact" | Set-Content $manifest
     Assert-Rejected 'exactly one SHA-256'
+    # GitHub's pwsh wrapper propagates LASTEXITCODE, including mock failures.
+    $global:LASTEXITCODE = 0
     Write-Host 'Windows installer verification tests passed'
 } finally {
     Remove-Item -LiteralPath $temporary -Force -Recurse
