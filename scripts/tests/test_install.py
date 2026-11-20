@@ -85,6 +85,15 @@ sys.exit({1 if fail else 0})
         self.assertIn("checksum mismatch", result.stderr)
         self.assertEqual((self.destination / "bk").read_text(), "previous version")
 
+    def test_invalid_version_is_rejected_before_downloading(self):
+        for value in ("../main", "0.1", "0.1.0.1", "0.1.0-beta"):
+            with self.subTest(value=value):
+                self.env["BK_VERSION"] = value
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid version", result.stderr)
+                self.assertFalse((self.destination / "bk").exists())
+
     def test_missing_checksum_fails_before_installation(self):
         (self.fixtures / "checksums-sha256.txt").write_text("")
         result = self.run_installer()

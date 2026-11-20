@@ -16,9 +16,9 @@ INSTALL_DIR="${BK_INSTALL:-/usr/local/bin}"
 main() {
     detect_platform
     resolve_version
-    case "$VERSION" in
-        ''|*[!0-9.]*|.*|*..*|*.) fatal "invalid version: $VERSION" ;;
-    esac
+    if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        fatal "invalid version: $VERSION"
+    fi
     download_and_install
     verify
 }
