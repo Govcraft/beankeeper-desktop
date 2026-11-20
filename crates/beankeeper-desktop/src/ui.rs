@@ -204,7 +204,10 @@ async fn view(
                     "Invalid filters",
                     "Check your URL filters and try again.",
                     "",
-                    "<p><a href=\"/transactions\">Reset register filters</a></p>",
+                    &format!(
+                        "<p><a href=\"/transactions\">Reset register filters</a></p>{}",
+                        session_controls(&session)
+                    ),
                 ),
             )
                 .into_response();
@@ -234,7 +237,7 @@ async fn view(
             if error.status().is_server_error() {
                 eprintln!("Ledger view failed: {error:?}");
             }
-            (error.status(), page("Unable to display this view", &error.to_string(), "", "<p><a href=\"/\">Return to dashboard</a> or <a href=\"/transactions\">reset register filters</a>.</p>")).into_response()
+            (error.status(), page("Unable to display this view", &error.to_string(), "", &format!("<p><a href=\"/\">Return to dashboard</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -242,7 +245,7 @@ async fn view(
                 "Ledger unavailable",
                 "The ledger could not be read. Try again or check the server terminal.",
                 "",
-                "",
+                &session_controls(&session),
             ),
         )
             .into_response(),

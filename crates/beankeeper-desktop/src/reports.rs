@@ -109,6 +109,23 @@ fn option<T: ValueEnum>(value: &Option<String>, default: &str) -> Result<T, View
 }
 
 impl ReportQuery {
+    /// Validate navigation without reading ledger data, including initial filter pages.
+    pub(crate) fn validate_navigation(&self, path: &str) -> Result<(), ViewError> {
+        self.filters.validate()?;
+        if path == "/reports" {
+            return Ok(());
+        }
+        let kind = Kind::parse(path)?;
+        if (kind == Kind::Reconciliation && nonempty(&self.filters.account).is_none())
+            || (kind == Kind::Budget
+                && nonempty(&self.year).is_none()
+                && nonempty(&self.filters.from).is_none())
+        {
+            return Ok(());
+        }
+        self.command(kind).map(|_| ())
+    }
+
     fn command(&self, kind: Kind) -> Result<ReportCommand, ViewError> {
         let q = &self.filters;
         q.validate()?;
@@ -369,7 +386,9 @@ pub(crate) fn render(
             query.url(path, company, "csv")
         );
     }
-    html.push_str("</p><section class=\"report-results\"><h2>Report results</h2>");
+    html.push_str(
+        "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>",
+    );
     value_html(&data, &mut html);
     html.push_str("</section>");
     Ok(page(html))
@@ -413,7 +432,7 @@ fn form(
     q: &ReportQuery,
 ) -> Result<String, ViewError> {
     let mut html = format!(
-        "<form method=\"get\" action=\"{}\" class=\"filters\"><label>Company<select name=\"company\">",
+        "<form id=\"report-filters\" method=\"get\" action=\"{}\" class=\"filters\"><label>Company<select name=\"company\">",
         escape(path)
     );
     for c in companies {

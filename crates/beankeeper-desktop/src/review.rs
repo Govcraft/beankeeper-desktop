@@ -136,7 +136,7 @@ struct Decision {
     reason: Option<String>,
 }
 
-fn failure(error: CliError) -> Response {
+fn failure(error: CliError, session: Option<&Session>) -> Response {
     let status = match error {
         CliError::NotFound(_) => StatusCode::NOT_FOUND,
         CliError::Validation(_) => StatusCode::CONFLICT,
@@ -162,13 +162,16 @@ fn failure(error: CliError) -> Response {
             "Review unavailable",
             message,
             "/review",
-            "<p><a href=\"/review\">Return to review queue</a></p>",
+            &format!(
+                "<p><a href=\"/review\">Return to review queue</a></p>{}",
+                session.map(ui::session_controls).unwrap_or_default()
+            ),
         ),
     )
         .into_response()
 }
 
-async fn run<F>(state: ReviewState, operation: F) -> Response
+async fn run<F>(state: ReviewState, session: Option<Session>, operation: F) -> Response
 where
     F: FnOnce(&mut Review) -> Result<Response, CliError> + Send + 'static,
 {
@@ -182,8 +185,11 @@ where
     .await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => failure(error),
-        Err(_) => failure(CliError::General("review worker failed".into())),
+        Ok(Err(error)) => failure(error, session.as_ref()),
+        Err(_) => failure(
+            CliError::General("review worker failed".into()),
+            session.as_ref(),
+        ),
     }
 }
 
@@ -192,7 +198,10 @@ async fn queue(
     Extension(session): Extension<Session>,
     Query(query): Query<ReviewQuery>,
 ) -> Response {
-    run(state, move |review| render(review, &query, None, &session)).await
+    run(state, Some(session.clone()), move |review| {
+        render(review, &query, None, &session)
+    })
+    .await
 }
 
 async fn detail(
@@ -201,7 +210,7 @@ async fn detail(
     Path(id): Path<String>,
     Query(query): Query<ReviewQuery>,
 ) -> Response {
-    run(state, move |review| {
+    run(state, Some(session.clone()), move |review| {
         render(review, &query, Some(&id), &session)
     })
     .await
@@ -224,7 +233,7 @@ async fn reject(
 }
 
 async fn resolve(state: ReviewState, id: String, form: Decision, approve: bool) -> Response {
-    run(state, move |review| {
+    run(state, None, move |review| {
         let id: ProposalId = id.parse()?;
         let actor = review.actor()?;
         let proposal = proposals::get(review.db.conn(), &form.company, id.as_str())?;
@@ -263,7 +272,7 @@ async fn resolve(state: ReviewState, id: String, form: Decision, approve: bool) 
 }
 
 async fn recheck(State(state): State<ReviewState>, Form(query): Form<ReviewQuery>) -> Response {
-    run(state, move |review| {
+    run(state, None, move |review| {
         review.recheck()?;
         let suffix = query
             .company

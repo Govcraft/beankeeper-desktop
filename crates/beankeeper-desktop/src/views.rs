@@ -429,7 +429,8 @@ fn accounts(db: &Db, company: &str, query: &ViewQuery, html: &mut String) -> Res
             .url("/transactions", company, 0);
             let _ = write!(
                 html,
-                "<li><a href=\"{link}\">{} · {}</a>{}</li>",
+                "<li id=\"account-{}\"><a href=\"{link}\">{} · {}</a>{}</li>",
+                escape(&account.code),
                 escape(&account.code),
                 escape(&account.name),
                 account
@@ -462,7 +463,8 @@ fn transaction_table(
     for row in rows {
         let _ = write!(
             html,
-            "<tr><td>{}</td><th scope=\"row\"><a href=\"/transactions/{}?company={}\">{}</a></th><td>{}</td><td>{}</td>",
+            "<tr id=\"transaction-{}\"><td>{}</td><th scope=\"row\"><a href=\"/transactions/{}?company={}\">{}</a></th><td>{}</td><td>{}</td>",
+            row.id,
             escape(&row.date),
             row.id,
             encode(company),

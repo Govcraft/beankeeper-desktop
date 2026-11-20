@@ -11,6 +11,11 @@
   explicit self-update requiring matching SHA-256 checksums and mandatory
   Sigstore bundles before binary replacement. Release packaging emits and signs
   the update manifest; no ledger or schema changes.
+- Authenticated `ui_show_view`, `ui_highlight` and `ui_status` MCP host tools with
+  separate upstream UI grants, D3-associated tab selection, bounded SSE events,
+  confirmed browser state, readable no-tab pairing links and invalid-view errors.
+- Embedded same-origin browser receiver, stable row highlight IDs and navigation
+  catalog; no frontend build dependency, ledger handlers or schema changes.
 
 - Company-scoped browser review queue and proposal deep links with complete
   posting details, proposer identity and current spend caps. Paired, CSRF/Origin
@@ -53,5 +58,8 @@
 
 ### Fixed
 
-- Share the resolved ledger passphrase with the MCP router through an in-memory
-  pipe FD, preserving one-shot sources without a plaintext temporary file.
+- Navigate to real report and reconciliation views with URL-restorable filters
+  and highlight their filter/results regions after integrating D6.
+
+- Pass the resolved ledger secret directly to upstream's public host-tool router,
+  preserving one-shot sources and removing the Unix-only passphrase pipe bridge.

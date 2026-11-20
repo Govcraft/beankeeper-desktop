@@ -1,11 +1,11 @@
 # Frontend build decision
 
 D2 uses semantic HTML and plain CSS in `ui/`, compiled into `bk` with Rust's
-`include_str!`. There is no JavaScript runtime, framework, generated asset tree,
-or separate frontend package to install. Ledger views use server-rendered HTML
+`include_str!`. There is no build-time JavaScript runtime, framework, generated
+asset tree, or separate frontend package to install. Ledger views use server-rendered HTML
 and GET forms, so filters remain URL-addressable without browser scripts. D3's
-pairing and session forms protect every ledger view. Push events and navigation
-tools belong to D4.
+pairing and session forms protect every ledger view. D4 adds a small embedded
+same-origin script for SSE navigation and highlights. Ordinary navigation and all human forms still work without scripts.
 
 Install stable Rust with rustup, plus a C compiler, make, Perl and pkg-config
 for upstream's bundled SQLCipher/OpenSSL build. On Ubuntu:
@@ -16,8 +16,8 @@ rustup toolchain install stable --component rustfmt,clippy
 cargo build --release --locked
 ```
 
-Edit `ui/index.html` or `ui/style.css`, then rebuild `bk`. Cargo tracks both
-`include_str!` inputs, so an asset change recompiles the embedding module.
+Edit `ui/index.html`, `ui/style.css` or `ui/navigation.js`, then rebuild `bk`.
+Cargo tracks these `include_str!` inputs, so an asset change recompiles the embedding module.
 CI's clippy and test builds compile these exact sources on every PR. There are
 no checked-in generated assets to drift from their inputs. Integration tests
 request both the HTML and CSS from a server started with an empty current
@@ -40,29 +40,25 @@ See [browser pairing](browser-pairing.md).
 
 If future views need an asset bundler, adopt a small TypeScript/Vite build with
 pnpm and document that decision in its own issue. D2 deliberately requires only
-the Rust toolchain. Its restrictive CSP will need an explicit update when
-browser scripts are introduced.
+the Rust toolchain. CSP now permits same-origin scripts and connections for D4,
+while forbidding inline and third-party scripts.
 
 ## Core views and read boundary
 
 D5 calls the pinned upstream CLI library's company, account, report, transaction
 and audit query functions from a read-only `Db::open_snapshot` connection. Each
 page runs on a blocking worker under one database read transaction. There is no
-browser JSON API, parallel ledger or migration. MCP retains its upstream
+browser ledger JSON API, parallel ledger or migration. MCP retains its upstream
 connection and credential enforcement on the same listener.
 
-At startup Desktop resolves the original passphrase source once, supplies the
-same secret to upstream's router factory through an anonymous in-memory pipe FD
-(`passphrase_fd`), and opens the read-only snapshot plus a separate upstream
-connection for browser review. A scoped writer runs while
-the factory reads the pipe, so secrets larger than the pipe buffer cannot block
-startup. Both pipe ends close before serving; the resolved secret is never
-written to a temporary file. This preserves one-shot passphrase FDs and commands
-with the source-based upstream factory Desktop currently uses. Encrypted Desktop
-startup currently requires Unix because this bridge uses Unix passphrase FDs.
-Upstream added a resolved-passphrase router factory in
-[beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111), closing #109;
-Desktop has not yet integrated it.
+At startup Desktop resolves the original passphrase source once and supplies the
+same secret directly to upstream's `http_router_with_host_tools` factory. It also
+opens read-only view and association snapshots plus a separate connection for
+browser review. No Unix pipe bridge or plaintext temporary file is needed.
+One-shot passphrase FDs and commands retain their single-use behavior. The
+association snapshot calls upstream's public identity verifier after successful
+MCP responses solely to derive D3 routing keys matching the host callback.
+Upstream remains responsible for authentication, live grants and tool dispatch.
 
 `/`, `/accounts`, `/transactions`, `/transactions/{id}`, `/reports`,
 `/reports/{id}`, `/reconciliation` and `/review`
@@ -120,3 +116,6 @@ integration tests compare its output with CLI CSV, including quoted payee names.
 No subprocess, temporary export file, browser JSON credentials or schema change
 is involved. The public `reports::VIEW_IDS` list and [URL reference](reports.md)
 provide the D4 integration contract. Reconciliation exposes no mutation path.
+
+See [agent navigation](navigation.md) for the SSE protocol, tab lifecycle, grant
+contract, embedded receiver and integration tests.

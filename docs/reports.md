@@ -10,8 +10,11 @@ new accounting logic or schema migrations.
 ## Stable view IDs and URLs
 
 These IDs are also available in Rust as `beankeeper_desktop::reports::VIEW_IDS`.
-D4 can target these URLs when its navigation tools are present. This change does
-not add navigation tools or browser events itself.
+`ui_show_view` accepts these IDs directly, or `view_id: "reports"` with
+`state.report_kind` set to one of these IDs. The same URL filters below are
+accepted as navigation state. `ui_highlight` can target the `report-filters` and
+`report-results` regions advertised by `ui_status`. See the
+[navigation catalog](navigation.md) for grants, pairing and tab selection.
 
 | View ID | URL | Additional filters |
 | --- | --- | --- |

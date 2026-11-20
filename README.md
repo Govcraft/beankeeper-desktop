@@ -4,7 +4,8 @@ Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
 preview shows your dashboard, accounts, transactions, financial reports, tax
 summaries and reconciliation, with read-only ledger views and a browser review
-queue for agent proposals. Live agent navigation comes later.
+queue for agent proposals. Agents with a separate UI credential can navigate a
+paired tab and highlight rows over SSE.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -56,11 +57,9 @@ All upstream CLI commands remain available, including
 `bk mcp serve` for stdio and `bk mcp serve --http` for MCP-only HTTP. Desktop
 extends upstream's command parser and delegates those commands to its dispatcher.
 Use `bk --help` or `bk serve --help` for options.
-The MCP router receives the resolved passphrase through an in-memory pipe.
-Encrypted Desktop startup currently requires Unix because Desktop still uses
-this pipe bridge. Upstream added a resolved-passphrase router factory in
-[beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111), closing #109;
-Desktop has not yet integrated it.
+The MCP router receives the already-resolved passphrase through upstream's
+public host-tool factory, preserving one-shot secret sources without a pipe or
+temporary file.
 
 ```sh
 bk --db /path/to/books.db serve --bind 127.0.0.1:8751 --read-only
@@ -80,7 +79,8 @@ Configure your agent's Streamable HTTP client with the `/mcp` URL and an
 `Authorization: Bearer <agent-token>` header. Issue an agent token with upstream's
 `bk key init` and `bk agent issue` commands for an encrypted ledger. Request
 credentials, revocation checks and capability rules all come from upstream's
-public `mcp::http_router`; Desktop copies no authentication or ledger handlers.
+public `mcp::http_router_with_host_tools`; Desktop copies no authentication or
+ledger handlers.
 Every MCP request needs a valid token, even if policy enforcement is off.
 Upstream's `BK_AGENT_TOKEN` / `--agent-token` fallback remains supported when a
 request has no Authorization header. Keep this fallback private to your process;
@@ -92,7 +92,7 @@ exactly one allowed Host with the actual bound port: `127.0.0.1:PORT`,
 `http://HOST` for that request, including the port. Missing Origin is allowed for
 native clients. Nonlocal, malformed, duplicate or null origins are rejected,
 as are rebinding hostnames and wrong ports. There is no permissive CORS layer.
-UI responses also forbid framing and inline/external scripts through CSP.
+UI responses also forbid framing, inline scripts and third-party scripts through CSP.
 These checks complement MCP credentials and the separate browser session.
 
 ## Pair the browser and connect your agent
@@ -123,6 +123,21 @@ default `127.0.0.1` bind (or `[::1]` for IPv6). Other loopback aliases are
 rejected because they are outside the UI Host allowlist. A wildcard listener accepts local
 connections; a specific remote-interface listener needs a client supplying an
 allowed Host and network access to that interface.
+
+## Agent navigation
+
+The `ui_show_view`, `ui_highlight` and `ui_status` MCP tools require a separate
+`ui/navigate` token. Current setup presets supply ledger credentials only;
+upstream rejects mixed ledger/UI grants. Connect a second client entry to the
+same `/mcp` endpoint using the UI token, call `ui_status`, and open its association
+link in a paired browser. With no tab open, tools return useful text and a
+connection link. With multiple connected tabs, choose the `tab_id` from status.
+Navigation/highlight are disabled by `--read-only`; status remains available.
+
+Real dashboard, account, register, transaction, review, financial report, tax
+summary and reconciliation URLs are supported with restorable filters. Tool
+results distinguish queued requests from the browser's confirmed view. See the [tool catalog, grant
+commands and tab design](docs/navigation.md) for arguments, examples and tests.
 
 ## Browse your books
 

@@ -39,7 +39,21 @@ The review queue at `/review?company=SLUG` lists pending agent proposals. Link
 the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and
 current spend caps, then approve or reject using their paired browser session.
 The queue also shows the last full ledger verification and a recheck button.
-Navigation grants (D4) arrive in a separate issue.
+For navigation, configure a second MCP connection with a separate `ui/navigate`
+token issued by the human owner. Ledger and UI grants cannot share a token.
+Current setup presets provide ledger tokens only. Call `ui_status`, give its
+association link to the human to open in an already paired browser, then call
+`ui_show_view` with a supported `view_id` and URL-addressable `state`. If several
+tabs are connected, supply a `tab_id` from status. `ui_highlight` accepts exact
+DOM IDs listed by status and never clicks or submits a control. Missing rows are
+a no-op. Reports and reconciliation accept the stable view IDs and filters in
+[docs/reports.md](docs/reports.md), either directly or via `view_id: "reports"`
+and `state.report_kind`. Use `report-filters` or `report-results` from status to
+highlight those regions. No tab is required:
+read the textual fallback and say clearly when nothing was displayed. A queued
+result is not browser confirmation; use `ui_status` to inspect the loaded view.
+`--read-only` removes navigation/highlight mutations. See the
+[navigation catalog](docs/navigation.md) for arguments and examples.
 Desktop's supported workflow is agent proposes, human approves in the browser.
 Do not ask for approval tokens or call MCP approval tools on the human's behalf.
 The server supplies its own ephemeral human authority behind cookie/CSRF checks;

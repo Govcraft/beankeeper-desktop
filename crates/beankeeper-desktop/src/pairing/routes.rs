@@ -196,10 +196,16 @@ async fn associate(
     Ok(Redirect::to("/"))
 }
 
+pub(crate) type McpPairing = (
+    PairingState,
+    Option<secrecy::SecretString>,
+    std::sync::Arc<std::sync::Mutex<beankeeper_cli::db::Db>>,
+);
+
 /// Observe successful upstream authentication without copying verification code.
 /// Cookie credentials are stripped before entering the MCP transport.
 pub(crate) async fn mcp_guard(
-    State((state, fallback)): State<(PairingState, Option<AgentKey>)>,
+    State((state, fallback, db)): State<McpPairing>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -209,15 +215,33 @@ pub(crate) async fn mcp_guard(
             .ok()
             .and_then(|value| value.split_once(' '))
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map(|(_, token)| AgentKey::from_verified_token(token)),
+            .map(|(_, token)| secrecy::SecretString::from(token.to_owned())),
         None => fallback,
     };
     request.headers_mut().remove(header::COOKIE);
     let mut response = next.run(request).await;
     // http_router verifies credentials before it dispatches any MCP request.
     // Failed authentication, including revocation, can never mint an invite.
-    if response.status().is_success()
-        && let Some(agent) = agent
+    let agent = if response.status().is_success() {
+        tokio::task::spawn_blocking(move || {
+            let token = agent?;
+            let db = db.lock().ok()?;
+            // Reuse the public upstream verifier only to derive D3 routing identity.
+            // Authentication and grant decisions remain inside the MCP router.
+            let identity = beankeeper_cli::identity::verify(
+                db.conn(),
+                secrecy::ExposeSecret::expose_secret(&token),
+            )
+            .ok()?;
+            Some(AgentKey::from_verified_identity(&identity))
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    if let Some(agent) = agent
         && let Ok(sessions) = state.paired_sessions(&agent, Instant::now())
         && sessions.is_empty()
         && let Ok(url) = state.agent_pairing_url(agent, Instant::now())
