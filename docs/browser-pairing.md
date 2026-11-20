@@ -73,20 +73,21 @@ external site, **Continue in this browser** starts a same-origin navigation and
 shows the confirmation form. An agent cannot exchange its own invite for a
 human session.
 
-Desktop keys associations by SHA-256 of the exact upstream-verified bearer
-credential, never by a client-supplied MCP session ID or agent name. Separate MCP
-transport sessions using the same bearer share browser targets. Changing bearer
-credentials on a transport never inherits another agent's pairing. Request
-fallback credentials retain upstream's behavior and follow the same association
-rules. Failed authentication and revoked credentials never receive an invite.
-The response header is omitted once a browser is associated. To connect another
-browser, D4 can explicitly request another invite through the state API.
+Desktop keys associations by SHA-256 of the upstream-verified identity URI and
+token ID, never by a client-supplied MCP session ID or agent name. This lets the
+D4 host callback use its request-scoped `VerifiedAgent` without receiving a raw
+credential. The response-header helper reuses upstream's public verifier after
+successful MCP responses to obtain the same routing key; it adds no authentication
+or grant decisions. Separate transport sessions using the same credential share
+browser targets. Changing bearer credentials never inherits another agent's
+pairing. Fallback credentials follow the same rules. Failed authentication and
+revoked credentials never receive an invite.
 
-D4 can share the `PairingState` passed to `server::application`, derive an
-`AgentKey` from an upstream-verified token, and call `agent_pairing_url` or
-`paired_sessions`. Navigation tools should return that URL in their text result
-when no target exists. This issue provides the association and URL API, without
-adding D4 navigation tools or changing upstream ledger tools. Browser profiles
-share cookies across tabs. D4 can attach individual tab connections to the public
-`BrowserSessionId`; these IDs confer no cookie authority. Multiple independently
-paired browsers can be associated with the same agent using separate invites.
+`PairingState::paired_sessions` and `agent_pairing_url` remain the association
+APIs. Derive an `AgentKey` with `from_verified_identity`. D4 registers individual
+public tab TypeIDs within each `BrowserSessionId`; these confer no cookie
+authority. Multiple independently paired browsers can be associated using
+separate invites. Each associated browser has one current agent identity; a
+human confirmation can replace it. Pending events from the previous identity
+are discarded. See [navigation](navigation.md) for tool arguments, SSE delivery,
+tab selection and acknowledgement behavior.

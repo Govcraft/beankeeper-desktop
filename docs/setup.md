@@ -40,7 +40,8 @@ need owner-configured limits before giving the agent access: upstream interprets
 an absent company bucket as unrestricted. Resuming setup preserves the existing
 preset and limits; it does not apply new limit options or rotate credentials.
 Use upstream agent issuance/revocation and spend-limit commands for changes.
-Tokens expire after one year. `ui/navigate` is not granted until D4 supplies it.
+Tokens expire after one year. Setup presets do not grant `ui/navigate`; issue a
+separate UI token as described below.
 
 The bookkeeper agent cannot approve proposals or change its own spend limits.
 Setup enables upstream capability enforcement. A separate owner token includes
@@ -81,9 +82,8 @@ upstream commands load it automatically. Explicit passphrase sources still win.
 Upstream accepts a file or descriptor, so Desktop holds a private temporary file
 only for the duration of dispatch; the credential is not put into process args
 or environment variables. The Desktop server passes the resolved secret to the
-MCP router through main's in-memory pipe, so one-shot sources are read once.
-Encrypted Desktop serving currently requires Unix; see the
-[platform limitation](../README.md#build-and-run). Unenrolled ledgers retain
+MCP router through upstream's resolved-passphrase factory, so one-shot sources
+are read once without the former Unix pipe bridge. Unenrolled ledgers retain
 upstream behavior.
 
 If the keychain entry is lost, recover the passphrase from the recovery kit into
@@ -171,3 +171,11 @@ request/response MCP tools, negotiated session/protocol headers, and JSON or SSE
 POST replies. It deletes the session when stdin closes. Standalone server-push
 GET subscriptions are not implemented in this bridge; add them when a Desktop
 feature requires asynchronous MCP server notifications.
+
+## Separate navigation credentials
+
+The setup presets remain ledger-only. Upstream UI tokens use a separate `/ui/`
+subject, so a preset cannot combine `ui/navigate` with ledger grants. The owner
+can issue a second navigation token and configure a second MCP client entry at
+the same Desktop endpoint. See [navigation setup](navigation.md) for the issue
+command, supported tools, pairing and read-only behavior.
