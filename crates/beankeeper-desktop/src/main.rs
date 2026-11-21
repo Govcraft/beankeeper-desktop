@@ -36,7 +36,7 @@ fn main() -> ExitCode {
             .and_then(|dir| {
                 let status = updates::check(
                     &dir.join("updates.json"),
-                    product::updates_disabled(),
+                    product::update_checks(),
                     updates::now(),
                 )?;
                 println!("{status}");
@@ -45,12 +45,16 @@ fn main() -> ExitCode {
             .map_err(DesktopError::Product),
         Some(("self-update", _)) => product::state_dir()
             .and_then(|dir| {
-                if product::updates_disabled() {
+                if product::update_checks() == updates::UpdateChecks::Disabled {
                     return Err(product::ProductError::Configuration(
                         "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
                     ));
                 }
-                updates::check(&dir.join("updates.json"), false, updates::now())?;
+                updates::check(
+                    &dir.join("updates.json"),
+                    updates::UpdateChecks::Enabled,
+                    updates::now(),
+                )?;
                 updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
                 println!("Desktop updated. Restart bk serve to use the installed version.");
                 Ok(())
@@ -60,9 +64,11 @@ fn main() -> ExitCode {
             let options =
                 ServeOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            setup::stored_passphrase(&mut ledger)
-                .map_err(|error| DesktopError::Setup(Box::new(error)))
-                .and_then(|_guard| server::serve(&ledger, options))
+            server::validate_bind(options.bind, options.allow_remote).and_then(|bind| {
+                let _guard = setup::stored_passphrase(&mut ledger)
+                    .map_err(|error| DesktopError::Setup(Box::new(error)))?;
+                server::serve(&ledger, bind, options.read_only)
+            })
         }
         Some(("open", options)) => {
             let options =
