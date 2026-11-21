@@ -6,9 +6,11 @@ use std::{
 };
 
 use super::{Config, Paths, ServiceError, private_write, remove_if_exists};
+use crate::private_file::PrivateFile;
 
 const UNIT: &str = "beankeeper-desktop.service";
 const LABEL: &str = "ai.govcraft.beankeeper-desktop";
+const WINDOWS_STOP_SIGNAL: &str = "service-stop.request";
 
 pub(super) fn check_user() -> Result<(), ServiceError> {
     #[cfg(unix)]
@@ -24,7 +26,7 @@ pub(super) fn install(paths: &Paths, config: &Config) -> Result<(), ServiceError
     if !paths.log().try_exists()? {
         private_write(&paths.log(), b"")?;
     } else {
-        crate::private_file::PrivateFile::open(&paths.log())?;
+        PrivateFile::open(&paths.log())?;
     }
     if cfg!(target_os = "linux") {
         private_write(&linux_artifact(paths), systemd(paths, config)?.as_bytes())?;
@@ -69,6 +71,7 @@ pub(super) fn start(paths: &Paths) -> Result<(), ServiceError> {
             )
         }
     } else {
+        remove_if_exists(&paths.state.join(WINDOWS_STOP_SIGNAL))?;
         powershell(paths, "start")
     }
 }
@@ -96,6 +99,7 @@ pub(super) fn stop(paths: &Paths) -> Result<(), ServiceError> {
         }
         Ok(())
     } else {
+        private_write(&paths.state.join(WINDOWS_STOP_SIGNAL), b"stop")?;
         powershell(paths, "stop")
     }
 }
@@ -112,6 +116,7 @@ pub(super) fn uninstall(paths: &Paths) -> Result<(), ServiceError> {
         powershell(paths, "uninstall")?;
         remove_if_exists(&paths.definition)?;
         remove_if_exists(&paths.state.join("service-run.ps1"))?;
+        remove_if_exists(&paths.state.join(WINDOWS_STOP_SIGNAL))?;
     }
     Ok(())
 }
@@ -235,7 +240,17 @@ fn xml(value: &str) -> Result<String, ServiceError> {
 }
 fn ps(value: &str) -> Result<String, ServiceError> {
     clean(value)?;
-    Ok(format!("'{}'", value.replace('\'', "''")))
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for ch in value.chars() {
+        // PowerShell treats typographic single quotes as delimiters too.
+        if matches!(ch, '\'' | '\u{2018}'..='\u{201b}') {
+            literal.push(ch);
+        }
+        literal.push(ch);
+    }
+    literal.push('\'');
+    Ok(literal)
 }
 fn environment(paths: &Paths) -> Vec<(&'static str, &Path)> {
     vec![
@@ -293,14 +308,32 @@ fn windows_runner(paths: &Paths, config: &Config) -> Result<String, ServiceError
     for (key, path) in environment(paths) {
         script.push_str(&format!("$env:{key} = {}\n", ps(text(path)?)?));
     }
-    // Task Scheduler considers a launched action completed even when it returns
-    // an error. Keep its action alive and supervise the actual host directly.
+    let executable = ps(text(&config.executable)?)?;
+    let stdout = ps(text(&paths.logs.join("service-stdout.log"))?)?;
+    let stderr = ps(text(&paths.log())?)?;
+    let stop = ps(text(&paths.state.join(WINDOWS_STOP_SIGNAL))?)?;
     script.push_str(&format!(
-        "while ($true) {{\n    try {{\n        Start-Process -FilePath {} -ArgumentList 'service','run' -NoNewWindow -Wait -RedirectStandardOutput {} -RedirectStandardError {}\n    }} catch {{\n        Add-Content -LiteralPath {} -Encoding UTF8 -Value 'Unable to start Desktop host; retrying.'\n    }}\n    Start-Sleep -Seconds 2\n}}\n",
-        ps(text(&config.executable)?)?,
-        ps(text(&paths.logs.join("service-stdout.log"))?)?,
-        ps(text(&paths.log())?)?,
-        ps(text(&paths.log())?)?,
+        r#"$stop = {stop}
+# Keep the scheduled action alive while the host restarts. Task Scheduler
+# still supplies the logon trigger and retries an unexpected launcher exit.
+while (-not (Test-Path -LiteralPath $stop)) {{
+    $process = Start-Process -FilePath {executable} -ArgumentList 'service','run' -NoNewWindow -PassThru -RedirectStandardOutput {stdout} -RedirectStandardError {stderr}
+    try {{
+        while (-not $process.WaitForExit(250)) {{
+            if (Test-Path -LiteralPath $stop) {{
+                try {{ $process.Kill() }} catch {{ if (-not $process.HasExited) {{ throw }} }}
+                $process.WaitForExit()
+                break
+            }}
+        }}
+    }} finally {{
+        $process.Dispose()
+    }}
+    if (-not (Test-Path -LiteralPath $stop)) {{ Start-Sleep -Milliseconds 2000 }}
+}}
+Set-Content -LiteralPath $stop -Value 'stopped' -Encoding ascii
+exit 0
+"#
     ));
     Ok(script)
 }
@@ -310,6 +343,7 @@ fn windows_task(paths: &Paths) -> Result<String, ServiceError> {
     let arguments = ps(&format!(
         "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{runner}\""
     ))?;
+    let stop = ps(text(&paths.state.join(WINDOWS_STOP_SIGNAL))?)?;
     let script = format!(
         r#"param([ValidateSet('install','start','stop','uninstall','running')][string]$Operation)
 $ErrorActionPreference = 'Stop'
@@ -326,7 +360,21 @@ switch ($Operation) {{
         Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     }}
     'start' {{ Enable-ScheduledTask -TaskName $name | Out-Null; Start-ScheduledTask -TaskName $name }}
-    'stop' {{ if ($task) {{ Disable-ScheduledTask -TaskName $name | Out-Null; if ($task.State -eq 'Running' -or $task.State -eq 'Queued') {{ Stop-ScheduledTask -TaskName $name }} }} }}
+    'stop' {{
+        if ($task) {{
+            $wasRunning = $task.State -eq 'Running' -or $task.State -eq 'Queued'
+            Disable-ScheduledTask -TaskName $name | Out-Null
+            if ($wasRunning) {{
+                $deadline = [DateTime]::UtcNow.AddSeconds(8)
+                while ([DateTime]::UtcNow -lt $deadline) {{
+                    if ((Get-Content -LiteralPath {stop} -Raw -ErrorAction SilentlyContinue) -match '^stopped\s*$') {{ break }}
+                    Start-Sleep -Milliseconds 100
+                }}
+                # Also stop an older registered launcher that lacks the signal protocol.
+                Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            }}
+        }}
+    }}
     'uninstall' {{ if ($task) {{ Unregister-ScheduledTask -TaskName $name -Confirm:$false }} }}
     'running' {{ if (-not $task -or $task.State -ne 'Running') {{ exit 1 }} }}
 }}
@@ -399,14 +447,21 @@ mod tests {
             assert!(script.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
             assert!(script.contains("café"));
         }
+        assert_eq!(
+            ps("owner's ‘file’ ‚folder‛")?,
+            "'owner''s ‘‘file’’ ‚‚folder‛‛'"
+        );
         let runner = windows_runner(&paths, &config)?;
         assert!(runner.contains("Start-Process"));
         assert!(runner.contains("-RedirectStandardError"));
         assert!(!runner.contains("*>>"));
-        assert!(runner.contains("while ($true)"));
-        assert!(runner.contains("Start-Sleep -Seconds 2"));
-        assert!(!runner.contains("exit $process.ExitCode"));
-        assert!(windows_task(&paths)?.contains("-WindowStyle Hidden"));
+        assert!(runner.contains("while (-not (Test-Path -LiteralPath $stop))"));
+        assert!(runner.contains("Start-Sleep -Milliseconds 2000"));
+        assert!(runner.contains("$process.Kill()"));
+        let task = windows_task(&paths)?;
+        assert!(task.contains("-WindowStyle Hidden"));
+        assert!(task.contains("Disable-ScheduledTask"));
+        assert!(task.contains("service-stop.request"));
         Ok(())
     }
 

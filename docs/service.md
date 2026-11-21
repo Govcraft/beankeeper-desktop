@@ -108,8 +108,8 @@ host and restarts it after a two-second delay whenever it exits. Task Scheduler
 can report an executed action as completed even when the action returns an error,
 so child-host recovery stays inside this small runner. The task also retains
 native startup retry settings (one minute, up to 999 attempts). Stop disables the
-task before stopping the runner and its host. Diagnostics go to the protected
-log, and lifecycle helpers hide their console windows. No administrator rights
+task, signals the runner to terminate its child, and waits for the stop
+acknowledgement. Diagnostics go to the protected log, and lifecycle helpers hide their console windows. No administrator rights
 are needed for service management.
 
 These registrations follow the native [systemd service contract](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html),
