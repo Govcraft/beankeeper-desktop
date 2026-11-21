@@ -1,7 +1,7 @@
 //! Stable Desktop addresses, validated once at CLI, MCP and saved-URL boundaries.
 
 mod filters;
-mod values;
+pub(crate) mod values;
 
 use filters::*;
 use schemars::JsonSchema;
@@ -249,7 +249,7 @@ pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
             return Err("Duplicate or unsupported address field.");
         }
         let value = if key == "offset" {
-            serde_json::json!(value.parse::<usize>().map_err(|_| "Invalid offset.")?)
+            serde_json::json!(value.parse::<i64>().map_err(|_| "Invalid offset.")?)
         } else {
             serde_json::json!(value)
         };
