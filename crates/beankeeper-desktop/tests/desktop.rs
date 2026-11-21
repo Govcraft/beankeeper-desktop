@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use beankeeper_cli::{db::Actor, identity};
+use beankeeper_cli::{
+    db::{Actor, Db, get_schema_version},
+    identity,
+};
 use beankeeper_desktop::browser;
 use common::{Ledger, Server, TestResult, clean_command, rpc, token};
 use serde_json::{Value, json};
@@ -347,6 +350,31 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
             .is_none()
     );
     assert_duplicate_hosts_rejected(authority)?;
+    Ok(())
+}
+
+#[test]
+fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> TestResult {
+    let ledger = Ledger::new()?;
+    {
+        let db = ledger.db()?;
+        // Undo migration 21 to represent a ledger from the previous release.
+        db.conn().execute_batch(
+            "BEGIN;
+             DROP TABLE setup_sessions;
+             DELETE FROM schema_version WHERE version = 21;
+             COMMIT;",
+        )?;
+        assert_eq!(get_schema_version(db.conn())?, 20);
+    }
+
+    let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
+    let passphrase = std::fs::read_to_string(&ledger.secret)?.into();
+    let migrated = Db::open_snapshot(&ledger.path, Some(&passphrase))?;
+    assert!(get_schema_version(migrated.conn())? >= 21);
+    server.initialize(Some(token(&ledger.reader)?))?;
+    server.pair()?;
+    assert_eq!(server.client.get(&server.base).send()?.status(), 200);
     Ok(())
 }
 

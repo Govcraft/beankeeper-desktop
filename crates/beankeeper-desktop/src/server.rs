@@ -87,6 +87,8 @@ pub fn application(
         cli.passphrase.passphrase_file.as_deref(),
         false,
     )?;
+    // Migrate through the review connection before opening the read-only snapshots.
+    let review_db = Db::open_existing(&cli.db, passphrase.as_ref())?;
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
     let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
     let mcp = http_router_with_host_tools(
@@ -100,11 +102,7 @@ pub fn application(
         },
     )?;
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
-    let review = review::router(
-        Db::open_existing(&cli.db, passphrase.as_ref())?,
-        cli.company.clone(),
-        pairing.clone(),
-    )?;
+    let review = review::router(review_db, cli.company.clone(), pairing.clone())?;
     drop(passphrase);
     let fallback = cli.agent_token.clone();
     let mcp = mcp.layer(middleware::from_fn_with_state(
