@@ -182,8 +182,20 @@ fn cli_report(ledger: &Ledger, args: &[&str], format: &str) -> TestResult<String
 fn rendered_scalars(value: &Value, html: &str) {
     match value {
         Value::Object(map) => {
-            for value in map.values() {
-                rendered_scalars(value, html);
+            for (key, value) in map {
+                if key.ends_with("_display") {
+                    // Compare decimal companions after removing presentation-only
+                    // symbols and grouping. Raw amount fields are verified by the
+                    // JSON/CSV contract checks, rather than expected in HTML.
+                    let decimals = html
+                        .replace(",", "")
+                        .replace(['$', '€', '£', '¥'], "")
+                        .replace("CA", "")
+                        .replace("MX", "");
+                    rendered_scalars(value, &decimals);
+                } else if !map.contains_key(&format!("{key}_display")) {
+                    rendered_scalars(value, html);
+                }
             }
         }
         Value::Array(rows) => {
@@ -354,6 +366,15 @@ fn every_report_matches_cli_json_and_url_filters_restore_the_rendered_results() 
             assert!(html.contains("<h2>Report results</h2>"), "{path}: {html}");
             assert!(!html.contains("<script>"));
             rendered_scalars(&actual, &html);
+            let symbol = if currency == "USD" { "$" } else { "MX$" };
+            assert!(
+                html.contains(&format!("class=\"amount\">{symbol}")),
+                "{path}: {html}"
+            );
+            assert!(
+                !html.contains("(major units)</th>") && !html.contains("(major units)</dt>"),
+                "duplicate display columns: {path}"
+            );
             assert!(html.contains(&format!(
                 "name=\"currency\" type=\"text\" value=\"{currency}\""
             )));

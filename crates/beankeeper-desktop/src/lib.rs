@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod browser;
 pub mod cli;
 pub mod license;
+mod money;
 mod navigation;
 pub mod pairing;
 pub mod product;

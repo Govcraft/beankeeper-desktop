@@ -446,11 +446,12 @@ dependencies = [
 
 [[package]]
 name = "beankeeper-desktop"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 dependencies = [
  "assert_cmd",
  "axum",
  "base64 0.23.1",
+ "beankeeper",
  "beankeeper-cli",
  "chrono",
  "clap",

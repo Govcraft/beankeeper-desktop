@@ -35,6 +35,11 @@ view IDs and query filters in [docs/reports.md](docs/reports.md) for saved repor
 links. Tax CSV/JSON downloads require the human browser session; agent bearer
 tokens cannot authorize them. These summaries are not filed tax forms.
 
+Browser monetary values are formatted in major units with currency symbols and
+grouping. Report HTML prefers upstream `*_display` decimal fields. Register
+`min_amount`/`max_amount` filters still use integer minor units; JSON/CSV downloads
+and raw audit/proposal payloads retain their original units.
+
 The review queue at `/review?company=SLUG` lists pending agent proposals. Link
 the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and
 current spend caps, then approve or reject using their paired browser session.

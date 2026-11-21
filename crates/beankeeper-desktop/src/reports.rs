@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::money;
 use crate::views::{ViewError, ViewPage, ViewQuery, encode, escape, input, nonempty, valid_date};
 
 /// Stable view IDs for agent navigation. Financial/tax IDs use `/reports/ID`;
@@ -290,7 +291,7 @@ pub(crate) fn render(
     let page = |content| {
         ReportResponse::Page(ViewPage {
             title,
-            description: "Read-only reports from your books. Amounts use minor units; formatted major-unit amounts are labeled.",
+            description: "Read-only reports from your books. Monetary amounts are shown in report currency.",
             content,
             nav,
         })
@@ -389,7 +390,7 @@ pub(crate) fn render(
     html.push_str(
         "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>",
     );
-    value_html(&data, &mut html);
+    value_html(&data, Some(currency.code()), &mut html);
     html.push_str("</section>");
     Ok(page(html))
 }
@@ -576,21 +577,65 @@ fn text(value: &Value) -> String {
 }
 
 fn label(key: &str) -> String {
-    match key.strip_suffix("_display") {
-        Some(key) => format!("{} (major units)", escape(&key.replace('_', " "))),
-        None => escape(&key.replace('_', " ")),
+    escape(&key.replace('_', " "))
+}
+
+fn currency<'a>(value: &'a Value, inherited: Option<&'a str>) -> Option<&'a str> {
+    match value.get("currency") {
+        Some(code) => code.as_str(),
+        None => inherited,
     }
 }
 
-// Keep the upstream report structure lossless, including nested settlement
-// details, unmatched tax categories and trend columns, without raw JSON UI.
-fn value_html(value: &Value, html: &mut String) {
+fn visible_field(map: &serde_json::Map<String, Value>, key: &str) -> bool {
+    !key.strip_suffix("_display")
+        .is_some_and(|base| map.contains_key(base))
+}
+
+// Upstream identifies monetary fields with display companions. Counts, IDs,
+// percentages and user metadata must never be scaled just because they are numbers.
+fn field_html(row: &Value, key: &str, inherited: Option<&str>, html: &mut String) {
+    let code = currency(row, inherited);
+    if let Some(display) = row.get(format!("{key}_display")) {
+        display_html(&row[key], display, code, html);
+    } else {
+        value_html(&row[key], code, html);
+    }
+}
+
+fn display_html(raw: &Value, display: &Value, code: Option<&str>, html: &mut String) {
+    if let (Some(value), Some(code)) = (display.as_str(), code)
+        && let Some(formatted) = money::decimal(value, code)
+    {
+        let _ = write!(html, "<span class=\"amount\">{}</span>", escape(&formatted));
+    } else if let (Some(raw), Some(displays)) = (raw.as_array(), display.as_array())
+        && raw.len() == displays.len()
+    {
+        html.push_str("<ol>");
+        for (raw, display) in raw.iter().zip(displays) {
+            html.push_str("<li>");
+            display_html(raw, display, code, html);
+            html.push_str("</li>");
+        }
+        html.push_str("</ol>");
+    } else {
+        value_html(raw, code, html);
+        if !raw.is_null() {
+            html.push_str(" (minor units; currency format unavailable)");
+        }
+    }
+}
+
+// Preserve nested report details while presenting each monetary field once,
+// using its upstream decimal companion as the primary human-readable value.
+fn value_html(value: &Value, inherited: Option<&str>, html: &mut String) {
+    let code = currency(value, inherited);
     match value {
         Value::Object(map) => {
             html.push_str("<dl>");
-            for (key, value) in map {
+            for key in map.keys().filter(|key| visible_field(map, key)) {
                 let _ = write!(html, "<dt>{}</dt><dd>", label(key));
-                value_html(value, html);
+                field_html(value, key, code, html);
                 html.push_str("</dd>");
             }
             html.push_str("</dl>");
@@ -608,7 +653,7 @@ fn value_html(value: &Value, html: &mut String) {
                 let columns: BTreeSet<_> = rows
                     .iter()
                     .filter_map(Value::as_object)
-                    .flat_map(|map| map.keys())
+                    .flat_map(|map| map.keys().filter(|key| visible_field(map, key)))
                     .collect();
                 html.push_str("<div class=\"table-scroll\" tabindex=\"0\" role=\"region\" aria-label=\"Report table\"><table><caption>Report rows</caption><thead><tr>");
                 for key in &columns {
@@ -619,7 +664,7 @@ fn value_html(value: &Value, html: &mut String) {
                     html.push_str("<tr>");
                     for key in &columns {
                         html.push_str("<td>");
-                        value_html(&row[*key], html);
+                        field_html(row, key, code, html);
                         html.push_str("</td>");
                     }
                     html.push_str("</tr>");
@@ -629,7 +674,7 @@ fn value_html(value: &Value, html: &mut String) {
                 html.push_str("<ol class=\"report-items\">");
                 for row in rows {
                     html.push_str("<li>");
-                    value_html(row, html);
+                    value_html(row, code, html);
                     html.push_str("</li>");
                 }
                 html.push_str("</ol>");
@@ -791,13 +836,76 @@ mod tests {
     fn nested_report_tables_preserve_optional_columns_and_escape_all_text() {
         let value = json!([{"name":"<script> & \"payee\"", "amount":123}, {"name":"second", "later_field":"<private>"}]);
         let mut html = String::new();
-        value_html(&value, &mut html);
+        value_html(&value, None, &mut html);
         assert!(html.contains("later field"));
         assert!(html.contains("&lt;private&gt;"));
         assert!(html.contains("&lt;script&gt; &amp; &quot;payee&quot;"));
         assert!(!html.contains("<script>"));
         assert!(html.contains("scope=\"col\""));
         assert!(html.contains("tabindex=\"0\""));
+    }
+
+    #[test]
+    fn report_money_prefers_displays_and_preserves_counts_percentages_and_nulls() {
+        let value = json!({
+            "currency": "USD", "total": 999, "total_display": "55620.00",
+            "payment_count": 12, "change_percent": 2.5,
+            "statement_balance": null, "statement_balance_display": null,
+            "accounts": [{"amounts": [4032470, -5, 0],
+                "amounts_display": ["40324.70", "-0.05", "0.00"]}],
+            "metadata": {"amount": 777}
+        });
+        let original = value.clone();
+        let mut html = String::new();
+        value_html(&value, None, &mut html);
+        for expected in [
+            "$55,620.00",
+            "$40,324.70",
+            "-$0.05",
+            "$0.00",
+            ">12<",
+            ">2.5<",
+            "Not recorded",
+            ">777<",
+        ] {
+            assert!(html.contains(expected), "{expected}: {html}");
+        }
+        for unwanted in [
+            ">999<",
+            ">4032470<",
+            "total display",
+            "amounts display",
+            "statement balance display",
+        ] {
+            assert!(!html.contains(unwanted), "{unwanted}: {html}");
+        }
+        assert_eq!(value, original);
+    }
+
+    #[test]
+    fn report_rows_override_currency_and_unknown_formats_are_explicit_and_escaped() {
+        let value = json!([
+            {"name": "<payee>", "amount": 1234, "amount_display": "12.34"},
+            {"currency": "JPY", "amount": 1234, "amount_display": "1234"},
+            {"currency": "BHD", "amount": -1234, "amount_display": "-1.234"},
+            {"currency": "XYZ<script>", "amount": 1234, "amount_display": null},
+            {"amount": 5, "amount_display": "<script>"}
+        ]);
+        let mut html = String::new();
+        value_html(&value, Some("USD"), &mut html);
+        for expected in [
+            "$12.34",
+            "¥1,234",
+            "-BHD 1.234",
+            "&lt;payee&gt;",
+            "XYZ&lt;script&gt;",
+            ">1234</span> (minor units; currency format unavailable)",
+        ] {
+            assert!(html.contains(expected), "{expected}: {html}");
+        }
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("amount display"));
+        assert_eq!(html.matches("scope=\"col\">amount</th>").count(), 1);
     }
 
     #[test]

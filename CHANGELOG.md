@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.5] - 2026-11-20
+
+### Fixed
+
+- Show exact, grouped major-unit currency amounts on the dashboard, register,
+  transaction details, reports and proposal review, including spend caps and
+  approval buttons. Report HTML prefers upstream decimal display fields and
+  hides duplicate raw amount columns. JSON/CSV downloads and raw audit/payload
+  details retain their original units.
+
 ## [0.1.0-rc.4] - 2026-11-20
 
 ### Fixed
