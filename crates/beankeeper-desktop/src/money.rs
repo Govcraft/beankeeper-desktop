@@ -36,13 +36,14 @@ pub(crate) fn decimal(value: &str, code: &str) -> Option<String> {
         "CAD" => "CA$",
         "AUD" => "A$",
         "MXN" => "MX$",
-        // ISO codes avoid ambiguous or unfamiliar currency symbols.
-        "CHF" => "CHF ",
-        "BHD" => "BHD ",
-        "KWD" => "KWD ",
-        _ => return None,
+        _ => "",
     };
-    let mut formatted = format!("{sign}{symbol}");
+    // Valid currencies without a familiar symbol retain their ISO code and scale.
+    let mut formatted = if symbol.is_empty() {
+        format!("{sign}{code} ")
+    } else {
+        format!("{sign}{symbol}")
+    };
     for (index, digit) in whole.chars().enumerate() {
         if index > 0 && (whole.len() - index).is_multiple_of(3) {
             formatted.push(',');
@@ -81,6 +82,21 @@ mod tests {
         }
         assert_eq!(minor(i64::MIN, "USD"), "-$92,233,720,368,547,758.08");
         assert_eq!(minor(i64::MAX, "BHD"), "BHD 9,223,372,036,854,775.807");
+    }
+
+    #[test]
+    fn currencies_without_symbol_mappings_use_code_and_exact_major_units() {
+        for (code, value, display, expected) in [
+            ("CHF", 123_456, "1234.56", "CHF 1,234.56"),
+            ("CHF", -5, "-0.05", "-CHF 0.05"),
+            ("BHD", -1_234, "-1.234", "-BHD 1.234"),
+            ("KWD", 1, "0.001", "KWD 0.001"),
+            ("KWD", 0, "0.000", "KWD 0.000"),
+        ] {
+            assert!(Currency::from_code(code).is_ok());
+            assert_eq!(minor(value, code), expected);
+            assert_eq!(decimal(display, code).as_deref(), Some(expected));
+        }
     }
 
     #[test]
