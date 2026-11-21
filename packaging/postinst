@@ -1,0 +1,24 @@
+#!/bin/sh
+# Debian runs this as root. Only initialize books for an identifiable login user.
+set -eu
+[ "${1:-configure}" = configure ] || exit 0
+[ "${BK_NO_SERVICE:-0}" != 1 ] || exit 0
+owner="${SUDO_USER:-}"
+if [ -z "$owner" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    owner="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+fi
+if [ -z "$owner" ]; then owner="$(logname 2>/dev/null || true)"; fi
+if [ -z "$owner" ] || [ "$owner" = root ]; then
+    echo 'Beankeeper installed. In your desktop login, run: bk service install' >&2
+    exit 0
+fi
+uid="$(id -u "$owner")"
+user_home="$(getent passwd "$owner" | cut -d: -f6)"
+if [ ! -S "/run/user/$uid/bus" ]; then
+    echo 'No desktop user bus is available. After login, run: bk service install' >&2
+    exit 0
+fi
+runuser -u "$owner" -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" /usr/bin/bk service install || {
+    echo 'Background setup needs attention. As the desktop user, run: bk service install' >&2
+}
