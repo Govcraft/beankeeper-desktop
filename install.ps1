@@ -6,7 +6,8 @@ param(
         Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
     }),
     [switch]$NoService = ($env:BK_NO_SERVICE -eq '1'),
-    [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1')
+    [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1'),
+    [switch]$RequireSignatures = ($env:BK_REQUIRE_SIGNATURES -eq '1')
 )
 $ErrorActionPreference = 'Stop'
 $Repository = 'Govcraft/beankeeper-desktop'
@@ -17,6 +18,7 @@ function Get-ReleaseFile([string]$Url, [string]$Destination) {
 
 function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Directory, [string]$ReleaseVersion) {
     if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
+        if ($RequireSignatures) { throw 'cosign is required to verify this release' }
         Write-Warning 'cosign not found: only SHA-256 will be checked; release authenticity is not verified'
         return
     }
@@ -25,6 +27,7 @@ function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Dir
         Get-ReleaseFile "$BaseUrl/$Artifact.sigstore" $bundle
     } catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            if ($RequireSignatures) { throw "Required Sigstore bundle missing for $Artifact (HTTP 404)" }
             Write-Warning "Sigstore bundle missing for $Artifact (HTTP 404); only SHA-256 will be checked for this artifact"
             return
         }
