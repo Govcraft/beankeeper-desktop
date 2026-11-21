@@ -282,6 +282,12 @@ are included; use of an installed eligible release is perpetual. Desktop does
 not contact the license service after activation. Final Desktop licensing terms
 remain Roland's decision; this preview adds no runtime lockout.
 
+Both `bk license` and **License and updates** (`/settings`) explicitly show
+`active and valid` after offline verification. The update window is shown
+separately as open or ended according to the local clock. An ended window does
+not expire perpetual use; update eligibility uses the signed release date.
+Missing activations and verification failures show their specific reason.
+
 `bk update-check` checks the signed GitHub release manifest at most once daily,
 including failed attempts. `bk serve` checks in the background, and paired
 browsers can read the cached result at **License and updates** (`/settings`).

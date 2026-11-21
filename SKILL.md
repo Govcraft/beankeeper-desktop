@@ -70,7 +70,11 @@ explain failed or incomplete checks; reading Settings does not contact the feed.
 The human can activate a downloaded file with `bk license activate FILE`,
 inspect it with `bk license`, check the signed release feed with
 `bk update-check`, and explicitly install an eligible release with
-`bk self-update`. License files, claim codes and recovery tokens are human-owned;
+`bk self-update`. Verified licenses explicitly show `active and valid`; the
+separate open/ended update window is informational and never expires perpetual
+use. Update eligibility uses the signed release date. Missing activations and
+verification failures show their specific reason.
+License files, claim codes and recovery tokens are human-owned;
 never ask for them or perform activation on the human's behalf. Normal ledger
 and agent work does not require online license verification. Automatic update
 checks can be disabled with `BEANKEEPER_NO_UPDATE_CHECK=1`. See

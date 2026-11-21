@@ -98,7 +98,7 @@ pub struct Server {
     pub client: Client,
     pub session: Option<String>,
     pub pairing_url: Option<String>,
-    _cwd: TempDir,
+    pub(super) _cwd: TempDir,
 }
 
 impl Server {

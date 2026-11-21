@@ -52,6 +52,65 @@ fn settings_displays_cached_update_outcome_and_readable_utc_attempt() -> TestRes
 }
 
 #[test]
+fn settings_shows_verified_license_status_and_specific_failures() -> TestResult {
+    let ledger = Ledger::new()?;
+    let directory = tempfile::tempdir()?;
+    let keys_path = directory.path().join("keys.json");
+    let input_path = directory.path().join("license.json");
+    std::fs::write(
+        &keys_path,
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    std::fs::write(&input_path, include_bytes!("fixtures/license.json"))?;
+    let mut command = ledger.command();
+    command
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path);
+    let mut server = Server::launch(command)?;
+    let settings = format!("{}/settings", server.base);
+    assert_eq!(server.client.get(&settings).send()?.status(), 401);
+    server.pair()?;
+    let state_dir = server._cwd.path().join("desktop-state");
+    let activated = clean_command()
+        .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
+        .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path)
+        .args(["license", "activate"])
+        .arg(&input_path)
+        .output()?;
+    assert!(activated.status.success());
+    let html = server.client.get(&settings).send()?.text()?;
+    assert!(html.contains("License status: active and valid."));
+    assert!(html.contains("lic_01h455vb4pex5vsknk084sn02q"));
+    assert!(html.contains("perpetual Desktop use"));
+    assert!(html.contains("2027-11-20T12:00:00+00:00 (inclusive)"));
+    assert!(html.contains("Automatic update checks are disabled"));
+
+    let license_path = state_dir.join("license.json");
+    let original = std::fs::read_to_string(&license_path)?;
+    for (license, keys, reason) in [
+        (
+            original.replace("AHHH0LU", "BHHH0LU"),
+            include_str!("fixtures/license-public-keys.json"),
+            "invalid license signature",
+        ),
+        (
+            original,
+            r#"{"unknown":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"}"#,
+            "license issuer is not in the trusted public-key store",
+        ),
+    ] {
+        std::fs::write(&license_path, license)?;
+        std::fs::write(&keys_path, keys)?;
+        let html = server.client.get(&settings).send()?.text()?;
+        assert!(html.contains("License status: unavailable."));
+        assert!(html.contains(reason));
+        assert!(!html.contains("active and valid"));
+    }
+    assert!(!state_dir.join("updates.json").exists());
+    Ok(())
+}
+
+#[test]
 fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
@@ -83,6 +142,9 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
         assert_eq!(html.matches("aria-current=\"page\"").count(), 1);
         assert!(!html.contains("{{"));
         assert!(!html.contains(token(&ledger.reader)?));
+        if path == "/settings" {
+            assert!(html.contains("License status: not activated."));
+        }
     }
     let style = server
         .client

@@ -200,15 +200,25 @@ fn bounded_file(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, ProductEr
 pub fn license_status() -> Result<String, ProductError> {
     let path = state_dir()?.join("license.json");
     if !path.try_exists()? {
-        return Ok("No Desktop license activated. Use `bk license activate FILE`.".into());
+        return Ok(
+            "License status: not activated. No Desktop license activated. Use `bk license activate FILE`."
+                .into(),
+        );
     }
     let claims = license::load(&path, &trusted_keys()?)?
         .ok_or(ProductError::Configuration("activated license is missing"))?;
-    Ok(describe(&claims))
+    Ok(describe(&claims, Utc::now()))
 }
-fn describe(claims: &LicenseClaims) -> String {
+fn describe(claims: &LicenseClaims, now: DateTime<Utc>) -> String {
+    // The clock only informs the display. Installation eligibility still uses
+    // the authenticated release date in require_update_entitlement.
+    let update_window = if now <= claims.updates_until {
+        "open"
+    } else {
+        "ended; perpetual Desktop use remains active"
+    };
     format!(
-        "License {}: perpetual Desktop use; updates through {} (inclusive).",
+        "License status: active and valid.\nLicense {}: perpetual Desktop use; updates through {} (inclusive).\nUpdate window: {update_window}. Eligibility is based on the signed release date.",
         claims.license_id,
         claims.updates_until.to_rfc3339()
     )
@@ -341,7 +351,7 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
                 }
             };
             let claims = license::activate(&bytes, &keys, &state_dir()?.join("license.json"))?;
-            println!("{}", describe(&claims));
+            println!("{}", describe(&claims, Utc::now()));
         }
     }
     Ok(())
@@ -353,7 +363,7 @@ pub fn updates_disabled() -> bool {
 }
 /// Safe cached status for a paired browser page, without triggering a request.
 pub fn status_text() -> String {
-    let license = license_status().unwrap_or_else(|e| e.to_string());
+    let license = license_status().unwrap_or_else(|e| format!("License status: unavailable. {e}."));
     let updates = state_dir()
         .and_then(|dir| {
             Ok(updates::status(
@@ -367,7 +377,32 @@ pub fn status_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_license_trust, embedded_public_keys};
+    use super::{describe, embedded_license_trust, embedded_public_keys};
+    use crate::license::{TrustedKeys, verify_offline};
+
+    #[test]
+    fn verified_license_status_distinguishes_update_window_from_perpetual_use() {
+        let keys =
+            TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))
+                .expect("fixture public keys");
+        let claims = verify_offline(include_bytes!("../tests/fixtures/license.json"), &keys)
+            .expect("verified fixture");
+        for (now, expected_window) in [
+            (claims.issued_at, "Update window: open."),
+            (claims.updates_until, "Update window: open."),
+            (
+                claims.updates_until + chrono::Duration::seconds(1),
+                "Update window: ended; perpetual Desktop use remains active.",
+            ),
+        ] {
+            let status = describe(&claims, now);
+            assert!(status.starts_with("License status: active and valid."));
+            assert!(status.contains(expected_window));
+            assert!(status.contains("2027-11-20T12:00:00+00:00 (inclusive)"));
+            assert!(status.contains("Eligibility is based on the signed release date."));
+            assert!(!status.contains(&claims.purchaser_ref));
+        }
+    }
 
     #[test]
     fn embedded_trust_matches_compile_time_env() {
