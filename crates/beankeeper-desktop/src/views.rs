@@ -3,38 +3,23 @@
 use std::{error::Error, fmt, fmt::Write};
 
 use axum::http::StatusCode;
+use beankeeper::types::ClearanceStatus;
 use beankeeper_cli::{
     commands::report_currency::resolve_report_currency,
     db::{self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow},
     error::CliError,
 };
-use serde::Deserialize;
 
 use crate::{
+    links::values::{Currency, SCAN_LIMIT},
     markup::{Attribute, Markup, markup, write_markup},
     money,
 };
 
-const PAGE_SIZE: usize = 50;
-const SCAN_LIMIT: usize = 1_000;
+pub(crate) mod filters;
+use filters::{Comparison, Filters};
 
-#[derive(Clone, Default, Deserialize)]
-pub(crate) struct ViewQuery {
-    pub company: Option<String>,
-    pub account: Option<String>,
-    pub category: Option<String>,
-    pub payee: Option<String>,
-    pub compare_from: Option<String>,
-    pub compare_to: Option<String>,
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub min_amount: Option<String>,
-    pub max_amount: Option<String>,
-    pub search: Option<String>,
-    pub status: Option<String>,
-    pub offset: Option<usize>,
-    pub currency: Option<String>,
-}
+const PAGE_SIZE: usize = 50;
 
 pub(crate) struct ViewPage {
     pub title: &'static str,
@@ -107,167 +92,43 @@ pub(crate) fn encode(value: &str) -> String {
     encoded
 }
 
-pub(crate) fn nonempty(value: &Option<String>) -> Option<&str> {
-    value.as_deref().filter(|value| !value.is_empty())
-}
-
-pub(crate) fn valid_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes
-            .iter()
-            .enumerate()
-            .any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
-    {
-        return false;
-    }
-    let (Ok(year), Ok(month), Ok(day)) = (
-        value[..4].parse::<u32>(),
-        value[5..7].parse::<u32>(),
-        value[8..].parse::<u32>(),
-    ) else {
-        return false;
-    };
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
-            29
-        }
-        2 => 28,
-        _ => 0,
-    };
-    year > 0 && day > 0 && day <= days
-}
-
-fn amount(value: &Option<String>) -> Result<Option<i64>, ViewError> {
-    nonempty(value)
-        .map(|value| {
-            value
-                .parse::<i64>()
-                .ok()
-                .filter(|amount| *amount >= 0)
-                .ok_or(ViewError::Invalid(
-                    "Amounts must be nonnegative whole minor units, such as cents.",
-                ))
-        })
-        .transpose()
-}
-
-impl ViewQuery {
-    pub(crate) fn comparison(&self) -> Option<Self> {
-        self.compare_to.as_ref()?;
-        Some(Self {
-            from: self.compare_from.clone(),
-            to: self.compare_to.clone(),
-            compare_from: None,
-            compare_to: None,
-            offset: None,
-            ..self.clone()
-        })
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ViewError> {
-        if [self.compare_from.as_deref(), self.compare_to.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|date| !valid_date(date))
-        {
-            return Err(ViewError::Invalid(
-                "Comparison dates must be valid YYYY-MM-DD calendar dates.",
-            ));
-        }
-        if [
-            nonempty(&self.from),
-            nonempty(&self.to),
-            nonempty(&self.compare_from),
-            nonempty(&self.compare_to),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|date| !valid_date(date))
-        {
-            return Err(ViewError::Invalid(
-                "Dates must be valid calendar dates in YYYY-MM-DD format.",
-            ));
-        }
-        if matches!((nonempty(&self.from), nonempty(&self.to)), (Some(from), Some(to)) if from > to)
-        {
-            return Err(ViewError::Invalid(
-                "The start date must not be after the end date.",
-            ));
-        }
-        match (nonempty(&self.compare_from), nonempty(&self.compare_to)) {
-            (Some(from), Some(to)) if from <= to => {}
-            (None, None | Some(_)) => {}
-            _ => {
-                return Err(ViewError::Invalid(
-                    "Comparison requires compare_from and compare_to in chronological order.",
-                ));
-            }
-        }
-        if matches!((amount(&self.min_amount)?, amount(&self.max_amount)?), (Some(min), Some(max)) if min > max)
-        {
-            return Err(ViewError::Invalid(
-                "Minimum amount must not exceed maximum amount.",
-            ));
-        }
-        if nonempty(&self.status)
-            .is_some_and(|status| !["uncleared", "cleared", "reconciled"].contains(&status))
-        {
-            return Err(ViewError::Invalid(
-                "Clearance must be uncleared, cleared or reconciled.",
-            ));
-        }
-        if self.offset.unwrap_or(0) > i64::MAX as usize - SCAN_LIMIT {
-            return Err(ViewError::Invalid("The pagination offset is too large."));
-        }
-        Ok(())
-    }
-
-    fn url(&self, path: &str, company: &str, offset: usize) -> String {
-        let mut url = format!("{path}?company={}", encode(company));
-        for (name, value) in [
-            ("account", &self.account),
-            ("category", &self.category),
-            ("payee", &self.payee),
-            ("compare_from", &self.compare_from),
-            ("compare_to", &self.compare_to),
-            ("from", &self.from),
-            ("to", &self.to),
-            ("min_amount", &self.min_amount),
-            ("max_amount", &self.max_amount),
-            ("search", &self.search),
-            ("status", &self.status),
-            ("currency", &self.currency),
-        ] {
-            if let Some(value) = nonempty(value) {
-                let _ = write!(url, "&{name}={}", encode(value));
-            }
-        }
-        if offset > 0 {
-            let _ = write!(url, "&offset={offset}");
-        }
-        url
+pub(crate) fn append_url_param(url: &mut String, name: &str, value: Option<impl fmt::Display>) {
+    if let Some(value) = value {
+        let _ = write!(url, "&{name}={}", encode(&value.to_string()));
     }
 }
 
-pub(crate) fn input(name: &str, label: &str, kind: &str, value: &Option<String>) -> Markup {
+pub(crate) fn input(
+    name: &str,
+    label: &str,
+    kind: &str,
+    value: Option<impl fmt::Display>,
+) -> Markup {
+    let value = value.map(|value| value.to_string()).unwrap_or_default();
     markup!(
         "<label>{}<input name=\"{}\" type=\"{}\" value=\"{}\"></label>",
         label,
         name,
         kind,
-        value.as_deref().unwrap_or_default()
+        value
     )
+}
+
+pub(crate) fn hidden(html: &mut Markup, name: &str, value: Option<impl fmt::Display>) {
+    if let Some(value) = value {
+        write_markup!(
+            html,
+            "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+            name,
+            value
+        );
+    }
 }
 
 fn company_form(
     companies: &[db::CompanyRow],
     company: &str,
-    query: &ViewQuery,
+    query: &Filters,
     path: &str,
 ) -> Markup {
     let mut html = markup!(
@@ -285,53 +146,64 @@ fn company_form(
         );
     }
     write_markup!(html, "</select></label>");
-    for (name, value) in [
-        ("category", &query.category),
-        ("payee", &query.payee),
-        ("compare_from", &query.compare_from),
-        ("compare_to", &query.compare_to),
-    ] {
-        if let Some(value) = value {
-            write_markup!(
-                html,
-                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
-                name,
-                value
-            );
-        }
+    hidden(&mut html, "category", query.category.as_deref());
+    hidden(&mut html, "payee", query.payee.as_deref());
+    if let Some(comparison) = query.comparison {
+        hidden(&mut html, "compare_from", comparison.bounds().from());
+        hidden(&mut html, "compare_to", comparison.bounds().to());
     }
-
     if path == "/transactions" {
-        html.append(&input("account", "Account code", "text", &query.account));
-        html.append(&input("from", "From date (inclusive)", "date", &query.from));
-        html.append(&input("to", "To date (inclusive)", "date", &query.to));
+        html.append(&input(
+            "account",
+            "Account code",
+            "text",
+            query.account.as_deref(),
+        ));
+        html.append(&input(
+            "from",
+            "From date (inclusive)",
+            "date",
+            query.dates.from(),
+        ));
+        html.append(&input(
+            "to",
+            "To date (inclusive)",
+            "date",
+            query.dates.to(),
+        ));
         html.append(&input(
             "min_amount",
             "Minimum entry amount (minor units, inclusive)",
             "number",
-            &query.min_amount,
+            query.min_amount(),
         ));
         html.append(&input(
             "max_amount",
             "Maximum entry amount (minor units, inclusive)",
             "number",
-            &query.max_amount,
+            query.max_amount(),
         ));
         html.append(&input(
             "search",
             "Payee / description or reference contains",
             "search",
-            &query.search,
+            query.search.as_ref().map(|search| &search.original),
         ));
         write_markup!(
             html,
             "<label>Clearance<select name=\"status\"><option value=\"\">Any clearance</option>"
         );
-        for status in ["uncleared", "cleared", "reconciled"] {
+        for status in [
+            ClearanceStatus::Uncleared,
+            ClearanceStatus::Cleared,
+            ClearanceStatus::Reconciled,
+        ] {
             write_markup!(
                 html,
                 "<option{}>{}</option>",
-                Attribute::Selected(nonempty(&query.status) == Some(status)),
+                Attribute::Selected(
+                    query.status.as_ref().map(|status| status.status()) == Some(status)
+                ),
                 status
             );
         }
@@ -342,19 +214,15 @@ fn company_form(
             "currency",
             "Currency code (optional)",
             "text",
-            &query.currency,
+            query.currency.as_ref(),
         ));
     }
     write_markup!(html, "<button type=\"submit\">Apply</button></form>");
     html
 }
 
-pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage, ViewError> {
-    query.validate()?;
-    if path == "/transactions"
-        && query.compare_to.is_some()
-        && nonempty(&query.compare_from).is_none()
-    {
+pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, ViewError> {
+    if path == "/transactions" && matches!(query.comparison, Some(Comparison::AsOf(_))) {
         return Err(ViewError::Invalid(
             "Register comparison requires compare_from and compare_to.",
         ));
@@ -383,8 +251,10 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
         _ => return Err(ViewError::NotFound),
     };
     let companies = db::list_companies(db.conn())?;
-    let selected =
-        nonempty(&query.company).or_else(|| companies.first().map(|company| company.slug.as_str()));
+    let selected = query
+        .company
+        .as_deref()
+        .or_else(|| companies.first().map(|company| company.slug.as_str()));
     let Some(company) = selected else {
         return Ok(ViewPage {
             title,
@@ -398,7 +268,7 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
     if !companies.iter().any(|item| item.slug == company) {
         return Err(ViewError::NotFound);
     }
-    if let Some(account) = nonempty(&query.account) {
+    if let Some(account) = query.account.as_deref() {
         db::get_account(db.conn(), company, account)?;
     }
     let mut content = company_form(&companies, company, query, path);
@@ -407,12 +277,20 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
         "/accounts" => accounts(db, company, query, &mut content)?,
         "/transactions" => {
             register(db, company, query, RegisterSection::Primary, &mut content)?;
-            if let Some(comparison) = query.comparison() {
+            if let Some(comparison) = query.comparison_filters() {
                 write_markup!(
                     content,
                     "<section aria-label=\"Comparison period\"><h2>Comparison period: {} through {}</h2>",
-                    comparison.from.as_deref().unwrap_or_default(),
-                    comparison.to.as_deref().unwrap_or_default()
+                    comparison
+                        .dates
+                        .from()
+                        .map(|date| date.to_string())
+                        .unwrap_or_default(),
+                    comparison
+                        .dates
+                        .to()
+                        .map(|date| date.to_string())
+                        .unwrap_or_default()
                 );
                 register(
                     db,
@@ -442,14 +320,13 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
     })
 }
 
-fn dashboard(
-    db: &Db,
-    company: &str,
-    query: &ViewQuery,
-    html: &mut Markup,
-) -> Result<(), ViewError> {
+fn dashboard(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
     write_markup!(html, "<section><h2>Account balances</h2>");
-    match resolve_report_currency(db.conn(), company, nonempty(&query.currency)) {
+    let currency = query.currency.as_ref().map_or_else(
+        || resolve_report_currency(db.conn(), company, None),
+        |currency| Ok(currency.ledger()),
+    );
+    match currency {
         Ok(currency) => {
             let code = currency.code();
             write_markup!(
@@ -467,12 +344,7 @@ fn dashboard(
                 );
             }
             for row in balances {
-                let account_query = ViewQuery {
-                    company: Some(company.into()),
-                    account: Some(row.code.clone()),
-                    currency: Some(code.into()),
-                    ..Default::default()
-                };
+                let account_query = Filters::for_account(row.code.clone(), currency.into());
                 write_markup!(
                     html,
                     "<tr><th scope=\"row\"><a href=\"{}\">{} · {}</a></th><td class=\"amount\">{}</td><td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>",
@@ -489,7 +361,7 @@ fn dashboard(
             }
             write_markup!(html, "</tbody></table></div>");
         }
-        Err(CliError::Validation(_)) if nonempty(&query.currency).is_none() => write_markup!(
+        Err(CliError::Validation(_)) if query.currency.is_none() => write_markup!(
             html,
             "<p class=\"empty\">These books use multiple currencies. Enter a currency code above to view balances without mixing currencies.</p>"
         ),
@@ -513,7 +385,7 @@ fn dashboard(
     Ok(())
 }
 
-fn accounts(db: &Db, company: &str, query: &ViewQuery, html: &mut Markup) -> Result<(), ViewError> {
+fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
     let rows = db::list_accounts(
         db.conn(),
         &db::ListAccountParams {
@@ -542,11 +414,9 @@ fn accounts(db: &Db, company: &str, query: &ViewQuery, html: &mut Markup) -> Res
         }
         write_markup!(html, "<li><strong>{}</strong><ul>", kind);
         for account in group {
-            let link = ViewQuery {
-                account: Some(account.code.clone()),
-                ..query.clone()
-            }
-            .url("/transactions", company, 0);
+            let mut account_filters = query.clone();
+            account_filters.account = Some(account.code.clone());
+            let link = account_filters.url("/transactions", company, 0);
             write_markup!(
                 html,
                 "<li id=\"account-{}\"><a href=\"{}\">{} · {}</a>{}</li>",
@@ -627,25 +497,21 @@ fn transaction_table(
     Ok(())
 }
 
-fn matches_extra(
-    query: &ViewQuery,
-    txn: &TransactionRow,
-    entries: &[EntryRow],
-) -> Result<bool, ViewError> {
-    if let Some(search) = nonempty(&query.search) {
-        let search = search.to_lowercase();
-        if !txn.description.to_lowercase().contains(&search)
+fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) -> bool {
+    if let Some(search) = &query.search {
+        let search = &search.folded;
+        if !txn.description.to_lowercase().contains(search)
             && !txn
                 .reference
                 .as_deref()
                 .unwrap_or_default()
                 .to_lowercase()
-                .contains(&search)
+                .contains(search)
         {
-            return Ok(false);
+            return false;
         }
     }
-    if let Some(payee) = nonempty(&query.payee) {
+    if let Some(payee) = query.payee.as_deref() {
         let metadata = txn
             .metadata
             .as_deref()
@@ -656,49 +522,53 @@ fn matches_extra(
             .and_then(serde_json::Value::as_str)
             != Some(payee)
         {
-            return Ok(false);
+            return false;
         }
     }
-    let min = amount(&query.min_amount)?;
-    let max = amount(&query.max_amount)?;
-    Ok(entries.iter().any(|entry| {
-        nonempty(&query.category)
+    let min = query.min_amount();
+    let max = query.max_amount();
+    entries.iter().any(|entry| {
+        query
+            .category
+            .as_deref()
             .is_none_or(|category| entry.tax_category.as_deref() == Some(category))
-            && nonempty(&query.account).is_none_or(|account| entry.account_code == account)
-            && nonempty(&query.status).is_none_or(|status| entry.status == status)
+            && query
+                .account
+                .as_deref()
+                .is_none_or(|account| entry.account_code == account)
+            && query
+                .status
+                .as_ref()
+                .is_none_or(|status| entry.status == status.status().as_str())
             && min.is_none_or(|min| entry.amount >= min)
             && max.is_none_or(|max| entry.amount <= max)
-    }))
+    })
 }
 
 fn register(
     db: &Db,
     company: &str,
-    query: &ViewQuery,
+    query: &Filters,
     section: RegisterSection,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
     let mut params = ListTransactionParams::for_company(company);
-    params.account_filter = nonempty(&query.account);
-    params.tax_category_filter = nonempty(&query.category);
-    params.from_date = nonempty(&query.from);
-    params.to_date = nonempty(&query.to);
-    let currency = nonempty(&query.currency)
-        .map(|code| resolve_report_currency(db.conn(), company, Some(code)))
-        .transpose()?;
-    params.currency_filter = currency.as_ref().map(|currency| currency.code());
+    params.account_filter = query.account.as_deref();
+    params.tax_category_filter = query.category.as_deref();
+    let from = query.dates.from().map(|date| date.to_string());
+    let to = query.dates.to().map(|date| date.to_string());
+    params.from_date = from.as_deref();
+    params.to_date = to.as_deref();
+    params.currency_filter = query.currency.as_ref().map(Currency::code);
     // Upstream bounds are exclusive; desktop labels and URLs use inclusive bounds.
-    params.amount_gt = amount(&query.min_amount)?.and_then(|min| min.checked_sub(1));
-    let max = amount(&query.max_amount)?;
-    params.amount_lt = max.and_then(|max| max.checked_add(1));
-    let total = usize::try_from(db::count_transactions(db.conn(), &params)?)
-        .map_err(|_| ViewError::Invalid("The ledger is too large to paginate."))?;
-    let start = query.offset.unwrap_or(0);
+    params.amount_gt = query.min_amount().and_then(|min| min.checked_sub(1));
+    params.amount_lt = query.max_amount().and_then(|max| max.checked_add(1));
+    let total = db::count_transactions(db.conn(), &params)?;
+    let start = query.offset.position();
     let mut cursor = start;
     let mut rows = Vec::new();
     while rows.len() < PAGE_SIZE && cursor < total && cursor - start < SCAN_LIMIT {
-        params.offset = i64::try_from(cursor)
-            .map_err(|_| ViewError::Invalid("The pagination offset is too large."))?;
+        params.offset = cursor;
         params.limit = 50;
         let batch = db::list_transactions(db.conn(), &params)?;
         if batch.is_empty() {
@@ -707,7 +577,7 @@ fn register(
         for txn in batch {
             cursor += 1;
             let entries = db::get_entries_for_transaction(db.conn(), txn.id)?;
-            if matches_extra(query, &txn, &entries)? {
+            if matches_extra(query, &txn, &entries) {
                 rows.push(txn);
             }
             if rows.len() == PAGE_SIZE || cursor - start == SCAN_LIMIT {
@@ -720,12 +590,12 @@ fn register(
         "<section><h2>Register</h2><p>Ordered by transaction date, then ID, oldest first. Amount and clearance filters match the same entry. Search is literal and case-insensitive.</p>"
     );
     for (label, value) in [
-        ("Tax category", &query.category),
-        ("Payee (exact)", &query.payee),
-        ("From date", &query.from),
-        ("Through date", &query.to),
+        ("Tax category", query.category.as_deref()),
+        ("Payee (exact)", query.payee.as_deref()),
+        ("From date", from.as_deref()),
+        ("Through date", to.as_deref()),
     ] {
-        if let Some(value) = nonempty(value) {
+        if let Some(value) = value {
             write_markup!(html, "<p>{}: {}.</p>", label, value);
         }
     }
@@ -776,7 +646,7 @@ fn field(html: &mut Markup, label: &str, value: Option<&str>) {
 fn detail(
     db: &Db,
     company: &str,
-    query: &ViewQuery,
+    query: &Filters,
     id: i64,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
@@ -824,24 +694,25 @@ fn detail(
 fn audit(
     db: &Db,
     company: &str,
-    query: &ViewQuery,
+    query: &Filters,
     txn: &TransactionRow,
     entries: &[EntryRow],
     html: &mut Markup,
 ) -> Result<(), ViewError> {
-    let start = query.offset.unwrap_or(0);
+    let start = query.offset.position();
     let params = ListAuditParams {
         agent_uri: None,
         company_slug: Some(company),
         entity: None,
         action: None,
-        limit: SCAN_LIMIT as i64,
-        offset: start as i64,
+        limit: SCAN_LIMIT,
+        offset: start,
     };
-    let total = usize::try_from(db::count_audit(db.conn(), &params)?)
-        .map_err(|_| ViewError::Invalid("The audit trail is too large to paginate."))?;
+    let total = db::count_audit(db.conn(), &params)?;
     let rows = db::list_audit(db.conn(), &params)?;
-    let cursor = start + rows.len();
+    let count = i64::try_from(rows.len())
+        .map_err(|_| ViewError::Invalid("The audit trail is too large to paginate."))?;
+    let cursor = start + count;
     let id = txn.id.to_string();
     let mut shown = 0;
     write_markup!(
@@ -911,10 +782,19 @@ fn audit(
 
 #[cfg(test)]
 mod tests {
+    use super::filters::ViewQuery;
     use super::*;
     use beankeeper_cli::db::{Actor, ConflictStrategy, PostEntryParams, PostTransactionParams};
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+    pub(super) fn render_query(
+        db: &Db,
+        path: &str,
+        query: &ViewQuery,
+    ) -> Result<ViewPage, ViewError> {
+        render(db, path, &query.clone().parse()?)
+    }
 
     fn fixture() -> TestResult<Db> {
         let db = Db::open_in_memory()?;
@@ -989,7 +869,7 @@ mod tests {
                     from: Some(date.into()),
                     ..Default::default()
                 }
-                .validate()
+                .parse()
                 .is_err(),
                 "{date}"
             );
@@ -1000,7 +880,7 @@ mod tests {
                     from: Some(date.into()),
                     ..Default::default()
                 }
-                .validate()
+                .parse()
                 .is_ok()
             );
         }
@@ -1028,16 +908,16 @@ mod tests {
                 ..Default::default()
             },
             ViewQuery {
-                offset: Some(usize::MAX),
+                offset: Some(i64::MAX),
                 ..Default::default()
             },
         ] {
-            assert!(query.validate().is_err());
+            assert!(query.parse().is_err());
         }
     }
 
     #[test]
-    fn links_escape_query_and_preserve_filter_values() {
+    fn links_escape_query_and_preserve_filter_values() -> TestResult {
         let query = ViewQuery {
             company: Some("acme".into()),
             search: Some("O'Reilly & 20% <x>".into()),
@@ -1045,7 +925,7 @@ mod tests {
             min_amount: Some("100".into()),
             ..Default::default()
         };
-        let url = query.url("/transactions", "acme & son", 50);
+        let url = query.parse()?.url("/transactions", "acme & son", 50);
         assert!(url.contains("&offset=50"));
         let link = markup!("<a href=\"{}\">Continue</a>", url);
         let url = link.as_str();
@@ -1053,6 +933,7 @@ mod tests {
         assert!(url.contains("search=O%27Reilly%20%26%2020%25%20%3Cx%3E"));
         assert!(url.contains("&amp;offset=50"));
         assert!(url.contains("&amp;status=cleared"));
+        Ok(())
     }
 
     #[test]
@@ -1070,7 +951,7 @@ mod tests {
             company: Some("acme".into()),
             ..Default::default()
         };
-        let dashboard = render(&db, "/", &query)?;
+        let dashboard = render_query(&db, "/", &query)?;
         assert!(dashboard.content.as_str().contains("$123.45"));
         assert!(dashboard.content.as_str().contains("Net balance"));
         assert!(
@@ -1087,7 +968,7 @@ mod tests {
                 .contains(&format!("/transactions/{id}?company=acme"))
         );
         assert!(!dashboard.content.as_str().contains("<script>"));
-        let accounts = render(&db, "/accounts", &query)?;
+        let accounts = render_query(&db, "/accounts", &query)?;
         assert!(accounts.content.as_str().contains("2 accounts"));
         assert!(accounts.content.as_str().contains("Cash &lt;bank&gt;"));
         assert!(
@@ -1096,7 +977,7 @@ mod tests {
                 .as_str()
                 .contains("<strong>revenue</strong>")
         );
-        let detail = render(&db, &format!("/transactions/{id}"), &query)?;
+        let detail = render_query(&db, &format!("/transactions/{id}"), &query)?;
         assert!(detail.content.as_str().contains("Entries"));
         assert!(detail.content.as_str().contains("&lt;memo&gt;"));
         assert!(detail.content.as_str().contains("&lt;script&gt;"));
@@ -1109,7 +990,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render(&db, &format!("/transactions/{id}"), &other)
+            render_query(&db, &format!("/transactions/{id}"), &other)
                 .err()
                 .ok_or("expected not found")?
                 .status(),
@@ -1158,7 +1039,7 @@ mod tests {
             status: Some("cleared".into()),
             ..Default::default()
         };
-        let page = render(&db, "/transactions", &query)?;
+        let page = render_query(&db, "/transactions", &query)?;
         assert!(page.content.as_str().contains(">Coffee</a>"));
         assert!(!page.content.as_str().contains(">Other description</a>"));
         assert!(
@@ -1171,7 +1052,7 @@ mod tests {
             ..query.clone()
         };
         assert!(
-            render(&db, "/transactions", &category_on_other_leg)?
+            render_query(&db, "/transactions", &category_on_other_leg)?
                 .content
                 .as_str()
                 .contains("0 matching transactions shown")
@@ -1182,7 +1063,7 @@ mod tests {
             ..query
         };
         assert!(
-            render(&db, "/transactions", &different_account)?
+            render_query(&db, "/transactions", &different_account)?
                 .content
                 .as_str()
                 .contains("0 matching transactions shown")
@@ -1204,16 +1085,16 @@ mod tests {
                 company: Some("acme".into()),
                 ..Default::default()
             };
-            let register = render(&db, "/transactions", &query)?;
+            let register = render_query(&db, "/transactions", &query)?;
             assert!(register.content.as_str().contains(formatted));
-            let detail = render(&db, &format!("/transactions/{id}"), &query)?;
+            let detail = render_query(&db, &format!("/transactions/{id}"), &query)?;
             assert!(
                 detail
                     .content
                     .as_str()
                     .contains(&format!("class=\"amount\">{formatted}</td>"))
             );
-            let dashboard = render(
+            let dashboard = render_query(
                 &db,
                 "/",
                 &ViewQuery {
@@ -1265,7 +1146,7 @@ mod tests {
             search: Some("Sale".into()),
             ..Default::default()
         };
-        let first = render(&db, "/transactions", &query)?;
+        let first = render_query(&db, "/transactions", &query)?;
         assert!(
             first
                 .content
@@ -1274,7 +1155,7 @@ mod tests {
         );
         assert!(first.content.as_str().contains("&amp;offset=51"));
         assert!(first.content.as_str().contains("search=Sale"));
-        let second = render(
+        let second = render_query(
             &db,
             "/transactions",
             &ViewQuery {
@@ -1313,7 +1194,7 @@ mod tests {
             search: Some("Needle".into()),
             ..Default::default()
         };
-        let first = render(&db, "/transactions", &query)?;
+        let first = render_query(&db, "/transactions", &query)?;
         assert!(
             first
                 .content
@@ -1327,7 +1208,7 @@ mod tests {
                 .contains("Search paused after 1,000 candidates")
         );
         assert!(first.content.as_str().contains("&amp;offset=1000"));
-        let continued = render(
+        let continued = render_query(
             &db,
             "/transactions",
             &ViewQuery {
@@ -1348,7 +1229,7 @@ mod tests {
             company: Some("acme".into()),
             ..Default::default()
         };
-        let newest = render(&db, &detail_path, &audit_query)?;
+        let newest = render_query(&db, &detail_path, &audit_query)?;
         assert!(newest.content.as_str().contains("Continue audit trail"));
         assert!(
             newest
@@ -1356,7 +1237,7 @@ mod tests {
                 .as_str()
                 .contains("No audit records for this transaction in this portion")
         );
-        let oldest = render(
+        let oldest = render_query(
             &db,
             &detail_path,
             &ViewQuery {
@@ -1380,12 +1261,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            render(&db, "/", &query)?
+            render_query(&db, "/", &query)?
                 .content
                 .as_str()
                 .contains("without mixing currencies")
         );
-        let selected = render(
+        let selected = render_query(
             &db,
             "/",
             &ViewQuery {
@@ -1413,26 +1294,26 @@ mod tests {
     fn empty_and_invalid_company_states_are_explicit() -> TestResult {
         let db = Db::open_in_memory()?;
         assert!(
-            render(&db, "/", &ViewQuery::default())?
+            render_query(&db, "/", &ViewQuery::default())?
                 .content
                 .as_str()
                 .contains("No companies yet")
         );
         db::create_company(db.conn(), "empty", "Empty", None)?;
         assert!(
-            render(&db, "/accounts", &ViewQuery::default())?
+            render_query(&db, "/accounts", &ViewQuery::default())?
                 .content
                 .as_str()
                 .contains("No accounts yet")
         );
         assert!(
-            render(&db, "/transactions", &ViewQuery::default())?
+            render_query(&db, "/transactions", &ViewQuery::default())?
                 .content
                 .as_str()
                 .contains("No transactions to show")
         );
         assert_eq!(
-            render(
+            render_query(
                 &db,
                 "/",
                 &ViewQuery {
@@ -1451,6 +1332,8 @@ mod tests {
 
 #[cfg(test)]
 mod identity_tests {
+    use super::filters::ViewQuery;
+    use super::tests::render_query;
     use super::*;
     use beankeeper_cli::identity::{self, IssueRequest};
     use std::time::Duration;
@@ -1517,7 +1400,7 @@ mod identity_tests {
         let db::PostResult::Created(id) = result else {
             return Err("expected created".into());
         };
-        let page = render(
+        let page = render_query(
             &db,
             &format!("/transactions/{id}"),
             &ViewQuery {

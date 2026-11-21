@@ -1,7 +1,6 @@
 //! Per-view filter sets. Only deserialization can construct a validated set.
 
 use super::{LinkError, encode_path, fields, values::*};
-use chrono::Datelike;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::Error};
 
@@ -216,32 +215,12 @@ impl Validate for Transactions {
         Ok(())
     }
 }
-fn whole_months(
-    from: &Option<Date>,
-    to: &Option<Date>,
-    year: Option<i32>,
-) -> Result<(), LinkError> {
-    match (from, to) {
-        (None, None) => Ok(()),
-        (Some(from), Some(to))
-            if from.date() <= to.date()
-                && from.date().day() == 1
-                && from.date().year() == to.date().year()
-                && to.date().succ_opt().is_some_and(|next| next.day() == 1)
-                && year.is_none_or(|year| year == from.date().year()) =>
-        {
-            Ok(())
-        }
-        _ => Err(LinkError(
-            "Budget variance requires a year (1-9999), or a date range covering whole calendar months within one year.",
-        )),
-    }
-}
 impl Validate for Budget {
     fn validate(&self) -> Result<(), LinkError> {
-        whole_months(&self.from, &self.to, self.year.as_ref().map(Year::get))?;
+        BudgetWindow::new(self.from, self.to, self.year.as_ref())?;
         comparison(&self.compare_from, &self.compare_to)?;
-        whole_months(&self.compare_from, &self.compare_to, None)
+        BudgetWindow::new(self.compare_from, self.compare_to, None)?;
+        Ok(())
     }
 }
 impl Validate for Vendor {

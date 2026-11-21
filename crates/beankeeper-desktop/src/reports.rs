@@ -1,6 +1,6 @@
 //! Stable Desktop report views backed by the upstream CLI report contract.
 
-use std::{collections::BTreeSet, fmt::Write};
+use std::collections::BTreeSet;
 
 use beankeeper_cli::{
     cli::{Cli, ReconciliationMode, ReportCommand},
@@ -19,10 +19,18 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::views::{ViewError, ViewPage, ViewQuery, encode, input, nonempty, valid_date};
 use crate::{
+    links::{
+        LinkError,
+        values::{BudgetWindow, Date, DecimalAmount, Threshold, Year},
+    },
     markup::{Attribute, Markup, markup, write_markup},
     money,
+    views::{
+        ViewError, ViewPage, append_url_param, encode,
+        filters::{Comparison, DateBounds, Filters, ViewQuery, nonempty, parse_optional},
+        hidden, input,
+    },
 };
 
 /// Stable view IDs for agent navigation. Financial/tax IDs use `/reports/ID`;
@@ -108,63 +116,156 @@ pub(crate) enum ReportResponse {
     },
 }
 
-fn option<T: ValueEnum>(value: &Option<String>, default: &str) -> Result<T, ViewError> {
-    T::from_str(nonempty(value).unwrap_or(default), false).map_err(ViewError::ReportOptions)
+#[derive(Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum Format {
+    #[default]
+    Html,
+    Json,
+    Csv,
+}
+
+impl Format {
+    const ERROR: &'static str = "Choose HTML or JSON, or CSV for a tax summary.";
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Json => "json",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ReportFilters {
+    filters: Filters,
+    kind: Option<Kind>,
+    metric: Option<TrendMetric>,
+    period: Option<PeriodArg>,
+    year: Option<Year>,
+    budget: Option<BudgetWindow>,
+    comparison_budget: Option<BudgetWindow>,
+    threshold: Option<Threshold>,
+    mode: Option<ReconciliationMode>,
+    statement: Option<String>,
+    statement_balance: Option<DecimalAmount>,
+    link_key: Option<String>,
+    cash_account: Option<String>,
+    format: Format,
+}
+
+fn option<T: ValueEnum>(value: Option<String>) -> Result<Option<T>, ViewError> {
+    nonempty(value)
+        .map(|value| T::from_str(&value, false).map_err(ViewError::ReportOptions))
+        .transpose()
+}
+
+fn option_name<T: ValueEnum>(option: &T) -> Option<String> {
+    option
+        .to_possible_value()
+        .map(|value| value.get_name().to_owned())
 }
 
 impl ReportQuery {
-    fn comparison(&self) -> Option<Self> {
-        Some(Self {
-            filters: self.filters.comparison()?,
-            year: None,
-            ..self.clone()
-        })
-    }
-
-    fn validate_address(&self, path: &str) -> Result<(), ViewError> {
-        self.filters.validate()?;
-        if self.filters.category.is_some() || self.filters.payee.is_some() {
+    pub(crate) fn parse(self, path: &str) -> Result<ReportFilters, ViewError> {
+        let kind = if path == "/reports" {
+            None
+        } else {
+            Some(Kind::parse(path)?)
+        };
+        let filters = self.filters.parse()?;
+        if filters.category.is_some() || filters.payee.is_some() {
             return Err(ViewError::Invalid(
                 "Category and payee filters require the transactions view.",
             ));
         }
-        if self.filters.comparison().is_some()
-            && matches!(
-                path,
-                "/reports" | "/reconciliation" | "/reports/reconciliation"
-            )
-        {
-            return Err(ViewError::Invalid(
-                "Comparison date ranges require a period report or transactions.",
-            ));
-        }
-        if self.filters.compare_to.is_some() {
-            if path == "/reports/balance-sheet" {
-                if self.filters.compare_from.is_some() {
-                    return Err(ViewError::Invalid(
-                        "Balance-sheet comparison uses compare_to only.",
-                    ));
-                }
-            } else if nonempty(&self.filters.compare_from).is_none() {
+        match (kind, filters.comparison) {
+            (None | Some(Kind::Reconciliation), Some(_)) => {
+                return Err(ViewError::Invalid(
+                    "Comparison date ranges require a period report or transactions.",
+                ));
+            }
+            (Some(Kind::Balance), Some(Comparison::Period(_))) => {
+                return Err(ViewError::Invalid(
+                    "Balance-sheet comparison uses compare_to only.",
+                ));
+            }
+            (Some(Kind::Balance), Some(Comparison::AsOf(_))) => {}
+            (_, Some(Comparison::AsOf(_))) => {
                 return Err(ViewError::Invalid(
                     "Period comparison requires compare_from and compare_to.",
                 ));
             }
+            _ => {}
         }
-        Ok(())
-    }
-
-    fn command(&self, kind: Kind) -> Result<ReportCommand, ViewError> {
-        let q = &self.filters;
-        q.validate()?;
-        let from = nonempty(&q.from).map(str::to_owned);
-        let to = nonempty(&q.to).map(str::to_owned);
-        let currency = nonempty(&q.currency).map(str::to_owned);
-        if matches!(kind, Kind::Balance | Kind::Reconciliation) && from.is_some() {
+        if matches!(kind, Some(Kind::Balance | Kind::Reconciliation))
+            && filters.dates.from().is_some()
+        {
             return Err(ViewError::Invalid(
                 "This is an as-of report. Use the end date; a start date is not supported.",
             ));
         }
+        let format = option(self.format)
+            .map_err(|_| ViewError::Invalid(Format::ERROR))?
+            .unwrap_or_default();
+        if format == Format::Csv && kind.is_some_and(|kind| !kind.tax()) {
+            return Err(ViewError::Invalid(Format::ERROR));
+        }
+        let year = parse_optional(self.year)?;
+        let (budget, comparison_budget) = if kind == Some(Kind::Budget) {
+            let new_window = |bounds: DateBounds, year: Option<&Year>| {
+                BudgetWindow::new(bounds.from(), bounds.to(), year)
+                    .map_err(|LinkError(message)| ViewError::Invalid(message))
+            };
+            (
+                new_window(filters.dates, year.as_ref())?,
+                filters
+                    .comparison
+                    .map(|comparison| new_window(comparison.bounds(), None))
+                    .transpose()?
+                    .flatten(),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(ReportFilters {
+            kind,
+            filters,
+            metric: option(self.metric)?,
+            period: option(self.period)?,
+            year,
+            budget,
+            comparison_budget,
+            threshold: parse_optional(self.threshold)?,
+            mode: option(self.mode)?,
+            statement: nonempty(self.statement),
+            statement_balance: parse_optional(self.statement_balance)?,
+            link_key: nonempty(self.link_key),
+            cash_account: nonempty(self.cash_account),
+            format,
+        })
+    }
+}
+
+impl ReportFilters {
+    fn comparison(&self) -> Option<Self> {
+        Some(Self {
+            filters: self.filters.comparison_filters()?,
+            year: None,
+            budget: self.comparison_budget.clone(),
+            comparison_budget: None,
+            ..self.clone()
+        })
+    }
+
+    fn command(&self) -> Result<ReportCommand, ViewError> {
+        let kind = self
+            .kind
+            .ok_or(ViewError::Invalid("Choose a report first."))?;
+        let q = &self.filters;
+        let from = q.dates.from().map(|date| date.to_string());
+        let to = q.dates.to().map(|date| date.to_string());
+        let currency = q.currency.as_ref().map(ToString::to_string);
         let tax = || TaxArgs {
             from: from.clone(),
             to: to.clone(),
@@ -184,24 +285,29 @@ impl ReportQuery {
                 from,
                 to,
                 currency,
-                cash_account: nonempty(&self.cash_account)
-                    .map(|s| vec![s.into()])
+                cash_account: self
+                    .cash_account
+                    .clone()
+                    .map(|account| vec![account])
                     .unwrap_or_default(),
             }),
             Kind::Trend => ReportCommand::Trend(TrendArgs {
                 from,
                 to,
                 currency,
-                metric: option::<TrendMetric>(&self.metric, "spending")?,
-                period: option::<PeriodArg>(&self.period, "month")?,
+                metric: self.metric.unwrap_or(TrendMetric::Spending),
+                period: self.period.unwrap_or(PeriodArg::Month),
             }),
             Kind::Budget => {
-                let (year, from, to) = self.budget_window()?;
+                let window = self
+                    .budget
+                    .as_ref()
+                    .ok_or(ViewError::Invalid(BudgetWindow::ERROR))?;
                 ReportCommand::BudgetVariance {
-                    year,
+                    year: window.year(),
                     month: None,
-                    from,
-                    to,
+                    from: window.first_month(),
+                    to: window.last_month(),
                     currency,
                     account_type: None,
                     include_unbudgeted: true,
@@ -210,89 +316,60 @@ impl ReportQuery {
             Kind::Schedule => ReportCommand::ScheduleC(tax()),
             Kind::Vendor => ReportCommand::Vendor1099(VendorArgs {
                 period: tax(),
-                threshold: nonempty(&self.threshold).unwrap_or("600").into(),
+                threshold: self
+                    .threshold
+                    .as_ref()
+                    .map_or_else(|| "600".into(), ToString::to_string),
             }),
             Kind::Reconciliation => ReportCommand::Reconciliation {
-                account: nonempty(&q.account)
-                    .ok_or(ViewError::Invalid("Choose an account to reconcile."))?
-                    .into(),
+                account: q
+                    .account
+                    .clone()
+                    .ok_or(ViewError::Invalid("Choose an account to reconcile."))?,
                 to,
                 currency,
-                mode: option::<ReconciliationMode>(&self.mode, "bank")?,
-                statement: nonempty(&self.statement).map(str::to_owned),
-                statement_balance: nonempty(&self.statement_balance).map(str::to_owned),
-                link_key: nonempty(&self.link_key).map(str::to_owned),
+                mode: self.mode.unwrap_or_default(),
+                statement: self.statement.clone(),
+                statement_balance: self.statement_balance.as_ref().map(ToString::to_string),
+                link_key: self.link_key.clone(),
                 filter_metadata: Vec::new(),
                 group_by_metadata: None,
             },
         })
     }
 
-    // The CLI accepts a year and whole months, not arbitrary date intervals.
-    fn budget_window(&self) -> Result<(i32, Option<i32>, Option<i32>), ViewError> {
-        let fail = || {
-            ViewError::Invalid(
-                "Budget variance requires a year (1-9999), or a date range covering whole calendar months within one year.",
-            )
-        };
-        let year = nonempty(&self.year)
-            .map(|s| s.parse::<i32>().map_err(|_| fail()))
-            .transpose()?;
-        match (nonempty(&self.filters.from), nonempty(&self.filters.to)) {
-            (None, None) => Ok((
-                year.filter(|y| (1..=9999).contains(y)).ok_or_else(fail)?,
-                None,
-                None,
-            )),
-            (Some(from), Some(to)) => {
-                let range_year = from[..4].parse::<i32>().map_err(|_| fail())?;
-                let day = to[8..].parse::<u32>().map_err(|_| fail())?;
-                let next_day = format!("{}{:02}", &to[..8], day + 1);
-                if !from.ends_with("-01")
-                    || from[..4] != to[..4]
-                    || valid_date(&next_day)
-                    || year.is_some_and(|year| year != range_year)
-                {
-                    return Err(fail());
-                }
-                Ok((
-                    range_year,
-                    Some(from[5..7].parse().map_err(|_| fail())?),
-                    Some(to[5..7].parse().map_err(|_| fail())?),
-                ))
-            }
-            _ => Err(fail()),
-        }
-    }
-
-    fn fields(&self) -> [(&'static str, &Option<String>); 15] {
-        [
-            ("account", &self.filters.account),
-            ("compare_from", &self.filters.compare_from),
-            ("compare_to", &self.filters.compare_to),
-            ("from", &self.filters.from),
-            ("to", &self.filters.to),
-            ("currency", &self.filters.currency),
-            ("metric", &self.metric),
-            ("period", &self.period),
-            ("year", &self.year),
-            ("threshold", &self.threshold),
-            ("mode", &self.mode),
-            ("statement", &self.statement),
-            ("statement_balance", &self.statement_balance),
-            ("link_key", &self.link_key),
-            ("cash_account", &self.cash_account),
-        ]
-    }
-
-    fn url(&self, path: &str, company: &str, format: &str) -> String {
+    fn url(&self, path: &str, company: &str, format: Format) -> String {
         let mut url = format!("{path}?company={}", encode(company));
-        for (key, value) in self.fields() {
-            if let Some(value) = nonempty(value) {
-                let _ = write!(url, "&{key}={}", encode(value));
-            }
+        append_url_param(&mut url, "account", self.filters.account.as_deref());
+        if let Some(comparison) = self.filters.comparison {
+            append_url_param(&mut url, "compare_from", comparison.bounds().from());
+            append_url_param(&mut url, "compare_to", comparison.bounds().to());
         }
-        let _ = write!(url, "&format={format}");
+        append_url_param(&mut url, "from", self.filters.dates.from());
+        append_url_param(&mut url, "to", self.filters.dates.to());
+        append_url_param(&mut url, "currency", self.filters.currency.as_ref());
+        append_url_param(
+            &mut url,
+            "metric",
+            self.metric.as_ref().and_then(option_name),
+        );
+        append_url_param(
+            &mut url,
+            "period",
+            self.period.as_ref().and_then(option_name),
+        );
+        append_url_param(&mut url, "year", self.year.as_ref());
+        append_url_param(&mut url, "threshold", self.threshold.as_ref());
+        append_url_param(&mut url, "mode", self.mode.as_ref().and_then(option_name));
+        append_url_param(&mut url, "statement", self.statement.as_deref());
+        append_url_param(
+            &mut url,
+            "statement_balance",
+            self.statement_balance.as_ref(),
+        );
+        append_url_param(&mut url, "link_key", self.link_key.as_deref());
+        append_url_param(&mut url, "cash_account", self.cash_account.as_deref());
+        append_url_param(&mut url, "format", Some(format.name()));
         url
     }
 }
@@ -300,17 +377,15 @@ impl ReportQuery {
 pub(crate) fn render(
     db: &Db,
     path: &str,
-    query: &ReportQuery,
+    query: &ReportFilters,
 ) -> Result<ReportResponse, ViewError> {
-    query.validate_address(path)?;
-    let kind = if path == "/reports" {
-        None
-    } else {
-        Some(Kind::parse(path)?)
-    };
+    let kind = query.kind;
     let companies = db::list_companies(db.conn())?;
-    let company =
-        nonempty(&query.filters.company).or_else(|| companies.first().map(|c| c.slug.as_str()));
+    let company = query
+        .filters
+        .company
+        .as_deref()
+        .or_else(|| companies.first().map(|c| c.slug.as_str()));
     let title = kind.map_or("Reports", Kind::title);
     let nav = if kind == Some(Kind::Reconciliation) {
         "/reconciliation"
@@ -367,17 +442,10 @@ pub(crate) fn render(
             "<p>Read-only clearance and settlement state. No clear, reconcile or approval actions are available here. Statement balance is in major units.</p>"
         );
     }
-    let format = nonempty(&query.format).unwrap_or("html");
-    if !["html", "json", "csv"].contains(&format) || (format == "csv" && !kind.tax()) {
-        return Err(ViewError::Invalid(
-            "Choose HTML or JSON, or CSV for a tax summary.",
-        ));
-    }
-    if format == "html"
-        && ((kind == Kind::Reconciliation && nonempty(&query.filters.account).is_none())
-            || (kind == Kind::Budget
-                && nonempty(&query.year).is_none()
-                && nonempty(&query.filters.from).is_none()))
+    let format = query.format;
+    if format == Format::Html
+        && ((kind == Kind::Reconciliation && query.filters.account.is_none())
+            || (kind == Kind::Budget && query.budget.is_none()))
     {
         let mut body = form(db, &companies, company, path, Some(kind), query)?;
         body.append(&html);
@@ -388,7 +456,7 @@ pub(crate) fn render(
         );
         return Ok(page(html));
     }
-    let command = query.command(kind)?;
+    let command = query.command()?;
     // This context supplies JSON metadata only. execute_json uses the supplied
     // read-only Db and never opens the CLI's default database or writes stdout.
     let cli = Cli::try_parse_from(["bk", "--quiet", "report", "income-statement"])
@@ -397,22 +465,22 @@ pub(crate) fn render(
     let comparison = query
         .comparison()
         .map(|query| {
-            let command = query.command(kind)?;
+            let command = query.command()?;
             let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
             Ok::<_, ViewError>((query, data))
         })
         .transpose()?;
 
-    if format != "html" {
-        if format == "csv" && comparison.is_some() {
+    if format != Format::Html {
+        if format == Format::Csv && comparison.is_some() {
             return Err(ViewError::Invalid(
                 "CSV covers one period. Remove comparison bounds or download JSON for both periods.",
             ));
         }
-        let (body, content_type) = if format == "csv" {
+        let (body, content_type) = if format == Format::Csv {
             (tax_csv(kind, &data), "text/csv; charset=utf-8")
         } else {
-            (comparison.as_ref().map_or_else(|| data.to_string(), |(q, comparison)| serde_json::json!({"current":data, "comparison":comparison, "compare_from":q.filters.from, "compare_to":q.filters.to}).to_string()), "application/json")
+            (comparison.as_ref().map_or_else(|| data.to_string(), |(q, comparison)| serde_json::json!({"current":data, "comparison":comparison, "compare_from":q.filters.dates.from(), "compare_to":q.filters.dates.to()}).to_string()), "application/json")
         };
         let id = if kind == Kind::Reconciliation {
             "reconciliation"
@@ -422,35 +490,45 @@ pub(crate) fn render(
         return Ok(ReportResponse::Download {
             body,
             content_type,
-            filename: format!("{id}.{format}"),
+            filename: format!("{id}.{}", format.name()),
         });
     }
     // Use upstream's resolved dates in the income form and download link rather
     // than resolving the local clock a second time or leaving defaults hidden.
     let mut query = query.clone();
     if kind == Kind::Income {
-        query.filters.from = data["from"].as_str().map(str::to_owned);
-        query.filters.to = data["to"].as_str().map(str::to_owned);
+        query.filters.dates = DateBounds::new(
+            Some(report_date(&data, "from")?),
+            Some(report_date(&data, "to")?),
+        )?;
     }
     let mut body = form(db, &companies, company, path, Some(kind), &query)?;
     body.append(&html);
     let mut html = body;
-    let currency = resolve_report_currency(db.conn(), company, nonempty(&query.filters.currency))
-        .map_err(report_error)?;
+    let currency = query.filters.currency.as_ref().map_or_else(
+        || resolve_report_currency(db.conn(), company, None).map_err(report_error),
+        |currency| Ok(currency.ledger()),
+    )?;
     write_markup!(html, "<p>Report currency: {}.</p>", currency.code());
     if kind == Kind::Income {
-        html.append(&income_context(db, company, &data, currency.code())?);
+        html.append(&income_context(
+            db,
+            company,
+            &data,
+            currency.code(),
+            query.filters.dates,
+        )?);
     }
     write_markup!(
         html,
         "<p><a download href=\"{}\">Download JSON</a>",
-        query.url(path, company, "json")
+        query.url(path, company, Format::Json)
     );
     if kind.tax() && comparison.is_none() {
         write_markup!(
             html,
             " · <a download href=\"{}\">Download CSV</a>",
-            query.url(path, company, "csv")
+            query.url(path, company, Format::Csv)
         );
     }
     write_markup!(
@@ -466,13 +544,25 @@ pub(crate) fn render(
             if kind == Kind::Balance {
                 format!(
                     "Comparison as of {}",
-                    q.filters.to.as_deref().unwrap_or_default()
+                    q.filters
+                        .dates
+                        .to()
+                        .map(|date| date.to_string())
+                        .unwrap_or_default()
                 )
             } else {
                 format!(
                     "Comparison period: {} through {}",
-                    q.filters.from.as_deref().unwrap_or_default(),
-                    q.filters.to.as_deref().unwrap_or_default()
+                    q.filters
+                        .dates
+                        .from()
+                        .map(|date| date.to_string())
+                        .unwrap_or_default(),
+                    q.filters
+                        .dates
+                        .to()
+                        .map(|date| date.to_string())
+                        .unwrap_or_default()
                 )
             }
         );
@@ -482,13 +572,23 @@ pub(crate) fn render(
     Ok(page(html))
 }
 
+fn report_date(data: &Value, key: &str) -> Result<Date, ViewError> {
+    data[key]
+        .as_str()
+        .and_then(|date| date.parse().ok())
+        .ok_or(ViewError::Invalid(
+            "The income statement did not include a reporting period.",
+        ))
+}
+
 fn income_context(
     db: &Db,
     company: &str,
     data: &Value,
     currency: &str,
+    dates: DateBounds,
 ) -> Result<Markup, ViewError> {
-    let (Some(from), Some(to)) = (data["from"].as_str(), data["to"].as_str()) else {
+    let (Some(from), Some(to)) = (dates.from(), dates.to()) else {
         return Err(ViewError::Invalid(
             "The income statement did not include a reporting period.",
         ));
@@ -503,13 +603,15 @@ fn income_context(
     }
     // Zero net balances can still contain offsetting postings. Check gross
     // activity with upstream's query API before calling the period empty.
+    let from = from.to_string();
+    let to = to.to_string();
     for account_type in ["revenue", "expense"] {
         let balances = db::compute_trial_balance(
             db.conn(),
             company,
             Some(account_type),
-            Some(from),
-            Some(to),
+            Some(&from),
+            Some(&to),
             Some(currency),
         )?;
         if balances
@@ -538,18 +640,23 @@ fn report_error(error: CliError) -> ViewError {
     }
 }
 
-fn select(
-    html: &mut Markup,
-    name: &str,
-    label: &str,
-    value: &Option<String>,
-    default: &str,
-    options: &[&str],
-) {
+fn select<T: ValueEnum>(html: &mut Markup, name: &str, label: &str, value: T) {
     write_markup!(html, "<label>{}<select name=\"{}\">", label, name);
-    for choice in options {
-        let selected = Attribute::Selected(nonempty(value).unwrap_or(default) == *choice);
-        write_markup!(html, "<option{}>{}</option>", selected, choice);
+    let selected = value.to_possible_value();
+    for choice in T::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+    {
+        let choice = choice.get_name();
+        let active = selected
+            .as_ref()
+            .is_some_and(|value| value.get_name() == choice);
+        write_markup!(
+            html,
+            "<option{}>{}</option>",
+            Attribute::Selected(active),
+            choice
+        );
     }
     write_markup!(html, "</select></label>");
 }
@@ -560,7 +667,7 @@ fn form(
     company: &str,
     path: &str,
     kind: Option<Kind>,
-    q: &ReportQuery,
+    q: &ReportFilters,
 ) -> Result<Markup, ViewError> {
     let mut html = markup!(
         "<form id=\"report-filters\" method=\"get\" action=\"{}\" class=\"filters\"><label>Company<select name=\"company\">",
@@ -577,18 +684,9 @@ fn form(
         );
     }
     write_markup!(html, "</select></label>");
-    for (name, value) in [
-        ("compare_from", &q.filters.compare_from),
-        ("compare_to", &q.filters.compare_to),
-    ] {
-        if let Some(value) = value {
-            write_markup!(
-                html,
-                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
-                name,
-                value
-            );
-        }
+    if let Some(comparison) = q.filters.comparison {
+        hidden(&mut html, "compare_from", comparison.bounds().from());
+        hidden(&mut html, "compare_to", comparison.bounds().to());
     }
     if let Some(kind) = kind {
         if !matches!(kind, Kind::Balance | Kind::Reconciliation) {
@@ -596,20 +694,20 @@ fn form(
                 "from",
                 "From date (inclusive)",
                 "date",
-                &q.filters.from,
+                q.filters.dates.from(),
             ));
         }
         html.append(&input(
             "to",
             "Through date (inclusive)",
             "date",
-            &q.filters.to,
+            q.filters.dates.to(),
         ));
         html.append(&input(
             "currency",
             "Currency (required for multi-currency books)",
             "text",
-            &q.filters.currency,
+            q.filters.currency.as_ref(),
         ));
         match kind {
             Kind::Trend => {
@@ -617,17 +715,13 @@ fn form(
                     &mut html,
                     "metric",
                     "Metric",
-                    &q.metric,
-                    "spending",
-                    &["spending", "net-worth"],
+                    q.metric.unwrap_or(TrendMetric::Spending),
                 );
                 select(
                     &mut html,
                     "period",
                     "Calendar period",
-                    &q.period,
-                    "month",
-                    &["month", "quarter", "year"],
+                    q.period.unwrap_or(PeriodArg::Month),
                 );
             }
             Kind::Budget => {
@@ -635,20 +729,20 @@ fn form(
                     "year",
                     "Budget year (or use a whole-month date range)",
                     "number",
-                    &q.year,
+                    q.year.as_ref(),
                 ));
             }
             Kind::Vendor => html.append(&input(
                 "threshold",
                 "Minimum payee total (major units; default 600)",
                 "text",
-                &q.threshold,
+                q.threshold.as_ref(),
             )),
             Kind::Cash => html.append(&input(
                 "cash_account",
                 "Cash account (optional; inferred by name)",
                 "text",
-                &q.cash_account,
+                q.cash_account.as_deref(),
             )),
             Kind::Reconciliation => {
                 write_markup!(
@@ -667,37 +761,32 @@ fn form(
                         html,
                         "<option value=\"{}\"{}>{} · {}</option>",
                         &account.code,
-                        Attribute::Selected(nonempty(&q.filters.account) == Some(&account.code)),
+                        Attribute::Selected(
+                            q.filters.account.as_deref() == Some(account.code.as_str())
+                        ),
                         &account.code,
                         &account.name
                     );
                 }
                 write_markup!(html, "</select></label>");
-                select(
-                    &mut html,
-                    "mode",
-                    "Mode",
-                    &q.mode,
-                    "bank",
-                    &["bank", "settlement"],
-                );
+                select(&mut html, "mode", "Mode", q.mode.unwrap_or_default());
                 html.append(&input(
                     "statement",
                     "Statement ID (required for settlement)",
                     "text",
-                    &q.statement,
+                    q.statement.as_deref(),
                 ));
                 html.append(&input(
                     "statement_balance",
                     "Statement balance (major units)",
                     "text",
-                    &q.statement_balance,
+                    q.statement_balance.as_ref(),
                 ));
                 html.append(&input(
                     "link_key",
                     "Settlement link key (default applies_to)",
                     "text",
-                    &q.link_key,
+                    q.link_key.as_deref(),
                 ));
             }
             _ => {}
@@ -920,13 +1009,15 @@ mod tests {
     fn empty_books_and_read_failures_have_explicit_states() -> TestResult {
         let db = Db::open_in_memory()?;
         for path in ["/reports", "/reports/schedule-c", "/reconciliation"] {
-            let ReportResponse::Page(page) = render(&db, path, &ReportQuery::default())? else {
+            let ReportResponse::Page(page) =
+                render(&db, path, &ReportQuery::default().parse(path)?)?
+            else {
                 return Err("expected HTML".into());
             };
             assert!(page.content.as_str().contains("No companies yet"));
         }
         db.conn().execute("DROP TABLE companies", [])?;
-        let error = render(&db, "/reports", &ReportQuery::default())
+        let error = render(&db, "/reports", &ReportQuery::default().parse("/reports")?)
             .err()
             .ok_or("expected read failure")?;
         assert_eq!(
@@ -947,6 +1038,9 @@ mod tests {
             ("2024-02-02", "2024-02-29", false),
             ("2024-01-01", "2024-12-31", true),
             ("2024-01-01", "2025-12-31", false),
+            ("9999-12-01", "9999-12-31", true),
+            ("2024-02-01", "２０２４-０２-２９", false),
+            ("2024-02-01", "", false),
         ] {
             let q = ReportQuery {
                 filters: ViewQuery {
@@ -956,7 +1050,13 @@ mod tests {
                 },
                 ..Default::default()
             };
-            assert_eq!(q.command(Kind::Budget).is_ok(), valid, "{from}..{to}");
+            assert_eq!(
+                q.parse("/reports/budget-variance")
+                    .and_then(|q| q.command())
+                    .is_ok(),
+                valid,
+                "{from}..{to}"
+            );
         }
         let command = ReportQuery {
             filters: ViewQuery {
@@ -966,7 +1066,8 @@ mod tests {
             },
             ..Default::default()
         }
-        .command(Kind::Budget)?;
+        .parse("/reports/budget-variance")?
+        .command()?;
         assert!(matches!(
             command,
             ReportCommand::BudgetVariance {
@@ -1060,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn tax_links_encode_and_preserve_statement_and_report_filters() {
+    fn tax_links_encode_and_preserve_statement_and_report_filters() -> TestResult {
         let q = ReportQuery {
             filters: ViewQuery {
                 company: Some("a&b".into()),
@@ -1077,7 +1178,9 @@ mod tests {
             threshold: Some("0".into()),
             ..Default::default()
         };
-        let url = q.url("/reports/1099", "a&b", "csv");
+        let url = q
+            .parse("/reports/1099")?
+            .url("/reports/1099", "a&b", Format::Csv);
         assert!(url.ends_with("&format=csv"));
         let link = markup!("<a href=\"{}\">Download</a>", url);
         let link = link.as_str();
@@ -1096,5 +1199,6 @@ mod tests {
             assert!(link.contains(expected), "{expected}: {link}");
         }
         assert!(!link.contains("\"special\""));
+        Ok(())
     }
 }

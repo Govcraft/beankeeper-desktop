@@ -1,6 +1,6 @@
 //! Validated wire values shared by every address entry point.
 
-use std::{fmt, str::FromStr};
+use std::{fmt, ops::RangeInclusive, str::FromStr};
 
 use beankeeper::types::{
     AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency,
@@ -30,12 +30,14 @@ macro_rules! string_wire {
 }
 
 /// A real calendar date in the URL's four-digit Gregorian year range.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct Date(NaiveDate);
+pub(crate) struct Date(NaiveDate);
 
 impl Date {
-    pub(super) fn date(&self) -> NaiveDate {
+    pub(crate) fn date(&self) -> NaiveDate {
         self.0
     }
 }
@@ -64,7 +66,13 @@ string_wire!(Date);
 /// A register amount, in nonnegative whole minor units within SQLite's range.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct MinorAmount(Amount);
+pub(crate) struct MinorAmount(i64);
+
+impl MinorAmount {
+    pub(crate) const fn units(&self) -> i64 {
+        self.0
+    }
+}
 
 impl FromStr for MinorAmount {
     type Err = LinkError;
@@ -74,7 +82,7 @@ impl FromStr for MinorAmount {
             .parse::<i64>()
             .ok()
             .filter(|amount| *amount >= 0)
-            .map(|amount| Self(Amount::from(amount)))
+            .map(Self)
             .ok_or(LinkError(
                 "Amounts must be nonnegative whole minor units, such as cents.",
             ))
@@ -92,7 +100,7 @@ string_wire!(MinorAmount);
 /// An exact decimal quantity, independent of the currency selected by the ledger.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct DecimalAmount {
+pub(crate) struct DecimalAmount {
     coefficient: Amount,
     scale: u8,
 }
@@ -174,7 +182,7 @@ string_wire!(DecimalAmount);
 /// A nonnegative vendor threshold, in exact major units.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct Threshold(DecimalAmount);
+pub(crate) struct Threshold(DecimalAmount);
 
 impl Threshold {
     pub(super) fn validate_currency(&self, currency: &Currency) -> Result<(), LinkError> {
@@ -205,7 +213,7 @@ string_wire!(Threshold);
 /// A positive upstream SQLite transaction ID, retaining existing link addresses.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "i64", into = "i64")]
-pub(super) struct TransactionId(i64);
+pub(crate) struct TransactionId(i64);
 
 impl TryFrom<i64> for TransactionId {
     type Error = LinkError;
@@ -244,7 +252,7 @@ impl fmt::Display for TransactionId {
 /// The upstream proposal TypeID with its prefix checked by upstream parsing.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct ProposalId(beankeeper_cli::db::proposals::ProposalId);
+pub(crate) struct ProposalId(beankeeper_cli::db::proposals::ProposalId);
 
 impl FromStr for ProposalId {
     type Err = LinkError;
@@ -269,7 +277,7 @@ macro_rules! ledger_string {
     ($name:ident, $inner:ty, $error:literal) => {
         #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
         #[serde(try_from = "String", into = "String")]
-        pub(super) struct $name($inner);
+        pub(crate) struct $name($inner);
 
         impl FromStr for $name {
             type Err = LinkError;
@@ -301,13 +309,35 @@ ledger_string!(
     "Clearance must be uncleared, cleared or reconciled."
 );
 
+impl From<LedgerCurrency> for Currency {
+    fn from(currency: LedgerCurrency) -> Self {
+        Self(currency)
+    }
+}
+
+impl Currency {
+    pub(crate) const fn ledger(&self) -> LedgerCurrency {
+        self.0
+    }
+
+    pub(crate) fn code(&self) -> &str {
+        self.0.code()
+    }
+}
+
+impl Clearance {
+    pub(crate) const fn status(&self) -> ClearanceStatus {
+        self.0
+    }
+}
+
 /// A four-digit report year, serialized as the existing string field.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct Year(i32);
+pub(crate) struct Year(i32);
 
 impl Year {
-    pub(super) fn get(&self) -> i32 {
+    pub(crate) fn get(&self) -> i32 {
         self.0
     }
 }
@@ -333,23 +363,88 @@ impl fmt::Display for Year {
 
 string_wire!(Year);
 
-/// An offset leaving room for one full register scan in SQLite's signed range.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(try_from = "usize", into = "usize")]
-pub(super) struct Offset(usize);
+/// A report year with an optional inclusive window of complete months.
+#[derive(Clone)]
+pub(crate) struct BudgetWindow {
+    year: i32,
+    months: Option<RangeInclusive<i32>>,
+}
 
-impl TryFrom<usize> for Offset {
+impl BudgetWindow {
+    pub(crate) const ERROR: &'static str = "Budget variance requires a year (1-9999), or a date range covering whole calendar months within one year.";
+
+    pub(crate) fn new(
+        from: Option<Date>,
+        to: Option<Date>,
+        year: Option<&Year>,
+    ) -> Result<Option<Self>, LinkError> {
+        match (from, to) {
+            (None, None) => Ok(year.map(|year| Self {
+                year: year.get(),
+                months: None,
+            })),
+            (Some(from), Some(to)) => {
+                let from = from.date();
+                let to = to.date();
+                if from > to
+                    || from.day() != 1
+                    || from.year() != to.year()
+                    || !to.succ_opt().is_some_and(|next| next.day() == 1)
+                    || year.is_some_and(|year| year.get() != from.year())
+                {
+                    return Err(LinkError(Self::ERROR));
+                }
+                // chrono guarantees that calendar months are numbered 1–12.
+                let first = i32::try_from(from.month()).map_err(|_| LinkError(Self::ERROR))?;
+                let last = i32::try_from(to.month()).map_err(|_| LinkError(Self::ERROR))?;
+                Ok(Some(Self {
+                    year: from.year(),
+                    months: Some(first..=last),
+                }))
+            }
+            _ => Err(LinkError(Self::ERROR)),
+        }
+    }
+
+    pub(crate) fn year(&self) -> i32 {
+        self.year
+    }
+
+    pub(crate) fn first_month(&self) -> Option<i32> {
+        self.months.as_ref().map(|months| *months.start())
+    }
+
+    pub(crate) fn last_month(&self) -> Option<i32> {
+        self.months.as_ref().map(|months| *months.end())
+    }
+}
+
+/// Maximum number of ledger records examined while filling a browser page.
+pub(crate) const SCAN_LIMIT: i64 = 1_000;
+
+/// An offset leaving room for one full register scan in SQLite's signed range.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(try_from = "i64", into = "i64")]
+pub(crate) struct Offset(i64);
+
+impl Offset {
+    pub(crate) const fn position(self) -> i64 {
+        self.0
+    }
+}
+
+impl TryFrom<i64> for Offset {
     type Error = LinkError;
 
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        if value > i64::MAX as usize - 1000 {
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if !(0..=i64::MAX - SCAN_LIMIT).contains(&value) {
             return Err(LinkError("The pagination offset is too large."));
         }
         Ok(Self(value))
     }
 }
 
-impl From<Offset> for usize {
+impl From<Offset> for i64 {
     fn from(value: Offset) -> Self {
         value.0
     }
@@ -360,7 +455,7 @@ impl FromStr for Offset {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         value
-            .parse::<usize>()
+            .parse::<i64>()
             .map_err(|_| LinkError("The pagination offset is too large."))?
             .try_into()
     }
@@ -446,8 +541,8 @@ mod tests {
                 .parse::<ProposalId>()
                 .is_ok()
         );
-        assert!(Offset::try_from(i64::MAX as usize - 1000).is_ok());
-        assert!(Offset::try_from(i64::MAX as usize - 999).is_err());
+        assert!(Offset::try_from(i64::MAX - SCAN_LIMIT).is_ok());
+        assert!(Offset::try_from(i64::MAX - SCAN_LIMIT + 1).is_err());
         assert!(serde_json::from_value::<Offset>(json!(-1)).is_err());
     }
 

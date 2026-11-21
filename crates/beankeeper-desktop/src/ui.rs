@@ -14,7 +14,7 @@ use crate::{
     markup::{Attribute, Markup, markup, write_markup},
     pairing::{self, PairingState, Session},
     reports::{self, ReportQuery, ReportResponse},
-    views::{self, ViewQuery},
+    views::{self, filters::ViewQuery},
 };
 
 const SHELL: &str = include_str!("../../../ui/index.html");
@@ -129,6 +129,10 @@ async fn report(
         query.filters.company = state.company;
     }
     let result = tokio::task::spawn_blocking(move || {
+        let query = match query.parse(uri.path()) {
+            Ok(query) => query,
+            Err(error) => return Ok(Err(error)),
+        };
         let db = state.db.lock().map_err(|_| ())?;
         let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
         Ok::<_, ()>(reports::render(&db, uri.path(), &query))
@@ -217,6 +221,10 @@ async fn view(
     let db = state.db;
     let path = uri.path().to_owned();
     let result = tokio::task::spawn_blocking(move || {
+        let query = match query.parse() {
+            Ok(query) => query,
+            Err(error) => return Ok(Err(error)),
+        };
         let db = db.lock().map_err(|_| ())?;
         // Keep all reads for this page in one consistent upstream SQLite snapshot.
         let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
