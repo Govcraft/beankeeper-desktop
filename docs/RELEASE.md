@@ -9,12 +9,19 @@ required to build or merge this work.
 
 ## Artifacts and versions
 
-Desktop uses its own workspace version, currently `0.1.0`, rather than upstream's
+Desktop uses its own workspace version, currently `0.1.0-rc.1`, rather than upstream's
 CLI version. Keep the upstream tag convention `beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
 A tag must exactly match `[workspace.package].version` in `Cargo.toml`.
-Prerelease version strings are not yet supported by the installer packaging.
+Prerelease tags use a Cargo version such as `0.1.0-rc.1` and the git tag
+`beankeeper-desktop-v0.1.0-rc.1`. The release job marks `-rc.N` tags as
+GitHub prereleases and does not set them as latest. Debian packages use the
+upstream version `0.1.0~rc.1` so they sort before `0.1.0`.
+Release builds embed `packaging/license-embed.json` (production license public
+keys and `https://license.beankeeper.govcraft.ai`). Repository Actions variables
+`BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` and `BEANKEEPER_LICENSE_SERVICE_URL` can
+override the file; the public key is not a secret.
 
 | Target | Assets |
 | --- | --- |

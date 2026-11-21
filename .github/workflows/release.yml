@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v6
@@ -41,6 +42,11 @@ jobs:
             version=$(python scripts/release.py version)
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-rc.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
       - run: python -B -m unittest discover -s scripts/tests -v
 
   build:
@@ -96,6 +102,11 @@ jobs:
           & $perl -MLocale::Maketext::Simple -MIPC::Cmd -e 'print "$^X\n"'
           if ($LASTEXITCODE -ne 0) { throw 'Native Perl prerequisites are missing' }
           "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Embed production license trust
+        env:
+          BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON: ${{ vars.BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON }}
+          BEANKEEPER_LICENSE_SERVICE_URL: ${{ vars.BEANKEEPER_LICENSE_SERVICE_URL }}
+        run: python scripts/release.py license-env
       - name: Build Desktop binary and embedded UI
         run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
       - name: Stage binary and documents
@@ -132,6 +143,18 @@ jobs:
           if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
           test "$("$binary" --version)" = "bk $VERSION"
           "$binary" serve --help
+          python -c "
+          from pathlib import Path
+          import json, os, sys
+          data = Path(sys.argv[1]).read_bytes()
+          url = os.environ['BEANKEEPER_LICENSE_SERVICE_URL'].encode()
+          if url not in data:
+              raise SystemExit('service URL was not embedded in the binary')
+          for key_id, value in json.loads(os.environ['BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON']).items():
+              if value.encode() not in data:
+                  raise SystemExit(f'public key for {key_id} was not embedded')
+          print('license embed ok')
+          " "$binary"
       - name: Build OS installer
         run: python scripts/release.py installer --target "$TARGET"
       - name: Optional Apple signing, notarization and stapling
@@ -250,6 +273,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Beankeeper Desktop v${{ needs.preflight.outputs.version }}
+          prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.preflight.outputs.prerelease != 'true' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: release/*

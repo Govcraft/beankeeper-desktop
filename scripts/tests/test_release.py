@@ -34,6 +34,32 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.version(tag)
 
+
+    def test_rc_tag_matches_and_debian_version_uses_tilde(self):
+        self.assertTrue(release.valid_version("0.1.0-rc.1"))
+        self.assertTrue(release.is_prerelease("0.1.0-rc.1"))
+        self.assertFalse(release.is_prerelease("0.1.0"))
+        self.assertEqual(release.debian_upstream_version("0.1.0-rc.1"), "0.1.0~rc.1")
+        self.assertEqual(release.debian_upstream_version("0.1.0"), "0.1.0")
+        with self.assertRaises(ValueError):
+            release.version("beankeeper-desktop-v0.1.0")
+        self.assertEqual(release.version("beankeeper-desktop-v0.1.0-rc.1"), "0.1.0-rc.1")
+        directory = release.stage(self.binary, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", self.root / "work")
+        deb = self.output / "bk-0.1.0-rc.1-x86_64-unknown-linux-gnu.deb"
+        release.debian(directory, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", deb)
+        with deb.open("rb") as data:
+            self.assertEqual(data.read(8), b"!<arch>\n")
+            members = {}
+            while header := data.read(60):
+                size = int(header[48:58])
+                members[header[:16].decode().strip().rstrip("/")] = data.read(size)
+                if size % 2:
+                    data.read(1)
+        with tarfile.open(fileobj=io.BytesIO(members["control.tar.gz"])) as control:
+            metadata = control.extractfile("control").read().decode()
+        self.assertIn("Version: 0.1.0~rc.1\n", metadata)
+        self.assertNotIn("Version: 0.1.0-rc.1\n", metadata)
+
     def test_supported_archive_layouts_preserve_binary_and_license(self):
         for target in release.TARGETS:
             with self.subTest(target=target):
