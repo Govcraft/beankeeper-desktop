@@ -105,7 +105,9 @@ and bootstraps it again. A logged-in GUI session is required.
 Windows uses a current-user interactive logon task with limited privileges,
 crash retry every minute (up to 999 consecutive retries), no runtime limit, and
 battery operation enabled. Stop disables the task before stopping it. The task
-runner redirects diagnostics to the protected log. No administrator rights are
+runner redirects diagnostics to the protected log and reports unexpected host
+termination as failure so Task Scheduler retries, including after a forced kill.
+The task and lifecycle helpers hide their console windows. No administrator rights are
 needed for service management.
 
 These registrations follow the native [systemd service contract](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html),
