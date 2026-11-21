@@ -186,6 +186,11 @@ begin`, using their own `ledger/admin` access on the selected encrypted ledger.
 Give the owner the setup agent's Ed25519 public key. Have the owner deliver the
 returned short-lived `ledger/setup` credential through their local secret
 store. Keep the agent's private key and bearer token out of chat and logs.
+Use a separate MCP connection for the setup credential. For a local stdio
+client, read `mcp_endpoint` from `bk service status --json` and run
+`bk mcp bridge --url ENDPOINT --token-file PRIVATE_FILE`. Point `PRIVATE_FILE`
+at the private setup-token file and keep the regular ledger connection.
+
 Keep the returned setup generation for the session's writes. Use the same
 request reference when retrying a step, and stop if the tool reports a conflict.
 
