@@ -88,8 +88,8 @@ fn restrict_windows_acl(path: &Path) -> io::Result<()> {
     wrappers::SetNamedSecurityInfo(
         path,
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(user.as_ref()),
         None,
         Some(dacl),
         None,

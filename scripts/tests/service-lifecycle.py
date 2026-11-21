@@ -42,6 +42,13 @@ def main():
         (root / "home").mkdir()
         binary = root / ("bk.exe" if os.name == "nt" else "bk")
         shutil.copy2(args.binary.resolve(), binary)
+        if os.name == "nt":
+            # Verify the actual PE header, not merely the build-script text.
+            image = binary.read_bytes()
+            optional = int.from_bytes(image[0x3c:0x40], "little") + 24
+            assert int.from_bytes(image[optional:optional + 2], "little") == 0x20b
+            reserve = int.from_bytes(image[optional + 72:optional + 80], "little")
+            assert reserve >= 8 * 1024 * 1024, f"Windows main stack reserve is only {reserve} bytes"
         occupied = socket.socket()
         occupied.bind(("127.0.0.1", 8750))
         occupied.listen()
@@ -93,6 +100,15 @@ def main():
             if os.name != "nt":
                 for path in (*credentials, books.with_suffix(".passphrase")):
                     assert path.stat().st_mode & 0o077 == 0
+            else:
+                for path in (*credentials, books.with_suffix(".passphrase")):
+                    checked = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                        "$acl = Get-Acl -LiteralPath $env:BK_TEST_CREDENTIAL; "
+                        "$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; "
+                        "$user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+                        "if ($owner -ne $user) { throw 'Credential owner is not the current user' }"],
+                        env={**env, "BK_TEST_CREDENTIAL": str(path)}, capture_output=True, text=True, timeout=15)
+                    assert checked.returncode == 0, checked.stderr
             # Add recognizable ledger content through the public ledger CLI, then
             # verify both data and credentials survive replacement and reinstall.
             added = subprocess.run([str(binary), "--db", str(books), "company", "create",

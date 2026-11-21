@@ -58,6 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: service-${{ matrix.os }}
+          cache-on-failure: true
       - name: Select native Windows Perl for vendored OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
