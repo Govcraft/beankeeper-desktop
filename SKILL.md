@@ -227,7 +227,7 @@ to change their connected tab, with the separate navigation connection described
 below.
 
 Browser monetary values are formatted in major units with currency symbols and
-grouping. Report HTML prefers upstream `*_display` decimal fields. Register
+grouping. Reports use the currency carried by ledger amounts. Register
 `min_amount`/`max_amount` filters still use integer minor units; JSON/CSV downloads
 and raw audit/proposal payloads retain their original units.
 

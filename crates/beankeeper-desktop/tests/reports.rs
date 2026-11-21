@@ -1,5 +1,6 @@
 mod common;
 
+use beankeeper::types::Currency;
 use beankeeper_cli::db::{self, Actor, Db};
 use chrono::{Datelike, Local};
 use common::{Ledger, Server, TestResult, rpc, token};
@@ -128,7 +129,8 @@ fn fixture() -> TestResult<Ledger> {
             let db::PostResult::Created(id) = result else {
                 return Err("expected transaction".into());
             };
-            let entry = db::get_entries_for_transaction(db.conn(), id)?
+            let book = db::companies::Company::bind(db.conn(), company.parse()?)?;
+            let entry = db::get_entries_for_transaction(&book, id)?
                 .into_iter()
                 .find(|e| e.account_code == "1000")
                 .ok_or("cash entry")?;
@@ -144,7 +146,7 @@ fn fixture() -> TestResult<Ledger> {
                         transaction_id: id,
                         entry_id: entry.id,
                         amount: Some(amount),
-                        date,
+                        date: date.parse()?,
                         statement: Some(statement),
                         status,
                     },
@@ -158,7 +160,7 @@ fn fixture() -> TestResult<Ledger> {
         &db::SetBudgetParams {
             company_slug: "acme",
             account_code: "5000",
-            currency: "USD",
+            currency: Currency::USD,
             year: 2026,
             month: 2,
             amount: 70_000,
@@ -366,6 +368,56 @@ fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> 
         );
     }
     assert_eq!(before, fingerprint(&db)?);
+    Ok(())
+}
+
+#[test]
+fn reconciliation_reads_historical_alphabetic_account_codes() -> TestResult {
+    let ledger = fixture()?;
+    ledger.db()?.conn().execute(
+        "INSERT INTO accounts (company_slug, code, name, type) VALUES ('acme', 'cash-old', 'Legacy cash', 'asset')",
+        [],
+    )?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let response: Value = server
+        .client
+        .get(format!(
+            "{}/reconciliation?company=acme&account=cash-old&currency=USD&format=json",
+            server.base
+        ))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    assert_eq!(response["account"]["code"], "cash-old");
+    assert_eq!(response["account"]["name"], "Legacy cash");
+    Ok(())
+}
+
+#[test]
+fn register_amount_bounds_use_one_currency_and_remain_inclusive() -> TestResult {
+    let ledger = fixture()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let url = format!(
+        "{}/transactions?company=acme&min_amount=123456&max_amount=123456",
+        server.base
+    );
+    let response = server.client.get(&url).send()?;
+    assert_eq!(response.status(), 400);
+    assert!(
+        response
+            .text()?
+            .contains("Choose a currency to filter amounts")
+    );
+    let register = server
+        .client
+        .get(format!("{url}&currency=USD"))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(register.contains("$1,234.56"));
+    assert!(!register.contains("MX$9,876.54"));
     Ok(())
 }
 

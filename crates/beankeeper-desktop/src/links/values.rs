@@ -1,11 +1,12 @@
 //! Validated wire values shared by every address entry point.
 
-use std::{fmt, ops::RangeInclusive, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use beankeeper::types::{
-    AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency,
+    AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency, Money,
 };
-use chrono::{Datelike, NaiveDate};
+use beankeeper_cli::db::BudgetMonths;
+use chrono::{Datelike, Month, NaiveDate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,16 +43,29 @@ impl Date {
     }
 }
 
+impl TryFrom<NaiveDate> for Date {
+    type Error = LinkError;
+
+    fn try_from(date: NaiveDate) -> Result<Self, Self::Error> {
+        if !(1..=9999).contains(&date.year()) {
+            return Err(LinkError(
+                "Dates must be valid calendar dates in YYYY-MM-DD format.",
+            ));
+        }
+        Ok(Self(date))
+    }
+}
+
 impl FromStr for Date {
     type Err = LinkError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let error = || LinkError("Dates must be valid calendar dates in YYYY-MM-DD format.");
         let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| error())?;
-        if !(1..=9999).contains(&date.year()) || date.format("%Y-%m-%d").to_string() != value {
+        if date.format("%Y-%m-%d").to_string() != value {
             return Err(error());
         }
-        Ok(Self(date))
+        Self::try_from(date)
     }
 }
 
@@ -108,7 +122,11 @@ pub(crate) struct DecimalAmount {
 impl DecimalAmount {
     /// Check the currency-dependent precision and SQLite bounds at the boundary.
     pub(super) fn validate_currency(&self, currency: &Currency) -> Result<(), LinkError> {
-        let scale = currency.0.minor_units();
+        self.money(currency.ledger()).map(|_| ())
+    }
+
+    pub(crate) fn money(&self, currency: LedgerCurrency) -> Result<Money, LinkError> {
+        let scale = currency.minor_units();
         if self.scale > scale {
             return Err(LinkError(
                 "The amount has too many decimal places for its currency.",
@@ -118,13 +136,11 @@ impl DecimalAmount {
             .coefficient
             .minor_units()
             .checked_mul(10_i128.pow(u32::from(scale - self.scale)))
-            .filter(|units| units.unsigned_abs() <= i64::MAX as u128);
-        if units.is_none() {
-            return Err(LinkError(
+            .filter(|units| (i128::from(-i64::MAX)..=i128::from(i64::MAX)).contains(units))
+            .ok_or(LinkError(
                 "The amount exceeds the ledger's supported range.",
-            ));
-        }
-        Ok(())
+            ))?;
+        Ok(Money::from_minor(units, currency))
     }
 }
 
@@ -185,6 +201,10 @@ string_wire!(DecimalAmount);
 pub(crate) struct Threshold(DecimalAmount);
 
 impl Threshold {
+    pub(crate) fn money(&self, currency: LedgerCurrency) -> Result<Money, LinkError> {
+        self.0.money(currency)
+    }
+
     pub(super) fn validate_currency(&self, currency: &Currency) -> Result<(), LinkError> {
         self.0.validate_currency(currency)
     }
@@ -228,6 +248,10 @@ impl AccountSelection {
 
     pub(crate) fn codes(&self) -> Vec<String> {
         self.as_slice().iter().map(ToString::to_string).collect()
+    }
+
+    pub(crate) fn ledger_codes(&self) -> Vec<LedgerAccountCode> {
+        self.as_slice().iter().map(|code| code.0.clone()).collect()
     }
 }
 
@@ -411,12 +435,9 @@ impl fmt::Display for Year {
 
 string_wire!(Year);
 
-/// A report year with an optional inclusive window of complete months.
-#[derive(Clone)]
-pub(crate) struct BudgetWindow {
-    year: i32,
-    months: Option<RangeInclusive<i32>>,
-}
+/// A validated whole-month budget window derived from the report URL.
+#[derive(Clone, Copy)]
+pub(crate) struct BudgetWindow(BudgetMonths);
 
 impl BudgetWindow {
     pub(crate) const ERROR: &'static str = "Budget variance requires a year (1-9999), or a date range covering whole calendar months within one year.";
@@ -426,44 +447,41 @@ impl BudgetWindow {
         to: Option<Date>,
         year: Option<&Year>,
     ) -> Result<Option<Self>, LinkError> {
-        match (from, to) {
-            (None, None) => Ok(year.map(|year| Self {
-                year: year.get(),
-                months: None,
-            })),
+        let (year, first, last) = match (from, to) {
+            (None, None) => {
+                let Some(year) = year else {
+                    return Ok(None);
+                };
+                (year.get(), Month::January, Month::December)
+            }
             (Some(from), Some(to)) => {
                 let from = from.date();
                 let to = to.date();
-                if from > to
-                    || from.day() != 1
+                if from.day() != 1
                     || from.year() != to.year()
                     || to.succ_opt().is_none_or(|next| next.day() != 1)
                     || year.is_some_and(|year| year.get() != from.year())
                 {
                     return Err(LinkError(Self::ERROR));
                 }
-                // chrono guarantees that calendar months are numbered 1–12.
-                let first = i32::try_from(from.month()).map_err(|_| LinkError(Self::ERROR))?;
-                let last = i32::try_from(to.month()).map_err(|_| LinkError(Self::ERROR))?;
-                Ok(Some(Self {
-                    year: from.year(),
-                    months: Some(first..=last),
-                }))
+                (from.year(), Self::month(from)?, Self::month(to)?)
             }
-            _ => Err(LinkError(Self::ERROR)),
-        }
+            _ => return Err(LinkError(Self::ERROR)),
+        };
+        BudgetMonths::new(year, first, last)
+            .map(|months| Some(Self(months)))
+            .map_err(|_| LinkError(Self::ERROR))
     }
 
-    pub(crate) fn year(&self) -> i32 {
-        self.year
+    fn month(date: NaiveDate) -> Result<Month, LinkError> {
+        u8::try_from(date.month())
+            .ok()
+            .and_then(|month| Month::try_from(month).ok())
+            .ok_or(LinkError(Self::ERROR))
     }
 
-    pub(crate) fn first_month(&self) -> Option<i32> {
-        self.months.as_ref().map(|months| *months.start())
-    }
-
-    pub(crate) fn last_month(&self) -> Option<i32> {
-        self.months.as_ref().map(|months| *months.end())
+    pub(crate) const fn months(self) -> BudgetMonths {
+        self.0
     }
 }
 

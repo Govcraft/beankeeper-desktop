@@ -15,10 +15,11 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+agent-uri = { version = "0.6.0", features = ["serde"] }
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
 base64 = "0.23.1"
-beankeeper = { git = "https://github.com/Govcraft/beankeeper", version = "0.7.0", rev = "c2d6b29c0a8442131dc66e65def25b07cfda448c" }
-beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", version = "0.27.0", rev = "c2d6b29c0a8442131dc66e65def25b07cfda448c" }
+beankeeper = { git = "https://github.com/Govcraft/beankeeper", version = "0.8.0", rev = "b60ad7ca32476309ca009d9754e8cac39360d377" }
+beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", version = "0.28.0", rev = "b60ad7ca32476309ca009d9754e8cac39360d377" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 ed25519-dalek = "3.0.0"

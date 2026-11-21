@@ -12,10 +12,15 @@ use std::{
     time::Duration,
 };
 
+use agent_uri::AgentUri;
+use beankeeper::types::Currency;
 use beankeeper_cli::{
     capability::Capability,
     cli::Cli,
-    db::{self, Actor, Db, audit, spend_limits::SpendLimit},
+    db::{
+        self, Actor, Db, audit,
+        spend_limits::{Caps, SpendLimit},
+    },
     error::CliError,
     identity::{self, IssueRequest, VerifiedAgent},
     passphrase,
@@ -636,18 +641,11 @@ fn provision(
     }
     let issued = issue(db, &actor, "desktop_agent", options.preset.capabilities())?;
     if options.preset == Preset::Bookkeeper {
+        let caps = Caps::from_minor_units(Some(options.max_post), Some(options.daily_limit))?;
         for company in companies {
-            audit::set_spend_limit(
-                conn,
-                &actor,
-                &SpendLimit {
-                    agent_uri: issued.agent_uri.clone(),
-                    company_slug: company.slug,
-                    currency: "USD".into(),
-                    max_post: Some(options.max_post),
-                    daily_limit: Some(options.daily_limit),
-                },
-            )?;
+            let company = company.slug.parse()?;
+            let limit = SpendLimit::new(issued.agent_uri.clone(), company, Currency::USD, caps);
+            audit::set_spend_limit(conn, &actor, &limit)?;
         }
     }
     audit::set_policy(conn, &actor, true)?;
@@ -660,7 +658,7 @@ fn provision(
 #[derive(Deserialize)]
 struct IssuedCredential {
     token: SecretString,
-    agent_uri: String,
+    agent_uri: AgentUri,
     #[serde(rename = "private_key")]
     _private_key: Option<SecretString>,
 }
@@ -1048,22 +1046,29 @@ mod tests {
 
     #[test]
     fn issued_credential_requires_a_token_and_agent_uri() -> Result<(), serde_json::Error> {
+        let agent_uri = "agent://example.com/assistant/chat/llm_chat_01h455vb4pex5vsknk084sn02q";
         let credential: IssuedCredential = serde_json::from_value(serde_json::json!({
             "token": "fixture-token",
-            "agent_uri": "fixture-uri",
+            "agent_uri": agent_uri,
             "private_key": "fixture-private-key"
         }))?;
         assert_eq!(credential.token.expose_secret(), "fixture-token");
-        assert_eq!(credential.agent_uri, "fixture-uri");
+        assert_eq!(credential.agent_uri.as_str(), agent_uri);
         assert!(
             serde_json::from_value::<IssuedCredential>(serde_json::json!({
-                "agent_uri": "fixture-uri"
+                "agent_uri": agent_uri
             }))
             .is_err()
         );
         assert!(
             serde_json::from_value::<IssuedCredential>(serde_json::json!({
                 "token": "fixture-token"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<IssuedCredential>(serde_json::json!({
+                "token": "fixture-token", "agent_uri": "not an agent URI"
             }))
             .is_err()
         );

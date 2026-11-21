@@ -3,14 +3,17 @@
 use std::{collections::HashSet, error::Error, fmt, fmt::Write};
 
 use axum::http::StatusCode;
-use beankeeper::types::ClearanceStatus;
+use beankeeper::types::{ClearanceStatus, Money};
 use beankeeper_cli::{
     cli::Cli,
     commands::{
         report_currency::resolve_report_currency,
         summary::{SummaryArgs, execute_json as execute_summary},
     },
-    db::{self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow},
+    db::{
+        self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow,
+        companies::Company, transactions::TransactionValueFilter,
+    },
     error::CliError,
 };
 use clap::Parser;
@@ -540,11 +543,7 @@ fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Resul
         rows.len()
     );
     for AccountGroup { kind, rows } in ledger_rows::accounts_by_kind(&rows)? {
-        write_markup!(
-            html,
-            "<li><strong>{}</strong><ul>",
-            ledger_rows::account_kind_name(kind)
-        );
+        write_markup!(html, "<li><strong>{}</strong><ul>", kind.code());
         for account in rows {
             let mut account_filters = query.clone();
             account_filters.account = Some(account.code.clone());
@@ -585,8 +584,7 @@ impl RegisterSection {
 }
 
 fn transaction_table(
-    db: &Db,
-    rows: &[TransactionRow],
+    rows: &[(TransactionRow, Vec<EntryRow>)],
     company: &str,
     section: RegisterSection,
     html: &mut Markup,
@@ -599,7 +597,7 @@ fn transaction_table(
         html,
         "<div class=\"table-scroll\"><table><caption>Transaction register</caption><thead><tr><th scope=\"col\">Date</th><th scope=\"col\">Payee / description</th><th scope=\"col\">Reference</th><th scope=\"col\">Currency</th><th scope=\"col\">Entries</th></tr></thead><tbody>"
     );
-    for row in rows {
+    for (row, entries) in rows {
         let currency = ledger_rows::currency(&row.currency)?;
         write_markup!(
             html,
@@ -614,8 +612,8 @@ fn transaction_table(
             &row.currency
         );
         write_markup!(html, "<td><ul>");
-        for entry in db::get_entries_for_transaction(db.conn(), row.id)? {
-            let values = EntryValues::read(&entry, currency)?;
+        for entry in entries {
+            let values = EntryValues::read(entry, currency)?;
             write_markup!(
                 html,
                 "<li>{}: {} {} ({})</li>",
@@ -631,11 +629,7 @@ fn transaction_table(
     Ok(())
 }
 
-fn matches_extra(
-    query: &Filters,
-    txn: &TransactionRow,
-    entries: &[EntryRow],
-) -> Result<bool, ViewError> {
+fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) -> bool {
     if let Some(search) = &query.search {
         let search = &search.folded;
         if !txn.description.to_lowercase().contains(search)
@@ -646,7 +640,7 @@ fn matches_extra(
                 .to_lowercase()
                 .contains(search)
         {
-            return Ok(false);
+            return false;
         }
     }
     if let Some(payee) = query.payee.as_deref() {
@@ -660,7 +654,7 @@ fn matches_extra(
             .and_then(serde_json::Value::as_str)
             != Some(payee)
         {
-            return Ok(false);
+            return false;
         }
     }
     let min = query.min_amount();
@@ -680,13 +674,40 @@ fn matches_extra(
             continue;
         }
         if let Some(status) = &query.status
-            && ledger_rows::clearance(entry)? != status.status()
+            && ledger_rows::clearance(entry.status) != status.status()
         {
             continue;
         }
-        return Ok(true);
+        return true;
     }
-    Ok(false)
+    false
+}
+
+fn register_values(
+    db: &Db,
+    company: &str,
+    query: &Filters,
+) -> Result<Option<TransactionValueFilter>, ViewError> {
+    let (min, max) = (query.min_amount(), query.max_amount());
+    let currency = match (query.currency.as_ref(), min, max) {
+        (Some(currency), _, _) => currency.ledger(),
+        (None, None, None) => return Ok(None),
+        (None, _, _) => resolve_report_currency(db.conn(), company, None).map_err(|error| {
+            if matches!(error, CliError::Validation(_)) {
+                ViewError::Invalid("Choose a currency to filter amounts in these books.")
+            } else {
+                error.into()
+            }
+        })?,
+    };
+    let money = |units| Money::from_minor(i128::from(units), currency);
+    // Upstream bounds are exclusive; register query values are inclusive.
+    let lower = min.and_then(|units| units.checked_sub(1)).map(money);
+    let upper = max.and_then(|units| units.checked_add(1)).map(money);
+    Ok(Some(
+        TransactionValueFilter::from_bounds(lower, upper, None)?
+            .unwrap_or_else(|| TransactionValueFilter::by_currency(currency)),
+    ))
 }
 
 fn register(
@@ -696,17 +717,15 @@ fn register(
     section: RegisterSection,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
-    let mut params = ListTransactionParams::for_company(company);
+    let book = Company::bind(db.conn(), company.parse()?)?;
+    let mut params = ListTransactionParams::for_company(book.slug().as_str());
     params.account_filter = query.account.as_deref();
     params.tax_category_filter = query.category.as_deref();
     let from = query.dates.from().map(|date| date.to_string());
     let to = query.dates.to().map(|date| date.to_string());
-    params.from_date = from.as_deref();
-    params.to_date = to.as_deref();
-    params.currency_filter = query.currency.as_ref().map(Currency::code);
-    // Upstream bounds are exclusive; desktop labels and URLs use inclusive bounds.
-    params.amount_gt = query.min_amount().and_then(|min| min.checked_sub(1));
-    params.amount_lt = query.max_amount().and_then(|max| max.checked_add(1));
+    params.from_date = query.dates.from().map(Date::date);
+    params.to_date = query.dates.to().map(Date::date);
+    params.value_filter = register_values(db, company, query)?;
     let total = db::count_transactions(db.conn(), &params)?;
     let start = query.offset.position();
     let mut cursor = start;
@@ -720,9 +739,9 @@ fn register(
         }
         for txn in batch {
             cursor += 1;
-            let entries = db::get_entries_for_transaction(db.conn(), txn.id)?;
-            if matches_extra(query, &txn, &entries)? {
-                rows.push(txn);
+            let entries = db::get_entries_for_transaction(&book, txn.id)?;
+            if matches_extra(query, &txn, &entries) {
+                rows.push((txn, entries));
             }
             if rows.len() == PAGE_SIZE || cursor - start == SCAN_LIMIT {
                 break;
@@ -743,7 +762,7 @@ fn register(
             write_markup!(html, "<p>{}: {}.</p>", label, value);
         }
     }
-    transaction_table(db, &rows, company, section, html)?;
+    transaction_table(&rows, company, section, html)?;
     write_markup!(
         html,
         "<p>{} matching transactions shown. Scanned source rows {} through {} of {} candidates after company, account, date, currency and amount filters.</p>",
@@ -877,7 +896,7 @@ fn audit(
             html,
             "<article><h3>{}: {} {}</h3><dl>",
             &row.changed_at,
-            subject.kind().as_str(),
+            row.entity.as_str(),
             &row.action
         );
         for (label, value) in [

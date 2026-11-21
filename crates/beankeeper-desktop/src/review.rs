@@ -13,12 +13,14 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
+use beankeeper::types::{Currency, Money};
 use beankeeper_cli::{
     capability::Capability,
     commands::verify,
     db::{
         self, Actor, Db,
-        proposals::{self, Proposal, ProposalId},
+        proposals::{self, Proposal, ProposalId, ProposalState, Resolution, ResolvedBy},
+        spend_limits::Cap,
     },
     error::CliError,
     identity::{self, IssueRequest},
@@ -241,39 +243,6 @@ impl NonEmptyReason {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ProposalStatus {
-    Pending,
-    Approved,
-    Rejected,
-    Withdrawn,
-}
-
-impl TryFrom<&str> for ProposalStatus {
-    type Error = CliError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "pending" => Ok(Self::Pending),
-            "approved" => Ok(Self::Approved),
-            "rejected" => Ok(Self::Rejected),
-            "withdrawn" => Ok(Self::Withdrawn),
-            _ => Err(CliError::Database("unrecognized proposal status".into())),
-        }
-    }
-}
-
-impl ProposalStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Rejected => "rejected",
-            Self::Withdrawn => "withdrawn",
-        }
-    }
-}
-
 fn failure(error: &CliError, session: Option<&HumanSession>) -> Response {
     let status = match error {
         CliError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -471,7 +440,7 @@ fn render(
                         encode(company),
                         &proposal.payload.description
                     );
-                    summary(review, proposal, proposal.status.as_str().try_into()?, html)?;
+                    summary(review, proposal, html)?;
                     write_markup!(html, "</article>");
                 }
                 write_markup!(html, "</section>");
@@ -539,12 +508,7 @@ fn verification_panel(
     html
 }
 
-fn summary(
-    review: &Review,
-    proposal: &Proposal,
-    status: ProposalStatus,
-    html: &mut Markup,
-) -> Result<(), CliError> {
+fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<(), CliError> {
     write_markup!(
         html,
         "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{}</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
@@ -553,7 +517,7 @@ fn summary(
         &proposal.proposer_uri,
         &proposal.proposer_jti,
         &proposal.created_at,
-        status.as_str(),
+        proposal.state.code(),
         &proposal.payload.description
     );
     let limits = db::spend_limits::list(
@@ -562,21 +526,21 @@ fn summary(
         Some(&proposal.company_slug),
     )?;
     write_markup!(html, "<p>Current spend-limit context: ");
-    if let Some(limit) = limits
-        .iter()
-        .find(|limit| limit.currency == proposal.currency)
-    {
-        let cap = |value: Option<i64>| {
+    let currency = Currency::from_code(&proposal.currency)
+        .map_err(|error| CliError::Validation(error.to_string()))?;
+    if let Some(limit) = limits.iter().find(|limit| limit.currency() == currency) {
+        let cap = |value: Option<Cap>| {
             value.map_or_else(
                 || "uncapped".into(),
-                |value| money::minor(value, &limit.currency),
+                |value| money::ledger(Money::from_minor(i128::from(value.minor_units()), currency)),
             )
         };
+        let caps = limit.caps();
         write_markup!(
             html,
             "max per posting {}, daily cap {}.",
-            cap(limit.max_post),
-            cap(limit.daily_limit)
+            cap(caps.max_post()),
+            cap(caps.daily_limit()),
         );
     } else if limits.is_empty() {
         write_markup!(html, "no caps configured for this agent and company.");
@@ -599,14 +563,13 @@ fn proposal_detail(
     session: &HumanSession,
     html: &mut Markup,
 ) -> Result<(), CliError> {
-    let status = ProposalStatus::try_from(proposal.status.as_str())?;
     write_markup!(
         html,
         "<section><h2>{}</h2><p>Proposal <code>{}</code></p>",
         &proposal.payload.description,
         proposal.id
     );
-    summary(review, proposal, status, html)?;
+    summary(review, proposal, html)?;
     let posting = &proposal.payload;
     write_markup!(
         html,
@@ -634,35 +597,29 @@ fn proposal_detail(
         "<details><summary>Full proposed posting, including metadata and retry policy (raw minor units)</summary><pre>{}</pre></details>",
         &payload
     );
-    if matches!(status, ProposalStatus::Pending) {
-        write_markup!(
-            html,
-            "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {}</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
-            proposal.id,
-            session.csrf_token(),
-            &proposal.company_slug,
-            &money::minor(proposal.debit_total, &proposal.currency),
-            proposal.id,
-            session.csrf_token(),
-            &proposal.company_slug
-        );
-    } else {
-        write_markup!(
-            html,
-            "<p>Resolved at {} by {}.</p>",
-            proposal.resolved_at.as_deref().unwrap_or("not recorded"),
-            proposal.resolved_by_uri.as_deref().unwrap_or("local human")
-        );
-        if let Some(reason) = &proposal.reason {
-            write_markup!(html, "<p>Decision reason: {}</p>", reason);
-        }
-        if let Some(id) = proposal.transaction_id {
+    match &proposal.state {
+        ProposalState::Pending => {
             write_markup!(
                 html,
-                "<p><a href=\"/transactions/{}?company={}\">View posted transaction</a></p>",
-                id,
-                encode(&proposal.company_slug)
+                "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {}</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
+                proposal.id,
+                session.csrf_token(),
+                &proposal.company_slug,
+                &money::minor(proposal.debit_total, &proposal.currency),
+                proposal.id,
+                session.csrf_token(),
+                &proposal.company_slug
             );
+        }
+        ProposalState::Approved {
+            resolution,
+            transaction_id,
+        } => {
+            resolution_detail(proposal, resolution, Some(*transaction_id), html);
+        }
+        ProposalState::Rejected { resolution, .. }
+        | ProposalState::Withdrawn { resolution, .. } => {
+            resolution_detail(proposal, resolution, None, html);
         }
     }
     write_markup!(
@@ -671,4 +628,33 @@ fn proposal_detail(
         encode(&proposal.company_slug)
     );
     Ok(())
+}
+
+fn resolution_detail(
+    proposal: &Proposal,
+    resolution: &Resolution,
+    transaction: Option<i64>,
+    html: &mut Markup,
+) {
+    let resolver = match &resolution.by {
+        ResolvedBy::Local => "local human",
+        ResolvedBy::Agent { uri, .. } => uri,
+    };
+    write_markup!(
+        html,
+        "<p>Resolved at {} by {}.</p>",
+        &resolution.at,
+        resolver
+    );
+    if let Some(reason) = proposal.state.reason() {
+        write_markup!(html, "<p>Decision reason: {}</p>", reason);
+    }
+    if let Some(id) = transaction {
+        write_markup!(
+            html,
+            "<p><a href=\"/transactions/{}?company={}\">View posted transaction</a></p>",
+            id,
+            encode(&proposal.company_slug)
+        );
+    }
 }
