@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.11] - 2026-11-21
+
+### Added
+
+- Per-user background hosting through `bk service install`, `uninstall`, `start`,
+  `stop` and `status --json`, using systemd user units, macOS LaunchAgents and
+  Windows logon tasks, with crash recovery and persistent stop controls.
+- Local stdio lifecycle MCP tools, authenticated runtime endpoint discovery for
+  the ledger bridge, IPv4 loopback port fallback and OS-standard data/log paths.
+- Installer integration with opt-out, private file fallback when a new service
+  ledger cannot use the native secret store, and private owner recovery material.
+- Native lifecycle CI for Linux, macOS and Windows, including crash restart,
+  binary replacement, book preservation and uninstall.
+
 ## [0.1.0-rc.10] - 2026-11-21
 
 ### Added
