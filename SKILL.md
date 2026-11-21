@@ -183,9 +183,10 @@ installed ledger exposes a scoped write tool for the next confirmed step.
 
 The owner can authorize a session through `ledger_setup_begin` or `bk setup
 begin`, using their own `ledger/admin` access on the selected encrypted ledger.
-Give the owner the setup agent's Ed25519 public key. Have the owner deliver the
-returned short-lived `ledger/setup` credential through their local secret
-store. Keep the agent's private key and bearer token out of chat and logs.
+For the CLI, set `--db` to the `books` path reported by `bk service status
+--json`. Give the owner the setup agent's Ed25519 public key. Have the
+owner deliver the short-lived `ledger/setup` credential through their local
+secret store. Keep the agent's private key and bearer token out of chat and logs.
 Use a separate MCP connection for the setup credential. For a local stdio
 client, read `mcp_endpoint` from `bk service status --json` and run
 `bk mcp bridge --url ENDPOINT --token-file PRIVATE_FILE`. Point `PRIVATE_FILE`

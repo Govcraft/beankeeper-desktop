@@ -27,7 +27,7 @@ use beankeeper_cli::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::{
     markup::{Attribute, Markup, markup, write_markup},
@@ -61,7 +61,7 @@ impl ApprovalAuthority {
 
         let capabilities =
             [Capability::Read, Capability::Approve].map(|capability| capability.path().to_owned());
-        let issued = identity::issue(
+        let issued = identity::issue_credential(
             db.conn(),
             &Actor::new("desktop-local-human"),
             &IssueRequest {
@@ -73,10 +73,7 @@ impl ApprovalAuthority {
                 generate_key: true,
             },
         )?;
-        let issued: IssuedApprovalCredential = serde_json::from_value(issued).map_err(|_| {
-            CliError::General("human approval credential could not be created".into())
-        })?;
-        Ok(Self::Credential(issued.token))
+        Ok(Self::Credential(issued.token().clone()))
     }
 
     fn actor(&self, db: &Db) -> Result<Actor, CliError> {
@@ -88,22 +85,6 @@ impl ApprovalAuthority {
             Self::PolicyOff => Ok(actor),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct IssuedApprovalCredential {
-    #[serde(deserialize_with = "deserialize_approval_token")]
-    token: SecretString,
-}
-
-fn deserialize_approval_token<'de, D: Deserializer<'de>>(
-    input: D,
-) -> Result<SecretString, D::Error> {
-    let token = String::deserialize(input)?;
-    if token.is_empty() {
-        return Err(serde::de::Error::custom("approval credential is empty"));
-    }
-    Ok(SecretString::from(token))
 }
 
 enum Verification {

@@ -40,7 +40,7 @@ pub(crate) fn loopback_address(value: &str) -> Result<SocketAddr, String> {
 /// The upstream CLI extended with Desktop onboarding, hosting and bridging.
 #[must_use]
 pub fn command() -> Command {
-    Cli::command()
+    with_desktop_setup(Cli::command())
         .version(env!("CARGO_PKG_VERSION"))
         .about("Beankeeper Desktop: local UI and agent-driven accounting")
         .subcommand(crate::agents::AgentOptions::augment_args(
@@ -63,15 +63,6 @@ pub fn command() -> Command {
         )
         .subcommand(OpenOptions::augment_args(
             Command::new("open").about("Open the running Desktop UI in your default browser"),
-        ))
-        .subcommand(crate::setup::SetupOptions::augment_args(
-            Command::new("setup")
-                .about("Create an encrypted ledger and configure your MCP clients")
-                .subcommand(
-                    Command::new("status")
-                        .about("Read book and account setup status without changing the ledger")
-                        .after_help("Example: bk setup status --json"),
-                ),
         ))
         .subcommand(crate::product::LicenseOptions::augment_args(
             Command::new("license").about("Show, activate, or print compiled-in license trust"),
@@ -97,6 +88,20 @@ pub fn command() -> Command {
         })
 }
 
+fn with_desktop_setup(command: Command) -> Command {
+    command.mut_subcommand("setup", |setup| {
+        crate::setup::SetupOptions::augment_args(setup)
+            .about("Create an encrypted ledger and configure your MCP clients")
+            .subcommand_required(false)
+            .arg_required_else_help(false)
+            .mut_subcommand("status", |status| {
+                status
+                    .about("Read book and account setup status without changing the ledger")
+                    .after_help("Example: bk setup status --json")
+            })
+    })
+}
+
 /// Adapt the shared ledger options to the public upstream router factory.
 ///
 /// Upstream owns parsing of these flags, passphrase resolution and token rules.
@@ -113,4 +118,52 @@ pub fn ledger_options(matches: &ArgMatches) -> Result<Cli, clap::Error> {
     cli.passphrase = PassphraseOptions::from_arg_matches(matches)?;
     cli.agent_token = matches.get_one("agent_token").cloned();
     Ok(cli)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_setup_preserves_the_upstream_command_tree() -> Result<(), clap::Error> {
+        let upstream = Command::new("bk").subcommand(
+            Command::new("setup")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(Command::new("status").alias("state")),
+        );
+        let combined = with_desktop_setup(upstream);
+        combined.clone().debug_assert();
+
+        let bare = combined.clone().try_get_matches_from(["bk", "setup"])?;
+        assert!(bare.subcommand_matches("setup").is_some());
+        let status = combined
+            .clone()
+            .try_get_matches_from(["bk", "setup", "state"])?;
+        assert_eq!(
+            status
+                .subcommand_matches("setup")
+                .and_then(ArgMatches::subcommand_name),
+            Some("status")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_setup_still_accepts_provisioning_without_a_subcommand() -> Result<(), clap::Error> {
+        for (args, force) in [
+            (vec!["bk", "setup"], false),
+            (vec!["bk", "setup", "--force", "--non-interactive"], true),
+        ] {
+            let matches = command().try_get_matches_from(args)?;
+            let setup = matches
+                .subcommand_matches("setup")
+                .unwrap_or_else(|| unreachable!());
+            assert!(setup.subcommand_name().is_none());
+            let options = crate::setup::SetupOptions::from_arg_matches(setup)?;
+            assert_eq!(options.force, force);
+            assert_eq!(options.non_interactive, force);
+        }
+        Ok(())
+    }
 }
