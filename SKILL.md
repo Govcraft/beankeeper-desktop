@@ -37,6 +37,43 @@ view IDs and query filters in [docs/reports.md](docs/reports.md) for saved repor
 links. Tax CSV/JSON downloads require the human browser session; agent bearer
 tokens cannot authorize them. These summaries are not filed tax forms.
 
+Answer the financial question in plain words before offering a view. Use the
+structured numbers and chartable series from ledger tools to draw charts in the
+conversation when useful. The owner never needs Desktop to understand the answer.
+Offer a deep link only for optional visuals, source detail or human review.
+
+Call `ui_get_link` on your normal ledger connection (`ledger/read`) with the
+same `view_id` and `state` used by `ui_show_view`. This tool succeeds without a
+paired browser, UI credential or live tab, works under `--read-only`, and never
+navigates. Put its `url` in your answer as an optional detail link. Do not call
+`ui_show_view` merely to obtain a URL. The CLI equivalent is
+`bk --json ui link --view-id VIEW --company SLUG ...`; it does not need a running
+server or ledger. Success returns the same `url`, `path`, `view_id` and `state`.
+Invalid selectors return a named `VALIDATION` error.
+
+Always carry the answer's exact company slug, currency, account code and date
+bounds into the link. Spending categories identified by expense accounts map to
+`state.account`. `state.category` means an exact entry tax-category tag;
+`state.payee` means the exact `metadata.payee` string, preserving case. Both are
+register filters. Use inclusive `from`/`to` and optional inclusive
+`compare_from`/`compare_to` bounds for two periods, or `compare_to` alone for a
+balance-sheet snapshot comparison; see supported views and all
+identifiers in the [deep-link contract](docs/deep-links.md). Do not substitute a
+category's display name for its identifier or a fuzzy text search for a payee.
+
+Example after answering an October spending question:
+
+```json
+{"name":"ui_get_link","arguments":{"view_id":"transactions","state":{"company":"acme","account":"5000","currency":"USD","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30"}}}
+```
+
+If the browser is unpaired, the human opens the terminal's one-time pairing URL
+in that same browser and confirms pairing. Desktop then restores the requested
+view. Keep pairing and bearer credentials out of shared detail URLs. A saved
+view URL conveys no authority. Use `ui_show_view` only when the owner wants you
+to change their connected tab, with the separate navigation connection described
+below.
+
 Browser monetary values are formatted in major units with currency symbols and
 grouping. Report HTML prefers upstream `*_display` decimal fields. Register
 `min_amount`/`max_amount` filters still use integer minor units; JSON/CSV downloads

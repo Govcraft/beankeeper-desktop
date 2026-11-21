@@ -30,11 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 
-use crate::{
-    pairing::{self, AgentKey, BrowserSessionId, PairingError, PairingState, Session},
-    reports::ReportQuery,
-    views::ViewQuery,
-};
+use crate::pairing::{self, AgentKey, BrowserSessionId, PairingError, PairingState, Session};
 
 const TAB_LIFETIME: Duration = Duration::from_secs(3);
 const MAX_TABS: usize = 128;
@@ -50,233 +46,17 @@ impl TabId {
     }
 }
 
-#[derive(Clone, Copy, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum View {
-    Dashboard,
-    Accounts,
-    Transactions,
-    Transaction,
-    Reports,
-    #[serde(rename = "income-statement")]
-    IncomeStatement,
-    #[serde(rename = "balance-sheet")]
-    BalanceSheet,
-    #[serde(rename = "cash-flow")]
-    CashFlow,
-    Trend,
-    #[serde(rename = "budget-variance")]
-    BudgetVariance,
-    #[serde(rename = "schedule-c")]
-    ScheduleC,
-    #[serde(rename = "1099")]
-    Vendor1099,
-    Reconciliation,
-    Review,
-    ReviewDetail,
-}
-
-#[derive(Default, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct AddressState {
-    company: Option<String>,
-    account: Option<String>,
-    from: Option<String>,
-    to: Option<String>,
-    min_amount: Option<String>,
-    max_amount: Option<String>,
-    search: Option<String>,
-    status: Option<String>,
-    offset: Option<usize>,
-    currency: Option<String>,
-    transaction_id: Option<i64>,
-    proposal_id: Option<String>,
-    report_kind: Option<String>,
-    period: Option<String>,
-    metric: Option<String>,
-    year: Option<String>,
-    threshold: Option<String>,
-    cash_account: Option<String>,
-    mode: Option<String>,
-    statement: Option<String>,
-    statement_balance: Option<String>,
-    link_key: Option<String>,
-}
-
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 struct Show {
-    view_id: View,
-    #[serde(default)]
-    state: AddressState,
+    #[serde(flatten)]
+    address: crate::links::ViewAddress,
     tab_id: Option<TabId>,
 }
 
 impl Show {
     fn url(&self) -> Result<String, &'static str> {
-        let state = &self.state;
-        if state.transaction_id.is_some() && !matches!(self.view_id, View::Transaction)
-            || state.proposal_id.is_some() && !matches!(self.view_id, View::ReviewDetail)
-        {
-            return Err("Record IDs require their matching detail view.");
-        }
-        let report_id = match self.view_id {
-            View::Reports => state.report_kind.as_deref(),
-            View::IncomeStatement => Some("income-statement"),
-            View::BalanceSheet => Some("balance-sheet"),
-            View::CashFlow => Some("cash-flow"),
-            View::Trend => Some("trend"),
-            View::BudgetVariance => Some("budget-variance"),
-            View::ScheduleC => Some("schedule-c"),
-            View::Vendor1099 => Some("1099"),
-            View::Reconciliation => Some("reconciliation"),
-            _ => None,
-        };
-        let is_report = report_id.is_some() || matches!(self.view_id, View::Reports);
-        if state.report_kind.is_some() && !matches!(self.view_id, View::Reports) {
-            return Err(
-                "report_kind requires the reports view; direct report IDs need no report_kind.",
-            );
-        }
-        let report_fields = [
-            ("period", &state.period, "trend"),
-            ("metric", &state.metric, "trend"),
-            ("year", &state.year, "budget-variance"),
-            ("threshold", &state.threshold, "1099"),
-            ("cash_account", &state.cash_account, "cash-flow"),
-            ("mode", &state.mode, "reconciliation"),
-            ("statement", &state.statement, "reconciliation"),
-            (
-                "statement_balance",
-                &state.statement_balance,
-                "reconciliation",
-            ),
-            ("link_key", &state.link_key, "reconciliation"),
-        ];
-        if report_fields
-            .iter()
-            .any(|(_, value, required)| value.is_some() && report_id != Some(*required))
-        {
-            return Err(
-                "Report filters require their matching report view. Use from/to for register dates.",
-            );
-        }
-        if is_report {
-            if report_id.is_some_and(|id| !crate::reports::VIEW_IDS.contains(&id)) {
-                return Err("Unknown report_kind. Use a stable report ID from the tool catalog.");
-            }
-            if state.offset.is_some()
-                || state.min_amount.is_some()
-                || state.max_amount.is_some()
-                || state.search.is_some()
-                || state.status.is_some()
-                || (state.account.is_some() && report_id != Some("reconciliation"))
-                || (report_id.is_none() && (state.from.is_some() || state.to.is_some()))
-            {
-                return Err("Unsupported report filters. Use the report's URL-restorable filters.");
-            }
-        }
-        let path = match self.view_id {
-            View::Dashboard => "/".into(),
-            View::Accounts => "/accounts".into(),
-            View::Transactions => "/transactions".into(),
-            View::Transaction => format!(
-                "/transactions/{}",
-                state
-                    .transaction_id
-                    .filter(|id| *id > 0)
-                    .ok_or("transaction requires a positive transaction_id.")?
-            ),
-            View::Review => "/review".into(),
-            View::ReviewDetail => {
-                let id = state
-                    .proposal_id
-                    .as_deref()
-                    .ok_or("review_detail requires proposal_id.")?
-                    .parse::<beankeeper_cli::db::proposals::ProposalId>()
-                    .map_err(|_| "proposal_id must be a proposal TypeID.")?;
-                format!("/review/{id}")
-            }
-            _ if is_report => match report_id {
-                Some("reconciliation") => "/reconciliation".into(),
-                Some(id) => format!("/reports/{id}"),
-                None => "/reports".into(),
-            },
-            _ => return Err("Unknown view."),
-        };
-        if matches!(self.view_id, View::Review | View::ReviewDetail)
-            && (state.offset.is_some()
-                || [
-                    state.account.as_ref(),
-                    state.from.as_ref(),
-                    state.to.as_ref(),
-                    state.min_amount.as_ref(),
-                    state.max_amount.as_ref(),
-                    state.search.as_ref(),
-                    state.status.as_ref(),
-                    state.currency.as_ref(),
-                ]
-                .iter()
-                .any(|v| v.is_some()))
-        {
-            return Err(
-                "Review views support company only; register filters require transactions.",
-            );
-        }
-        let query = ViewQuery {
-            company: state.company.clone(),
-            account: state.account.clone(),
-            from: state.from.clone(),
-            to: state.to.clone(),
-            min_amount: state.min_amount.clone(),
-            max_amount: state.max_amount.clone(),
-            search: state.search.clone(),
-            status: state.status.clone(),
-            offset: state.offset,
-            currency: state.currency.clone(),
-        };
-        query
-            .validate()
-            .map_err(|_| "Invalid date, amount, clearance or pagination filters.")?;
-        if is_report {
-            let query: ReportQuery = serde_json::from_value(
-                serde_json::to_value(state).map_err(|_| "Invalid report filters.")?,
-            )
-            .map_err(|_| "Invalid report filters.")?;
-            query.validate_navigation(&path).map_err(
-                |_| "Invalid report date range, period, metric, year or reconciliation mode.",
-            )?;
-        }
-        let mut url = path;
-        for (name, value) in [
-            ("company", &state.company),
-            ("account", &state.account),
-            ("from", &state.from),
-            ("to", &state.to),
-            ("min_amount", &state.min_amount),
-            ("max_amount", &state.max_amount),
-            ("search", &state.search),
-            ("status", &state.status),
-            ("currency", &state.currency),
-        ]
-        .into_iter()
-        .chain(report_fields.iter().map(|(name, value, _)| (*name, *value)))
-        {
-            if let Some(value) = value {
-                url.push(if url.contains('?') { '&' } else { '?' });
-                url.push_str(name);
-                url.push('=');
-                url.push_str(&crate::views::encode(value));
-            }
-        }
-        if let Some(offset) = state.offset {
-            url.push(if url.contains('?') { '&' } else { '?' });
-            url.push_str(&format!("offset={offset}"));
-        }
-        if url.len() > 4096 {
-            return Err("View address exceeds 4096 bytes.");
-        }
-        Ok(url)
+        self.address.path()
     }
 }
 
@@ -350,6 +130,26 @@ impl Navigation {
         arguments: Value,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
+        if name == "ui_get_link" {
+            return Ok(
+                match serde_json::from_value::<crate::links::ViewAddress>(arguments) {
+                    Ok(address) => match address.result(self.pairing.base_url()) {
+                        Ok(payload) => reply(
+                            format!(
+                                "Optional Desktop detail: {}. No browser was opened or changed.",
+                                payload["url"].as_str().unwrap_or_default()
+                            ),
+                            payload,
+                        ),
+                        Err(error) => failure("VALIDATION", &error.to_string()),
+                    },
+                    Err(_) => failure(
+                        "VALIDATION",
+                        "Invalid view or filters. Check the tool schema.",
+                    ),
+                },
+            );
+        }
         let agent = AgentKey::from_verified_identity(&identity);
         let sessions = self
             .pairing
@@ -495,10 +295,12 @@ fn failure(code: &str, message: &str) -> CallToolResult {
 
 impl HostToolHandler for Navigation {
     fn tools(&self) -> Vec<HostTool> {
-        [("ui_show_view", "Queue a real Desktop view with URL-restorable filters, including financial reports, tax summaries and reconciliation. Use a stable report view_id or reports with state.report_kind. No ledger data is returned. Use ui_status to choose among tabs.", schemars::schema_for!(Show).to_value(), HostToolEffect::Mutation),
+        let mut tools: Vec<_> = [("ui_show_view", "Queue a real Desktop view with URL-restorable filters, including financial reports, tax summaries and reconciliation. Use a stable report view_id or reports with state.report_kind. No ledger data is returned. Use ui_status to choose among tabs.", schemars::schema_for!(Show).to_value(), HostToolEffect::Mutation),
          ("ui_highlight", "Highlight an existing DOM ID from ui_status targets. A missing target is a no-op.", schemars::schema_for!(Highlight).to_value(), HostToolEffect::Mutation),
          ("ui_status", "Report paired and live tabs, confirmed view URLs, highlight targets and pairing link. Requires ui/navigate.", schemars::schema_for!(Status).to_value(), HostToolEffect::ReadOnly)]
-        .into_iter().map(|(name, description, schema, effect)| HostTool { tool: Tool::new(name, description, schema.as_object().cloned().unwrap_or_default()), capability: Capability::Navigate, effect }).collect()
+        .into_iter().map(|(name, description, schema, effect)| HostTool { tool: Tool::new(name, description, schema.as_object().cloned().unwrap_or_default()), capability: Capability::Navigate, effect }).collect();
+        tools.push(HostTool { tool: Tool::new("ui_get_link", "Return an optional Desktop detail URL after answering in words. Does not navigate, open a browser or require pairing. Uses the same view_id/state as ui_show_view. Requires ledger/read.", schemars::schema_for!(crate::links::ViewAddress).to_value().as_object().cloned().unwrap_or_default()), capability: Capability::Read, effect: HostToolEffect::ReadOnly });
+        tools
     }
 
     fn call_tool(
@@ -559,7 +361,12 @@ fn local_view(url: &str) -> bool {
         && !url.contains(['#', '\\', '\r', '\n'])
         && (matches!(
             path,
-            "/" | "/accounts" | "/transactions" | "/review" | "/reports" | "/reconciliation"
+            "/" | "/accounts"
+                | "/transactions"
+                | "/review"
+                | "/reports"
+                | "/reconciliation"
+                | "/settings"
         ) || path
             .strip_prefix("/reports/")
             .is_some_and(|id| crate::reports::VIEW_IDS.contains(&id))
@@ -711,6 +518,28 @@ mod tests {
     }
 
     #[test]
+    fn navigation_schema_adds_tab_selection_to_the_shared_address_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = schemars::schema_for!(Show).to_value();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["unevaluatedProperties"], false);
+        assert!(schema["properties"]["tab_id"].is_object());
+        let variants = schema["oneOf"].as_array().ok_or("view alternatives")?;
+        assert_eq!(variants.len(), 16);
+        for variant in variants {
+            // tab_id is declared by the outer object and must remain allowed.
+            assert_ne!(variant["additionalProperties"], false);
+        }
+        let input = json!({"view_id":"accounts","tab_id":"tab_01h455vb4pex5vsknk084sn02q"});
+        let show: Show = serde_json::from_value(input)?;
+        assert_eq!(show.url()?, "/accounts");
+        assert!(
+            serde_json::from_value::<Show>(json!({"view_id":"accounts","injected":true})).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn view_addresses_use_real_routes_and_validate_detail_identifiers()
     -> Result<(), Box<dyn std::error::Error>> {
         for (input, expected) in [
@@ -738,10 +567,12 @@ mod tests {
             "..",
             "transaction_01h455vb4pex5vsknk084sn02q",
         ] {
-            let show: Show = serde_json::from_value(
-                json!({"view_id":"review_detail","state":{"proposal_id":id}}),
-            )?;
-            assert!(show.url().is_err());
+            assert!(
+                serde_json::from_value::<Show>(
+                    json!({"view_id":"review_detail","state":{"proposal_id":id}}),
+                )
+                .is_err()
+            );
         }
         Ok(())
     }

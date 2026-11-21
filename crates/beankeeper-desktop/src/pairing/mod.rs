@@ -83,16 +83,24 @@ pub(crate) struct Session {
     pub(crate) agent: Option<AgentKey>,
 }
 
+struct Destination {
+    path: String,
+    expires: Instant,
+}
+
 #[derive(Default)]
 struct Registry {
     links: HashMap<[u8; 32], Link>,
     sessions: HashMap<[u8; 32], Session>,
+    destinations: HashMap<[u8; 32], Destination>,
 }
 
 impl Registry {
     fn prune(&mut self, now: Instant) {
         self.links.retain(|_, link| now < link.expires);
         self.sessions.retain(|_, session| now < session.expires);
+        self.destinations
+            .retain(|_, destination| now < destination.expires);
     }
 }
 
@@ -105,6 +113,10 @@ pub struct PairingState {
 }
 
 impl PairingState {
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base
+    }
+
     /// Generate the launch's single-use browser pairing URL (valid five minutes).
     ///
     /// # Errors
@@ -117,6 +129,85 @@ impl PairingState {
         };
         let url = state.browser_link(Instant::now())?;
         Ok((state, url))
+    }
+
+    fn destination_cookie_name(&self) -> String {
+        format!("{}_return", self.cookie_name)
+    }
+
+    fn destination_key(&self, headers: &HeaderMap) -> Option<[u8; 32]> {
+        let name = self.destination_cookie_name();
+        let mut values = headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|header| header.to_str().ok())
+            .flat_map(|header| header.split(';'))
+            .filter_map(|cookie| cookie.trim().split_once('='))
+            .filter(|(key, _)| *key == name)
+            .map(|(_, value)| value);
+        let value = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        Some(Secret::digest(value))
+    }
+
+    pub(crate) fn remember_destination(
+        &self,
+        headers: &HeaderMap,
+        path: String,
+        now: Instant,
+    ) -> Result<String, PairingError> {
+        let mut registry = self.lock(now)?;
+        let key = self.destination_key(headers);
+        if let Some(destination) = key.and_then(|key| registry.destinations.get_mut(&key)) {
+            destination.path = path;
+            return Ok(String::new());
+        }
+        let key = Secret::generate()?;
+        // A remembered view is optional convenience, so capacity must never
+        // replace the pairing page. Expiries are fixed at insertion, making the
+        // earliest expiry the oldest entry without tracking another timestamp.
+        if registry.destinations.len() >= MAX_ENTRIES
+            && let Some(oldest) = registry
+                .destinations
+                .iter()
+                .min_by_key(|(_, destination)| destination.expires)
+                .map(|(key, _)| *key)
+        {
+            registry.destinations.remove(&oldest);
+        }
+        registry.destinations.insert(
+            Secret::digest(key.expose()),
+            Destination {
+                path,
+                expires: now + LINK_LIFETIME,
+            },
+        );
+        Ok(format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=300",
+            self.destination_cookie_name(),
+            key.expose()
+        ))
+    }
+
+    pub(crate) fn take_destination(
+        &self,
+        headers: &HeaderMap,
+        now: Instant,
+    ) -> Result<String, PairingError> {
+        let mut registry = self.lock(now)?;
+        Ok(self
+            .destination_key(headers)
+            .and_then(|key| registry.destinations.remove(&key))
+            .map_or_else(|| "/".into(), |destination| destination.path))
+    }
+
+    pub(crate) fn clear_destination_cookie(&self) -> String {
+        format!(
+            "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+            self.destination_cookie_name()
+        )
     }
 
     fn lock(&self, now: Instant) -> Result<MutexGuard<'_, Registry>, PairingError> {

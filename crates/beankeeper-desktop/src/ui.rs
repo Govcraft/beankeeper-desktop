@@ -74,7 +74,7 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
         .route("/", get(view))
         .route(
             "/settings",
-            get(|| async {
+            get(|Extension(session): Extension<Session>| async move {
                 let status = tokio::task::spawn_blocking(crate::product::status_text)
                     .await
                     .unwrap_or_else(|_| "Desktop status unavailable.".into());
@@ -82,7 +82,11 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
                     "License and updates",
                     "Offline license and last update check",
                     "/settings",
-                    &format!("<pre>{}</pre>", escape(&status)),
+                    &format!(
+                        "<pre>{}</pre>{}",
+                        escape(&status),
+                        session_controls(&session)
+                    ),
                 )
             }),
         )

@@ -1,0 +1,604 @@
+//! Stable Desktop addresses, validated once at CLI, MCP and saved-URL boundaries.
+
+mod filters;
+mod values;
+
+use filters::*;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum View {
+    Dashboard,
+    Accounts,
+    Transactions,
+    Transaction,
+    Reports,
+    #[serde(rename = "income-statement")]
+    IncomeStatement,
+    #[serde(rename = "balance-sheet")]
+    BalanceSheet,
+    #[serde(rename = "cash-flow")]
+    CashFlow,
+    Trend,
+    #[serde(rename = "budget-variance")]
+    BudgetVariance,
+    #[serde(rename = "schedule-c")]
+    ScheduleC,
+    #[serde(rename = "1099")]
+    #[value(name = "1099")]
+    Vendor1099,
+    Reconciliation,
+    Review,
+    #[value(name = "review_detail")]
+    ReviewDetail,
+    Settings,
+}
+
+/// Each variant can carry only the filters implemented by its destination.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "view_id", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(extend("type" = "object"))]
+pub(crate) enum ViewAddress {
+    Dashboard {
+        #[serde(default)]
+        state: Validated<Dashboard>,
+    },
+    Accounts {
+        #[serde(default)]
+        state: Validated<Company>,
+    },
+    Transactions {
+        #[serde(default)]
+        state: Validated<Transactions>,
+    },
+    Transaction {
+        state: Validated<Transaction>,
+    },
+    Reports {
+        #[serde(default)]
+        state: ReportSelector,
+    },
+    #[serde(rename = "income-statement")]
+    IncomeStatement {
+        #[serde(default)]
+        state: Validated<Period>,
+    },
+    #[serde(rename = "balance-sheet")]
+    BalanceSheet {
+        #[serde(default)]
+        state: Validated<Balance>,
+    },
+    #[serde(rename = "cash-flow")]
+    CashFlow {
+        #[serde(default)]
+        state: Validated<Cash>,
+    },
+    Trend {
+        #[serde(default)]
+        state: Validated<Trend>,
+    },
+    #[serde(rename = "budget-variance")]
+    BudgetVariance {
+        #[serde(default)]
+        state: Validated<Budget>,
+    },
+    #[serde(rename = "schedule-c")]
+    ScheduleC {
+        #[serde(default)]
+        state: Validated<Period>,
+    },
+    #[serde(rename = "1099")]
+    Vendor1099 {
+        #[serde(default)]
+        state: Validated<Vendor>,
+    },
+    Reconciliation {
+        #[serde(default)]
+        state: Validated<Reconciliation>,
+    },
+    Review {
+        #[serde(default)]
+        state: Validated<Company>,
+    },
+    ReviewDetail {
+        state: Validated<ReviewDetail>,
+    },
+    Settings {
+        #[serde(default)]
+        state: Validated<Empty>,
+    },
+}
+
+impl ViewAddress {
+    pub(crate) fn path(&self) -> Result<String, &'static str> {
+        let (route, fields) = match self {
+            Self::Dashboard { state } => ("/".into(), fields(state)?),
+            Self::Accounts { state } => ("/accounts".into(), fields(state)?),
+            Self::Transactions { state } => ("/transactions".into(), fields(state)?),
+            Self::Transaction { state } => (state.route(), fields(state)?),
+            Self::Reports { state } => return state.path(),
+            Self::IncomeStatement { state } => ("/reports/income-statement".into(), fields(state)?),
+            Self::BalanceSheet { state } => ("/reports/balance-sheet".into(), fields(state)?),
+            Self::CashFlow { state } => ("/reports/cash-flow".into(), fields(state)?),
+            Self::Trend { state } => ("/reports/trend".into(), fields(state)?),
+            Self::BudgetVariance { state } => ("/reports/budget-variance".into(), fields(state)?),
+            Self::ScheduleC { state } => ("/reports/schedule-c".into(), fields(state)?),
+            Self::Vendor1099 { state } => ("/reports/1099".into(), fields(state)?),
+            Self::Reconciliation { state } => ("/reconciliation".into(), fields(state)?),
+            Self::Review { state } => ("/review".into(), fields(state)?),
+            Self::ReviewDetail { state } => (state.route(), fields(state)?),
+            Self::Settings { state } => ("/settings".into(), fields(state)?),
+        };
+        encode_path(route, fields)
+    }
+
+    pub(crate) fn result(&self, base: &str) -> Result<serde_json::Value, LinkError> {
+        let path = self.path().map_err(LinkError)?;
+        let mut result =
+            serde_json::to_value(self).map_err(|_| LinkError("Invalid view address."))?;
+        result["url"] = serde_json::json!(format!("{}{path}", base.trim_end_matches('/')));
+        result["path"] = serde_json::json!(path);
+        Ok(result)
+    }
+}
+
+fn fields(value: &impl Serialize) -> Result<serde_json::Value, &'static str> {
+    serde_json::to_value(value).map_err(|_| "Invalid view filters.")
+}
+
+/// Serialization only: all semantic checks have already run during deserialization.
+fn encode_path(mut route: String, fields: serde_json::Value) -> Result<String, &'static str> {
+    const ORDER: &[&str] = &[
+        "company",
+        "account",
+        "category",
+        "payee",
+        "compare_from",
+        "compare_to",
+        "from",
+        "to",
+        "min_amount",
+        "max_amount",
+        "search",
+        "status",
+        "currency",
+        "period",
+        "metric",
+        "year",
+        "threshold",
+        "cash_account",
+        "mode",
+        "statement",
+        "statement_balance",
+        "link_key",
+        "offset",
+    ];
+    for key in ORDER {
+        let value = &fields[*key];
+        if value.is_null() {
+            continue;
+        }
+        let value = value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        route.push(if route.contains('?') { '&' } else { '?' });
+        route.push_str(key);
+        route.push('=');
+        route.push_str(&crate::views::encode(&value));
+    }
+    if route.len() > 4096 {
+        return Err("View address exceeds 4096 bytes.");
+    }
+    Ok(route)
+}
+
+/// Decode a local view address, rejecting redirects, unknown and duplicate fields.
+pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
+    if path.len() > 4096
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '#' | '\\'))
+    {
+        return Err("Expected a local Desktop view address.");
+    }
+    let url = reqwest::Url::parse(&format!("http://localhost{path}"))
+        .map_err(|_| "Invalid view address.")?;
+    // Do not let URL normalization turn an untrusted path into an allowed route.
+    let raw_path = path.split('?').next().ok_or("Invalid view path.")?;
+    if url.path() != raw_path {
+        return Err("Invalid view path.");
+    }
+    let mut fields = serde_json::Map::new();
+    let view_id = match raw_path {
+        "/" => View::Dashboard,
+        "/accounts" => View::Accounts,
+        "/transactions" => View::Transactions,
+        "/reports" => View::Reports,
+        "/reconciliation" => View::Reconciliation,
+        "/review" => View::Review,
+        "/settings" => View::Settings,
+        _ => {
+            if let Some(id) = raw_path.strip_prefix("/transactions/") {
+                fields.insert(
+                    "transaction_id".into(),
+                    serde_json::json!(id.parse::<i64>().map_err(|_| "Invalid transaction ID.")?),
+                );
+                View::Transaction
+            } else if let Some(id) = raw_path.strip_prefix("/review/") {
+                fields.insert("proposal_id".into(), serde_json::json!(id));
+                View::ReviewDetail
+            } else if let Some(id) = raw_path.strip_prefix("/reports/") {
+                if !crate::reports::VIEW_IDS.contains(&id) {
+                    return Err("Unknown report view.");
+                }
+                serde_json::from_value(serde_json::json!(id)).map_err(|_| "Unknown report view.")?
+            } else {
+                return Err("Unknown Desktop view.");
+            }
+        }
+    };
+    for (key, value) in url.query_pairs() {
+        if fields.contains_key(key.as_ref())
+            || ["transaction_id", "proposal_id", "report_kind"].contains(&key.as_ref())
+        {
+            return Err("Duplicate or unsupported address field.");
+        }
+        let value = if key == "offset" {
+            serde_json::json!(value.parse::<usize>().map_err(|_| "Invalid offset.")?)
+        } else {
+            serde_json::json!(value)
+        };
+        fields.insert(key.into_owned(), value);
+    }
+    let address: ViewAddress =
+        serde_json::from_value(serde_json::json!({"view_id":view_id,"state":fields}))
+            .map_err(|_| "Unknown or invalid view filters.")?;
+    address.path()?;
+    Ok(address)
+}
+
+/// Invalid view selectors or filters. No ledger or browser state was changed.
+#[derive(Debug)]
+pub struct LinkError(pub(crate) &'static str);
+
+impl std::fmt::Display for LinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for LinkError {}
+
+// Untrusted CLI spelling, consumed once by ViewAddress deserialization.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, clap::Args)]
+
+pub(crate) struct RawLinkFlags {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    company: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    /// Exact upstream entry tax-category tag. Spending account categories use account.
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    /// Exact metadata.payee string, preserving case and punctuation.
+    payee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    /// Inclusive comparison start, paired with compare_to.
+    compare_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    /// Inclusive comparison end; as-of balance sheets use this alone.
+    compare_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    min_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    max_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    transaction_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    report_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    metric: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    year: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    threshold: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    cash_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    statement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    statement_balance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    link_key: Option<String>,
+}
+
+/// Options for generating a link without starting or opening Desktop.
+#[derive(clap::Args, Debug)]
+pub struct LinkOptions {
+    /// Stable view ID, as used by ui_get_link and ui_show_view.
+    #[arg(long, value_enum)]
+    view_id: View,
+    #[command(flatten)]
+    state: RawLinkFlags,
+    /// Address of Desktop; link generation does not probe the listener.
+    #[arg(long, default_value = "127.0.0.1:8750", value_parser = crate::cli::loopback_address)]
+    bind: std::net::SocketAddr,
+}
+
+/// Print a credential-free Desktop link using the same contract as MCP.
+///
+/// # Errors
+/// Returns VALIDATION for malformed selectors, values or unsupported filters.
+pub fn run(mut options: LinkOptions, company: Option<String>, json: bool) -> Result<(), LinkError> {
+    if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
+        options.state.company = company;
+    }
+    let result = (|| {
+        let address: ViewAddress = serde_json::from_value(serde_json::json!({
+            "view_id":options.view_id,"state":options.state
+        }))
+        .map_err(|_| LinkError("Invalid view or filters. Check the tool schema."))?;
+        address.result(&crate::server::local_url(options.bind))
+    })();
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"code":"VALIDATION","message":error.to_string()})
+                );
+            }
+            return Err(error);
+        }
+    };
+    if json {
+        println!("{result}");
+    } else if let Some(url) = result["url"].as_str() {
+        println!("{url}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn every_view_round_trips_with_all_applicable_filters() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for (view, state) in [
+            ("dashboard", json!({"company":"a & b", "currency":"USD"})),
+            ("accounts", json!({"company":"acme"})),
+            (
+                "transactions",
+                json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30","search":"<coffee>","status":"cleared","min_amount":"1","max_amount":"100000","offset":50,"currency":"USD"}),
+            ),
+            (
+                "transaction",
+                json!({"company":"acme","transaction_id":42,"offset":50}),
+            ),
+            ("reports", json!({"company":"acme","currency":"USD"})),
+            (
+                "income-statement",
+                json!({"company":"acme","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30"}),
+            ),
+            (
+                "balance-sheet",
+                json!({"to":"2026-10-31","compare_to":"2026-09-30"}),
+            ),
+            (
+                "cash-flow",
+                json!({"cash_account":"1000","from":"2026-10-01","to":"2026-10-31"}),
+            ),
+            (
+                "trend",
+                json!({"metric":"spending","period":"quarter","from":"2026-01-01","to":"2026-10-31"}),
+            ),
+            ("budget-variance", json!({"year":"2026"})),
+            ("schedule-c", json!({"from":"2026-01-01","to":"2026-10-31"})),
+            (
+                "1099",
+                json!({"threshold":"0","from":"2026-01-01","to":"2026-10-31"}),
+            ),
+            (
+                "reconciliation",
+                json!({"account":"1000","to":"2026-10-31","mode":"bank","statement":"S & 1","statement_balance":"1234.56","link_key":"applies_to"}),
+            ),
+            ("review", json!({"company":"acme"})),
+            (
+                "review_detail",
+                json!({"company":"acme","proposal_id":"proposal_01h455vb4pex5vsknk084sn02q"}),
+            ),
+            ("settings", json!({})),
+        ] {
+            let address: ViewAddress =
+                serde_json::from_value(json!({"view_id":view,"state":state}))?;
+            let path = address.path()?;
+            let decoded = parse_path(&path)?;
+            assert_eq!(
+                serde_json::to_value(&decoded)?,
+                serde_json::to_value(&address)?
+            );
+        }
+        let alias: ViewAddress = serde_json::from_value(
+            json!({"view_id":"reports","state":{"report_kind":"trend","period":"month"}}),
+        )?;
+        assert_eq!(
+            parse_path(&alias.path()?)?.path()?,
+            "/reports/trend?period=month"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_or_mismatched_filters_fail_before_an_address_exists() {
+        for input in [
+            json!({"view_id":"accounts","state":{"from":"2026-01-01"}}),
+            json!({"view_id":"settings","state":{"company":null}}),
+            json!({"view_id":"transaction","state":{}}),
+            json!({"view_id":"transactions","state":{"transaction_id":42}}),
+            json!({"view_id":"review_detail","state":{"proposal_id":"agent_01h455vb4pex5vsknk084sn02q"}}),
+            json!({"view_id":"transactions","state":{"from":"2026-10-31","to":"2026-10-01"}}),
+            json!({"view_id":"transactions","state":{"min_amount":"20","max_amount":"10"}}),
+            json!({"view_id":"transactions","state":{"min_amount":"1.00"}}),
+            json!({"view_id":"transactions","state":{"offset":9223372036854775807_i64}}),
+            json!({"view_id":"balance-sheet","state":{"compare_from":"2026-01-01","compare_to":"2026-01-31"}}),
+            json!({"view_id":"reports","state":{"report_kind":"trend","threshold":"600"}}),
+            json!({"view_id":"reports","state":{"report_kind":"balance-sheet","from":"2026-01-01"}}),
+            json!({"view_id":"reports","state":{"period":"month"}}),
+            json!({"view_id":"reports","state":{"report_kind":"not-a-report"}}),
+            json!({"view_id":"trend","state":{"metric":"not-a-metric"}}),
+            json!({"view_id":"1099","state":{"threshold":"-1"}}),
+            json!({"view_id":"1099","state":{"threshold":"1.001","currency":"USD"}}),
+            json!({"view_id":"reconciliation","state":{"statement_balance":"NaN"}}),
+            json!({"view_id":"reconciliation","state":{"statement_balance":"1.01","currency":"JPY"}}),
+            json!({"view_id":"budget-variance","state":{"year":"2025","from":"2026-01-01","to":"2026-01-31"}}),
+            json!({"view_id":"budget-variance","state":{"compare_from":"2026-01-02","compare_to":"2026-01-31"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<ViewAddress>(input.clone()).is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_exposes_each_views_supported_filters_and_required_ids()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = schemars::schema_for!(ViewAddress).to_value();
+        assert_eq!(schema["type"], "object");
+        let variants = schema["oneOf"].as_array().ok_or("view alternatives")?;
+        assert_eq!(variants.len(), 16);
+        for (view, expected, required) in [
+            ("settings", vec![], None),
+            ("accounts", vec!["company"], None),
+            (
+                "transaction",
+                vec!["company", "transaction_id", "offset"],
+                Some("transaction_id"),
+            ),
+            (
+                "balance-sheet",
+                vec!["company", "currency", "to", "compare_to"],
+                None,
+            ),
+            (
+                "review_detail",
+                vec!["company", "proposal_id"],
+                Some("proposal_id"),
+            ),
+        ] {
+            let variant = variants
+                .iter()
+                .find(|variant| variant["properties"]["view_id"]["const"] == view)
+                .ok_or("missing view alternative")?;
+            let mut state = &variant["properties"]["state"];
+            while let Some(reference) = state["$ref"].as_str() {
+                state = schema
+                    .pointer(reference.strip_prefix('#').ok_or("local reference")?)
+                    .ok_or("filter definition")?;
+            }
+            let empty = serde_json::Map::new();
+            let properties = state["properties"].as_object().unwrap_or(&empty);
+            assert_eq!(properties.len(), expected.len(), "{view}");
+            for field in expected {
+                assert!(properties.contains_key(field), "{view}: {field}");
+            }
+            assert_eq!(state["additionalProperties"], false, "{view}");
+            if let Some(required) = required {
+                assert!(
+                    state["required"]
+                        .as_array()
+                        .ok_or("required fields")?
+                        .contains(&json!(required))
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_paths_and_unsupported_filters_cannot_become_destinations() {
+        for path in [
+            "https://evil.example/",
+            "//evil.example/",
+            "/\\evil.example/",
+            "/transactions/../settings",
+            "/%2f%2fevil.example",
+            "/transactions#x",
+            "/transactions\r\nLocation: https://evil.example",
+            "/pair?token=secret",
+            "/api/session/logout",
+            "/reports/no-such-report",
+            "/transactions/0",
+            "/review/not-a-proposal",
+            "/accounts?account=1000",
+            "/settings?company=acme",
+            "/transactions?company=a&company=b",
+            "/transactions?company=a&%63ompany=b",
+            "/transactions?unknown=x",
+            "/transactions?from=2026-02-30",
+            "/transactions?offset=-1",
+            "/transactions?compare_from=2026-10-01",
+            "/transactions?compare_to=2026-10-31",
+            "/reports/balance-sheet?compare_to=",
+            "/transactions?compare_from=2026-10-31&compare_to=2026-10-01",
+            "/reports/balance-sheet?compare_from=2026-09-01&compare_to=2026-09-30",
+            "/reports/income-statement?category=food",
+            "/reports?from=2026-01-01",
+        ] {
+            assert!(parse_path(path).is_err(), "{path}");
+        }
+    }
+}

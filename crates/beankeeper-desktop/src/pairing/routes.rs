@@ -133,10 +133,16 @@ async fn pair_browser(
         return Err(PairingError::Unauthorized);
     }
     let cookie = state.redeem(&form.token, authority, Instant::now())?;
-    let mut response = Redirect::to("/").into_response();
+    let destination = state.take_destination(&headers, Instant::now())?;
+    let mut response = Redirect::to(&destination).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(|_| PairingError::Unavailable)?,
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&state.clear_destination_cookie())
+            .map_err(|_| PairingError::Unavailable)?,
     );
     Ok(response)
 }
@@ -147,6 +153,16 @@ pub(crate) async fn human_guard(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let destination = if matches!(*request.method(), Method::GET | Method::HEAD)
+        && !request.headers().contains_key(header::AUTHORIZATION)
+    {
+        crate::links::parse_path(&request.uri().to_string())
+            .and_then(|address| address.path())
+            .ok()
+    } else {
+        None
+    };
+    let request_headers = request.headers().clone();
     let result = async {
         let now = Instant::now();
         let session = state.session(request.headers(), now)?;
@@ -185,10 +201,30 @@ pub(crate) async fn human_guard(
     .await;
     match result {
         Ok(request) => next.run(request).await,
-        Err(PairingError::Unauthorized) => (
-            StatusCode::UNAUTHORIZED,
-            crate::ui::message("Pair this browser", "<p>Open the one-time pairing URL printed in the terminal by <code>bk serve</code>. If it has expired or was already used, create a new link in a paired browser or restart the server.</p><p>After pairing, reopen your agent's connection link to connect it to this browser.</p>"),
-        ).into_response(),
+        Err(PairingError::Unauthorized) => {
+            let content = destination.as_ref().map_or_else(
+                || "<p>Open the one-time pairing URL printed by <code>bk serve</code>. Use a fresh link if it has expired or was already used.</p>".into(),
+                |path| format!("<p>Open the one-time pairing URL printed in the terminal by <code>bk serve</code>, then select <strong>Pair this browser</strong>. Your requested view will open automatically. Pairing links expire after five minutes; use a fresh link if needed.</p><p>If already paired, <a href=\"{}\">continue to your requested view</a>.</p>", crate::ui::escape(path)),
+            );
+            let mut response = (
+                StatusCode::UNAUTHORIZED,
+                crate::ui::message("Pair this browser", &content),
+            )
+                .into_response();
+            if let Some(path) = destination {
+                match state.remember_destination(&request_headers, path, Instant::now()) {
+                    Ok(cookie) if !cookie.is_empty() => {
+                        let Ok(cookie) = HeaderValue::from_str(&cookie) else {
+                            return PairingError::Unavailable.into_response();
+                        };
+                        response.headers_mut().append(header::SET_COOKIE, cookie);
+                    }
+                    Ok(_) => {}
+                    Err(error) => return error.into_response(),
+                }
+            }
+            response
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -338,6 +374,113 @@ mod tests {
         assert!(body.contains("Pairing link expired or already used"));
         assert!(!body.contains(token));
         assert!(state.lock(Instant::now())?.sessions.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_destination_registry_still_serves_pairing_and_remembers_the_new_view()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let bound = listener.local_addr()?;
+        let (state, _) = PairingState::new(bound)?;
+        let now = Instant::now();
+        let mut oldest_cookie = None;
+        for index in 0..super::super::MAX_ENTRIES {
+            let cookie = state.remember_destination(
+                &HeaderMap::new(),
+                "/settings".into(),
+                now - std::time::Duration::from_secs((super::super::MAX_ENTRIES - index) as u64),
+            )?;
+            if oldest_cookie.is_none() {
+                oldest_cookie = Some(cookie);
+            }
+        }
+        let app = Router::new()
+            .route("/accounts", get(|| async { "protected view" }))
+            .route_layer(middleware::from_fn_with_state(state.clone(), human_guard));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let response = reqwest::Client::new()
+            .get(format!("http://{bound}/accounts?company=acme"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .ok_or("destination cookie")?
+            .to_str()?
+            .to_owned();
+        let body = response.text().await?;
+        assert!(body.contains("Pair this browser"));
+        assert!(body.contains("Your requested view will open automatically"));
+        assert!(!body.contains("Too many pairing links"));
+        assert!(!body.contains("protected view"));
+        {
+            let registry = state.lock(Instant::now())?;
+            assert_eq!(registry.destinations.len(), super::super::MAX_ENTRIES);
+            assert!(registry.sessions.is_empty());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            oldest_cookie
+                .ok_or("oldest cookie")?
+                .split(';')
+                .next()
+                .ok_or("cookie")?
+                .parse()?,
+        );
+        assert_eq!(state.take_destination(&headers, Instant::now())?, "/");
+        headers.insert(
+            header::COOKIE,
+            cookie.split(';').next().ok_or("cookie")?.parse()?,
+        );
+        assert_eq!(
+            state.take_destination(&headers, Instant::now())?,
+            "/accounts?company=acme"
+        );
+        server.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn destinations_expire_are_consumed_and_never_authorize_a_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _) = PairingState::new("127.0.0.1:8750".parse()?)?;
+        let now = Instant::now();
+        let cookie =
+            state.remember_destination(&HeaderMap::new(), "/accounts?company=acme".into(), now)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:8750".parse()?);
+        headers.insert(
+            header::COOKIE,
+            cookie.split(';').next().ok_or("cookie")?.parse()?,
+        );
+        assert!(matches!(
+            state.session(&headers, now),
+            Err(PairingError::Unauthorized)
+        ));
+        assert_eq!(
+            state.take_destination(&headers, now)?,
+            "/accounts?company=acme"
+        );
+        assert_eq!(state.take_destination(&headers, now)?, "/");
+        let cookie = state.remember_destination(&HeaderMap::new(), "/settings".into(), now)?;
+        headers.insert(
+            header::COOKIE,
+            cookie.split(';').next().ok_or("cookie")?.parse()?,
+        );
+        assert_eq!(
+            state.take_destination(&headers, now + super::super::LINK_LIFETIME)?,
+            "/"
+        );
+        headers.insert(header::COOKIE, "bk_desktop_8750_return=forged".parse()?);
+        assert_eq!(state.take_destination(&headers, now)?, "/");
         Ok(())
     }
 }

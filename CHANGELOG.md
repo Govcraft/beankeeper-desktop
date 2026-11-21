@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.10] - 2026-11-21
+
+### Added
+
+- Optional credential-free view links through the read-only `ui_get_link` MCP
+  tool and `bk ui link`, using the same validation as agent navigation.
+- Settings in the stable view catalog, exact register tax-category/payee filters,
+  and explicit comparison periods in register and period-report links.
+- Restore an unpaired browser's requested view after human pairing confirmation,
+  with bounded destination storage and a same-origin continuation for paired
+  browsers arriving from external links.
+
 ## [0.1.0-rc.9] - 2026-11-21
 
 ### Fixed

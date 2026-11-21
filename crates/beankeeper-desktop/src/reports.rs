@@ -110,21 +110,45 @@ fn option<T: ValueEnum>(value: &Option<String>, default: &str) -> Result<T, View
 }
 
 impl ReportQuery {
-    /// Validate navigation without reading ledger data, including initial filter pages.
-    pub(crate) fn validate_navigation(&self, path: &str) -> Result<(), ViewError> {
+    fn comparison(&self) -> Option<Self> {
+        Some(Self {
+            filters: self.filters.comparison()?,
+            year: None,
+            ..self.clone()
+        })
+    }
+
+    fn validate_address(&self, path: &str) -> Result<(), ViewError> {
         self.filters.validate()?;
-        if path == "/reports" {
-            return Ok(());
+        if self.filters.category.is_some() || self.filters.payee.is_some() {
+            return Err(ViewError::Invalid(
+                "Category and payee filters require the transactions view.",
+            ));
         }
-        let kind = Kind::parse(path)?;
-        if (kind == Kind::Reconciliation && nonempty(&self.filters.account).is_none())
-            || (kind == Kind::Budget
-                && nonempty(&self.year).is_none()
-                && nonempty(&self.filters.from).is_none())
+        if self.filters.comparison().is_some()
+            && matches!(
+                path,
+                "/reports" | "/reconciliation" | "/reports/reconciliation"
+            )
         {
-            return Ok(());
+            return Err(ViewError::Invalid(
+                "Comparison date ranges require a period report or transactions.",
+            ));
         }
-        self.command(kind).map(|_| ())
+        if self.filters.compare_to.is_some() {
+            if path == "/reports/balance-sheet" {
+                if self.filters.compare_from.is_some() {
+                    return Err(ViewError::Invalid(
+                        "Balance-sheet comparison uses compare_to only.",
+                    ));
+                }
+            } else if nonempty(&self.filters.compare_from).is_none() {
+                return Err(ViewError::Invalid(
+                    "Period comparison requires compare_from and compare_to.",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn command(&self, kind: Kind) -> Result<ReportCommand, ViewError> {
@@ -238,9 +262,11 @@ impl ReportQuery {
         }
     }
 
-    fn fields(&self) -> [(&'static str, &Option<String>); 13] {
+    fn fields(&self) -> [(&'static str, &Option<String>); 15] {
         [
             ("account", &self.filters.account),
+            ("compare_from", &self.filters.compare_from),
+            ("compare_to", &self.filters.compare_to),
             ("from", &self.filters.from),
             ("to", &self.filters.to),
             ("currency", &self.filters.currency),
@@ -273,7 +299,7 @@ pub(crate) fn render(
     path: &str,
     query: &ReportQuery,
 ) -> Result<ReportResponse, ViewError> {
-    query.filters.validate()?;
+    query.validate_address(path)?;
     let kind = if path == "/reports" {
         None
     } else {
@@ -357,11 +383,25 @@ pub(crate) fn render(
     let cli = Cli::try_parse_from(["bk", "--quiet", "report", "income-statement"])
         .map_err(|_| ViewError::Invalid("The report context could not be initialized."))?;
     let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
+    let comparison = query
+        .comparison()
+        .map(|query| {
+            let command = query.command(kind)?;
+            let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
+            Ok::<_, ViewError>((query, data))
+        })
+        .transpose()?;
+
     if format != "html" {
+        if format == "csv" && comparison.is_some() {
+            return Err(ViewError::Invalid(
+                "CSV covers one period. Remove comparison bounds or download JSON for both periods.",
+            ));
+        }
         let (body, content_type) = if format == "csv" {
             (tax_csv(kind, &data), "text/csv; charset=utf-8")
         } else {
-            (data.to_string(), "application/json")
+            (comparison.as_ref().map_or_else(|| data.to_string(), |(q, comparison)| serde_json::json!({"current":data, "comparison":comparison, "compare_from":q.filters.from, "compare_to":q.filters.to}).to_string()), "application/json")
         };
         let id = if kind == Kind::Reconciliation {
             "reconciliation"
@@ -393,7 +433,7 @@ pub(crate) fn render(
         "<p><a download href=\"{}\">Download JSON</a>",
         query.url(path, company, "json")
     );
-    if kind.tax() {
+    if kind.tax() && comparison.is_none() {
         let _ = write!(
             html,
             " · <a download href=\"{}\">Download CSV</a>",
@@ -405,6 +445,26 @@ pub(crate) fn render(
     );
     value_html(&data, Some(currency.code()), &mut html);
     html.push_str("</section>");
+    if let Some((q, data)) = comparison {
+        let _ = write!(
+            html,
+            "<section id=\"comparison-results\" class=\"report-results\"><h2>{}</h2>",
+            if kind == Kind::Balance {
+                format!(
+                    "Comparison as of {}",
+                    escape(q.filters.to.as_deref().unwrap_or_default())
+                )
+            } else {
+                format!(
+                    "Comparison period: {} through {}",
+                    escape(q.filters.from.as_deref().unwrap_or_default()),
+                    escape(q.filters.to.as_deref().unwrap_or_default())
+                )
+            }
+        );
+        value_html(&data, Some(currency.code()), &mut html);
+        html.push_str("</section>");
+    }
     Ok(page(html))
 }
 
@@ -507,6 +567,18 @@ fn form(
         );
     }
     html.push_str("</select></label>");
+    for (name, value) in [
+        ("compare_from", &q.filters.compare_from),
+        ("compare_to", &q.filters.compare_to),
+    ] {
+        if let Some(value) = value {
+            let _ = write!(
+                html,
+                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                escape(value)
+            );
+        }
+    }
     if let Some(kind) = kind {
         if !matches!(kind, Kind::Balance | Kind::Reconciliation) {
             html.push_str(&input(

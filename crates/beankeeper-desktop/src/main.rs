@@ -8,13 +8,25 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
-    product, server, setup, updates,
+    links, product, server, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
 fn main() -> ExitCode {
     let matches = cli::command().get_matches();
     let result = match matches.subcommand() {
+        Some(("ui", ui)) => {
+            let options = links::LinkOptions::from_arg_matches(
+                ui.subcommand_matches("link")
+                    .unwrap_or_else(|| unreachable!()),
+            )
+            .unwrap_or_else(|error| error.exit());
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
+                .unwrap_or_else(|error| error.exit());
+            let json = ledger.is_json();
+            links::run(options, ledger.company, json).map_err(DesktopError::Link)
+        }
         Some(("license", options)) => {
             let options =
                 product::LicenseOptions::from_arg_matches(options).unwrap_or_else(|e| e.exit());
