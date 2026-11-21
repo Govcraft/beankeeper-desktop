@@ -5,14 +5,20 @@ use std::{error::Error, fmt, fmt::Write};
 use axum::http::StatusCode;
 use beankeeper::types::ClearanceStatus;
 use beankeeper_cli::{
-    commands::report_currency::resolve_report_currency,
+    cli::Cli,
+    commands::{
+        report_currency::resolve_report_currency,
+        summary::{SummaryArgs, execute_json as execute_summary},
+    },
     db::{self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow},
     error::CliError,
 };
+use clap::Parser;
+use serde::Deserialize;
 
 use crate::{
     links::values::{Currency, SCAN_LIMIT},
-    links::{ACCOUNTS, HOME, LedgerRoute, TRANSACTIONS},
+    links::{ACCOUNTS, HOME, LedgerRoute, REPORTS, REVIEW, ReportKind, TRANSACTIONS},
     markup::{Attribute, Markup, markup, write_markup},
     money,
 };
@@ -232,11 +238,7 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         ));
     }
     let (title, description, nav) = match route {
-        LedgerRoute::Home => (
-            "Dashboard",
-            "Your balances, recent activity and next steps.",
-            HOME,
-        ),
+        LedgerRoute::Home => ("Your books", "A snapshot of your recorded finances.", HOME),
         LedgerRoute::Accounts => (
             "Accounts",
             "Browse companies and their complete chart of accounts.",
@@ -259,13 +261,24 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         .as_deref()
         .or_else(|| companies.first().map(|company| company.slug.as_str()));
     let Some(company) = selected else {
+        let note = markup!(
+            "<p class=\"empty\">No companies yet. Ask your agent to initialize your books and create a company.</p>"
+        );
+        let content = if matches!(route, LedgerRoute::Home) {
+            let mut home = markup!(
+                "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>{}</section>",
+                note
+            );
+            snapshot_links(&mut home, None, None);
+            home
+        } else {
+            note
+        };
         return Ok(ViewPage {
             title,
             description,
             nav,
-            content: markup!(
-                "<p class=\"empty\">No companies yet. Ask your agent to initialize your books and create a company.</p>"
-            ),
+            content,
         });
     };
     if !companies.iter().any(|item| item.slug == company) {
@@ -274,9 +287,13 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
     if let Some(account) = query.account.as_deref() {
         db::get_account(db.conn(), company, account)?;
     }
-    let mut content = company_form(&companies, company, query, path);
+    let mut content = if matches!(route, LedgerRoute::Home) {
+        Markup::default()
+    } else {
+        company_form(&companies, company, query, path)
+    };
     match route {
-        LedgerRoute::Home => dashboard(db, company, query, &mut content)?,
+        LedgerRoute::Home => financial_snapshot(db, company, query, &mut content)?,
         LedgerRoute::Accounts => accounts(db, company, query, &mut content)?,
         LedgerRoute::Register => {
             register(db, company, query, RegisterSection::Primary, &mut content)?;
@@ -318,69 +335,83 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
     })
 }
 
-fn dashboard(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
-    write_markup!(html, "<section><h2>Account balances</h2>");
+#[derive(Deserialize)]
+struct SummaryResponse {
+    data: SummaryHighlights,
+}
+
+#[derive(Deserialize)]
+struct SummaryHighlights {
+    highlights: Vec<String>,
+}
+
+fn financial_snapshot(
+    db: &Db,
+    company: &str,
+    query: &Filters,
+    html: &mut Markup,
+) -> Result<(), ViewError> {
+    write_markup!(
+        html,
+        "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>"
+    );
     let currency = query.currency.as_ref().map_or_else(
         || resolve_report_currency(db.conn(), company, None),
         |currency| Ok(currency.ledger()),
     );
     match currency {
         Ok(currency) => {
-            let code = currency.code();
-            write_markup!(
-                html,
-                "<p>Currency: {}. Amounts are shown in the selected currency. Net is debits minus credits; negative balances are credit balances.</p><div class=\"table-scroll\"><table><caption>Balances for {}</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Debit</th><th scope=\"col\">Credit</th><th scope=\"col\">Net balance</th></tr></thead><tbody>",
-                code,
-                company
-            );
-            let balances =
-                db::compute_trial_balance(db.conn(), company, None, None, None, Some(code))?;
-            if balances.is_empty() {
-                write_markup!(
-                    html,
-                    "<tr><td colspan=\"4\">No accounts yet. Ask your agent to set up your chart of accounts.</td></tr>"
-                );
+            let cli = Cli::try_parse_from(["bk", "summary"])
+                .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
+            let args = SummaryArgs {
+                currency: Some(currency.code().to_owned()),
+                ..SummaryArgs::default()
+            };
+            let result = execute_summary(&cli, db, company, &args)?;
+            let summary: SummaryResponse = serde_json::from_value(result)
+                .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
+            write_markup!(html, "<ul>");
+            for highlight in summary.data.highlights.iter().take(5) {
+                write_markup!(html, "<li>{}</li>", highlight);
             }
-            for row in balances {
-                let account_query = Filters::for_account(row.code.clone(), currency.into());
-                write_markup!(
-                    html,
-                    "<tr><th scope=\"row\"><a href=\"{}\">{} · {}</a></th><td class=\"amount\">{}</td><td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>",
-                    account_query.url("/transactions", company, 0),
-                    &row.code,
-                    &row.name,
-                    money::minor(row.debit_total, code),
-                    money::minor(row.credit_total, code),
-                    money::minor(
-                        i128::from(row.debit_total) - i128::from(row.credit_total),
-                        code
-                    )
-                );
-            }
-            write_markup!(html, "</tbody></table></div>");
+            write_markup!(html, "</ul>");
         }
         Err(CliError::Validation(_)) if query.currency.is_none() => write_markup!(
             html,
-            "<p class=\"empty\">These books use multiple currencies. Enter a currency code above to view balances without mixing currencies.</p>"
+            "<p>These books use more than one currency. Ask your agent for a summary in the currency you want to see.</p>"
         ),
         Err(error) => return Err(error.into()),
     }
-    write_markup!(html, "</section><section><h2>Recent activity</h2>");
-    let mut params = ListTransactionParams::for_company(company);
-    let total = db::count_transactions(db.conn(), &params)?;
-    params.limit = 5;
-    params.offset = total.saturating_sub(5).max(0);
-    let mut recent = db::list_transactions(db.conn(), &params)?;
-    recent.reverse();
-    transaction_table(db, &recent, company, RegisterSection::Primary, html)?;
+    write_markup!(html, "</section>");
+    snapshot_links(html, Some(company), query.currency.as_ref());
+    Ok(())
+}
+
+fn snapshot_links(html: &mut Markup, company: Option<&str>, currency: Option<&Currency>) {
     write_markup!(
         html,
-        "<p>{} transactions in these books. <a href=\"{}\">Browse the register</a></p></section><section><h2>Next actions</h2><p><a href=\"/accounts?company={}\">Browse accounts</a> or ask your connected agent to prepare your next bookkeeping task.</p></section>",
-        total,
-        query.url("/transactions", company, 0),
-        encode(company)
+        "<p>You can ask your agent any question about these books.</p><section aria-labelledby=\"detail-title\"><h2 id=\"detail-title\">View details</h2><ul>"
     );
-    Ok(())
+    for (label, path, select_currency) in [
+        ("Accounts", ACCOUNTS, false),
+        ("Transactions", TRANSACTIONS, true),
+        ("Reports", REPORTS, true),
+        ("Reconciliation", ReportKind::Reconciliation.path(), true),
+        ("Proposal review", REVIEW, false),
+    ] {
+        let mut href = path.to_owned();
+        if let Some(company) = company {
+            href.push_str("?company=");
+            href.push_str(&encode(company));
+            append_url_param(
+                &mut href,
+                "currency",
+                currency.filter(|_| select_currency).map(Currency::code),
+            );
+        }
+        write_markup!(html, "<li><a href=\"{}\">{}</a></li>", href, label);
+    }
+    write_markup!(html, "</ul></section>");
 }
 
 fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
@@ -935,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_accounts_and_detail_use_upstream_data_and_escape_content() -> TestResult {
+    fn snapshot_accounts_and_detail_use_upstream_data_and_escape_content() -> TestResult {
         let db = fixture()?;
         let id = post(
             &db,
@@ -949,23 +980,12 @@ mod tests {
             company: Some("acme".into()),
             ..Default::default()
         };
-        let dashboard = render_query(&db, "/", &query)?;
-        assert!(dashboard.content.as_str().contains("$123.45"));
-        assert!(dashboard.content.as_str().contains("Net balance"));
-        assert!(
-            dashboard
-                .content
-                .as_str()
-                .contains("class=\"amount\">-$123.45</td>")
-        );
-        assert!(dashboard.content.as_str().contains("Recent activity"));
-        assert!(
-            dashboard
-                .content
-                .as_str()
-                .contains(&format!("/transactions/{id}?company=acme"))
-        );
-        assert!(!dashboard.content.as_str().contains("<script>"));
+        let snapshot = render_query(&db, "/", &query)?;
+        let home = snapshot.content.as_str();
+        assert!(home.contains("Cash on hand in the selected accounts is USD 123.45"));
+        assert!(home.contains("Net worth is USD 123.45"));
+        assert!(home.contains("href=\"/transactions?company=acme\""));
+        assert!(!home.contains("Recent activity"));
         let accounts = render_query(&db, "/accounts", &query)?;
         assert!(accounts.content.as_str().contains("2 accounts"));
         assert!(accounts.content.as_str().contains("Cash &lt;bank&gt;"));
@@ -1091,32 +1111,6 @@ mod tests {
                     .content
                     .as_str()
                     .contains(&format!("class=\"amount\">{formatted}</td>"))
-            );
-            let dashboard = render_query(
-                &db,
-                "/",
-                &ViewQuery {
-                    currency: Some(code.into()),
-                    ..query
-                },
-            )?;
-            assert!(
-                dashboard
-                    .content
-                    .as_str()
-                    .contains(&format!("class=\"amount\">{formatted}</td>"))
-            );
-            assert!(
-                dashboard
-                    .content
-                    .as_str()
-                    .contains(&format!("class=\"amount\">-{formatted}</td>"))
-            );
-            assert!(
-                !dashboard
-                    .content
-                    .as_str()
-                    .contains("Totals and net balances in minor units")
             );
         }
         Ok(())
@@ -1250,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_currency_dashboard_requires_currency_before_aggregating() -> TestResult {
+    fn mixed_currency_snapshot_requires_currency_before_aggregating() -> TestResult {
         let db = fixture()?;
         post(&db, "USD sale", "usd", 100, "USD", &Actor::new("owner"))?;
         post(&db, "MXN sale", "mxn", 200, "MXN", &Actor::new("owner"))?;
@@ -1262,7 +1256,7 @@ mod tests {
             render_query(&db, "/", &query)?
                 .content
                 .as_str()
-                .contains("without mixing currencies")
+                .contains("These books use more than one currency.")
         );
         let selected = render_query(
             &db,
@@ -1272,19 +1266,8 @@ mod tests {
                 ..query
             },
         )?;
-        assert!(selected.content.as_str().contains("Currency: USD"));
-        assert!(
-            selected
-                .content
-                .as_str()
-                .contains("class=\"amount\">$1.00</td>")
-        );
-        assert!(
-            !selected
-                .content
-                .as_str()
-                .contains("class=\"amount\">$3.00</td>")
-        );
+        assert!(selected.content.as_str().contains("Net worth is USD 1.00"));
+        assert!(!selected.content.as_str().contains("Net worth is USD 3.00"));
         Ok(())
     }
 

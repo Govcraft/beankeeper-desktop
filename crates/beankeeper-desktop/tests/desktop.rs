@@ -159,7 +159,7 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
     // Startup consumes the passphrase once. Requests no longer need the file.
     std::fs::remove_file(&ledger.secret)?;
     for (path, heading) in [
-        ("/", "Dashboard"),
+        ("/", "Your books"),
         ("/accounts", "Accounts"),
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),
@@ -1143,7 +1143,9 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
         .get(format!("{}/", server.base))
         .send()?
         .text()?;
-    assert!(default.contains("value=\"other\" selected"));
+    assert!(default.contains("Financial snapshot"));
+    assert!(default.contains("href=\"/accounts?company=other\""));
+    assert!(!default.contains("<select"));
     assert!(!default.contains("Coffee &lt;shop&gt;"));
     let url = format!(
         "{}/transactions?company=acme&account=1000&from=2026-11-20&to=2026-11-20&min_amount=2500&max_amount=2500&status=uncleared&search=inv%261",
@@ -1172,12 +1174,16 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
     assert!(detail.contains("class=\"amount\">$25.00</td>"));
     assert!(!detail.contains(token(&ledger.writer)?));
     assert!(!detail.contains("<shop>"));
-    let dashboard = server
+    let snapshot = server
         .client
         .get(format!("{}/?company=acme", server.base))
         .send()?
         .error_for_status()?
         .text()?;
-    assert!(dashboard.contains("class=\"amount\">$25.00</td>"));
+    assert!(snapshot.contains("Financial snapshot"));
+    assert!(snapshot.contains("Net worth is USD 25.00"));
+    assert!(snapshot.contains("You can ask your agent"));
+    assert!(snapshot.contains("href=\"/reports?company=acme"));
+    assert!(!snapshot.contains("Recent activity"));
     Ok(())
 }

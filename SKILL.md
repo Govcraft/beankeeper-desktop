@@ -44,7 +44,7 @@ Setup opens the UI origin. Ask the human to open the one-time pairing URL from
 the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
 terminal, then select **Pair this browser** on that page within five minutes.
 Opening or refreshing the page leaves the link usable; only the confirmation
-POST consumes it. A paired browser can browse the dashboard, accounts, transactions,
+POST consumes it. A paired browser can browse the financial snapshot, accounts, transactions,
 financial reports, tax summaries and read-only reconciliation. Use the stable
 view IDs and query filters in [docs/reports.md](docs/reports.md) for saved report
 links. Tax CSV/JSON downloads require the human browser session; agent bearer

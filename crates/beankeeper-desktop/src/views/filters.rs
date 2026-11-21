@@ -192,14 +192,6 @@ impl ViewQuery {
 }
 
 impl Filters {
-    pub(super) fn for_account(account: String, currency: Currency) -> Self {
-        Self {
-            account: Some(account),
-            currency: Some(currency),
-            ..Self::default()
-        }
-    }
-
     pub(crate) fn comparison_filters(&self) -> Option<Self> {
         Some(Self {
             dates: self.comparison?.bounds(),
