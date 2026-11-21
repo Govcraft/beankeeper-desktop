@@ -110,11 +110,29 @@ pub fn application(
 /// Returns bind, runtime, passphrase, ledger or server failures.
 pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
     validate_bind(options.bind, options.allow_remote)?;
+    let listener = std::net::TcpListener::bind(options.bind)?;
+    serve_listener(cli, options, listener)
+}
+
+/// Host an already-bound loopback socket, preserving port fallback without a bind race.
+///
+/// # Errors
+/// Returns runtime, ledger or server startup failures.
+pub(crate) fn serve_listener(
+    cli: &Cli,
+    options: ServeOptions,
+    listener: std::net::TcpListener,
+) -> Result<(), DesktopError> {
+    validate_bind(listener.local_addr()?, options.allow_remote)?;
+    listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let listener = runtime.block_on(tokio::net::TcpListener::bind(options.bind))?;
+    let listener = {
+        let _enter = runtime.enter();
+        tokio::net::TcpListener::from_std(listener)?
+    };
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
@@ -140,10 +158,23 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
     runtime.block_on(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                shutdown_signal().await;
                 cancellation.cancel();
             })
             .await
     })?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

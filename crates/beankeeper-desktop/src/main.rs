@@ -8,7 +8,7 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
-    links, product, server, setup, updates,
+    links, product, server, service, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
@@ -26,6 +26,17 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|error| error.exit());
             let json = ledger.is_json();
             links::run(options, ledger.company, json).map_err(DesktopError::Link)
+        }
+        Some(("service", options)) => {
+            let options = service::ServiceOptions::from_arg_matches(options)
+                .unwrap_or_else(|error| error.exit());
+            let ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            service::run(
+                options,
+                ledger,
+                matches.value_source("db") == Some(ValueSource::CommandLine),
+            )
+            .map_err(|error| DesktopError::Service(Box::new(error)))
         }
         Some(("license", options)) => {
             let options =

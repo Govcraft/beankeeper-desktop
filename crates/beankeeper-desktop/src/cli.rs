@@ -43,6 +43,10 @@ pub fn command() -> Command {
     Cli::command()
         .version(env!("CARGO_PKG_VERSION"))
         .about("Beankeeper Desktop: local UI and agent-driven accounting")
+        .subcommand(crate::service::ServiceOptions::augment_args(
+            Command::new("service")
+                .about("Manage per-user background hosting and lifecycle MCP tools"),
+        ))
         .subcommand(ServeOptions::augment_args(Command::new("serve").about(
             "Serve the embedded UI and authenticated MCP on one listener",
         )))

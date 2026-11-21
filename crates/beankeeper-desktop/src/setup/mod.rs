@@ -152,13 +152,56 @@ pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
         Some(path) => Box::new(FileSecretStore::new(path.clone())),
         None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
     };
-    run_with_store(cli, options, store.as_ref())
+    run_with_store(cli, options, store.as_ref(), None)
+}
+
+/// Provision service books without prompting, printing secrets or opening a browser.
+/// Existing ledgers retain their recorded store, identity and preset.
+///
+/// # Errors
+/// Returns the same fail-closed errors as interactive setup.
+pub(crate) fn run_service(
+    cli: &mut Cli,
+    home: &Path,
+    bind: SocketAddr,
+    previous_executable: &Path,
+    file_store: bool,
+) -> Result<(), SetupError> {
+    let mut options = SetupOptions::from_service(home, bind);
+    if file_store && !cli.db.exists() {
+        options.secret_store_file = Some(cli.db.with_extension("passphrase"));
+    }
+    let store: Box<dyn SecretStore> = match &options.secret_store_file {
+        Some(path) => Box::new(FileSecretStore::new(path.clone())),
+        None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
+    };
+    run_with_store(cli, &options, store.as_ref(), Some(previous_executable))
+}
+
+impl SetupOptions {
+    fn from_service(home: &Path, bind: SocketAddr) -> Self {
+        Self {
+            force: true,
+            non_interactive: true,
+            demo: false,
+            preset: Preset::ReadOnly,
+            recovery_kit: None,
+            config_home: Some(home.into()),
+            secret_store_file: None,
+            no_start: true,
+            no_open: true,
+            bind,
+            max_post: 10_000,
+            daily_limit: 50_000,
+        }
+    }
 }
 
 fn run_with_store(
     cli: &mut Cli,
     options: &SetupOptions,
     store: &dyn SecretStore,
+    service_executable: Option<&Path>,
 ) -> Result<(), SetupError> {
     crate::server::validate_bind(options.bind, false)?;
     if options.bind.port() == 0 {
@@ -196,8 +239,11 @@ fn run_with_store(
         .clone()
         .unwrap_or_else(|| cli.db.with_extension("recovery.txt"));
     let url = format!("{}mcp", crate::server::local_url(options.bind));
-    let plan =
-        config::prepare_configs(&home, &std::env::current_exe()?, &cli.db, &token_file, &url)?;
+    let executable = std::env::current_exe()?;
+    let plan = match service_executable {
+        Some(previous) => config::prepare_service_configs(&home, &executable, previous)?,
+        None => config::prepare_configs(&home, &executable, &cli.db, &token_file, &url)?,
+    };
     // Validate output collisions before creating a ledger or storing credentials.
     if !existed
         && [token_file.as_path(), owner_file.as_path(), kit.as_path()]
@@ -249,7 +295,16 @@ fn run_with_store(
         Db::open_existing(&cli.db, Some(&secret))?;
     }
     // Establish a recoverable credential before initialization.
-    store.store(&cli.db, &secret)?;
+    let fallback = cli.db.with_extension("passphrase");
+    let automatic_file = match store.store(&cli.db, &secret) {
+        Ok(()) => None,
+        Err(keychain::KeychainError::Unavailable) if service_executable.is_some() && !existed => {
+            FileSecretStore::new(fallback.clone()).store(&cli.db, &secret)?;
+            eprintln!("OS secret store unavailable; using a private credential file.");
+            Some(fallback)
+        }
+        Err(error) => return Err(error.into()),
+    };
     if !kit.exists() {
         private_create(
             &kit,
@@ -281,12 +336,19 @@ fn run_with_store(
         set_private(&cli.db)?;
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
-    provision(&db, options, &token_file, &owner_file)?;
+    provision(
+        &db,
+        options,
+        &token_file,
+        &owner_file,
+        service_executable.is_some() && existed,
+    )?;
     let marker = cli.db.with_extension("desktop.json");
     if !marker.exists() || options.secret_store_file.is_some() {
         let file_store = options
             .secret_store_file
             .as_ref()
+            .or(automatic_file.as_ref())
             .map(std::path::absolute)
             .transpose()?;
         let metadata = serde_json::json!({"secret_store_file": file_store});
@@ -346,13 +408,14 @@ fn provision(
     options: &SetupOptions,
     token_file: &Path,
     owner_file: &Path,
+    preserve_preset: bool,
 ) -> Result<(), SetupError> {
     let conn = db.conn();
     if token_file.exists() {
         keychain::validate_private_file(token_file)?;
         let raw = fs::read_to_string(token_file)?;
         let agent = identity::verify(conn, raw.trim())?;
-        if agent.capabilities() != options.preset.capabilities() {
+        if !preserve_preset && agent.capabilities() != options.preset.capabilities() {
             return Err(SetupError::Invalid(
                 "existing token has a different preset; use upstream agent issuance for explicit credential changes",
             ));
@@ -645,7 +708,7 @@ fn registered_store(ledger: &Path) -> Result<Option<Box<dyn SecretStore>>, Setup
     Ok(Some(store))
 }
 
-fn running_for_ledger(bind: SocketAddr, token: &str) -> Result<bool, SetupError> {
+pub(crate) fn running_for_ledger(bind: SocketAddr, token: &str) -> Result<bool, SetupError> {
     if crate::browser::open_with(bind, |_| Ok(())).is_err() {
         return Ok(false);
     }
@@ -734,6 +797,66 @@ impl Drop for PendingServer {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    struct UnavailableStore;
+    impl SecretStore for UnavailableStore {
+        fn store(
+            &self,
+            _ledger: &Path,
+            _secret: &SecretString,
+        ) -> Result<(), keychain::KeychainError> {
+            Err(keychain::KeychainError::Unavailable)
+        }
+        fn load(&self, _ledger: &Path) -> Result<Option<SecretString>, keychain::KeychainError> {
+            Err(keychain::KeychainError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn service_fallback_provisions_encrypted_books_once_and_keeps_recovery_private()
+    -> Result<(), Box<dyn Error>> {
+        use clap::Parser;
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let home = root.path().join("clients");
+        let books = root.path().join("books.db");
+        let mut cli =
+            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+        let options = SetupOptions::from_service(&home, "127.0.0.1:8750".parse()?);
+        run_with_store(
+            &mut cli,
+            &options,
+            &UnavailableStore,
+            Some(&std::env::current_exe()?),
+        )?;
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(books.with_extension("desktop.json"))?)?;
+        assert_eq!(
+            marker["secret_store_file"],
+            books
+                .with_extension("passphrase")
+                .to_string_lossy()
+                .as_ref()
+        );
+        for extension in ["passphrase", "recovery.txt", "agent-token", "owner-token"] {
+            keychain::validate_private_file(&books.with_extension(extension))?;
+        }
+        assert!(!fs::read(&books)?.starts_with(b"SQLite format 3"));
+        let recovery = fs::read(books.with_extension("recovery.txt"))?;
+        let token = fs::read(books.with_extension("agent-token"))?;
+        let mut cli =
+            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+        run_service(
+            &mut cli,
+            &home,
+            "127.0.0.1:8750".parse()?,
+            &std::env::current_exe()?,
+            false,
+        )?;
+        assert_eq!(fs::read(books.with_extension("recovery.txt"))?, recovery);
+        assert_eq!(fs::read(books.with_extension("agent-token"))?, token);
+        Ok(())
+    }
 
     #[test]
     fn failed_startup_reaps_its_background_process() -> Result<(), Box<dyn Error>> {
