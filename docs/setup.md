@@ -166,7 +166,7 @@ paired. Open the one-time pairing URL from the private `.desktop.log` within
 five minutes, or run `bk serve` in the foreground to see the URL in the terminal.
 Select **Pair this browser** on that page to confirm before the link expires.
 Opening or refreshing the page does not consume the link.
-After pairing, the dashboard, accounts and transactions are available. Agent
+After pairing, the financial snapshot, accounts and transactions are available. Agent
 association uses a separate link; see [browser pairing](browser-pairing.md).
 Live navigation remains follow-up work. The stdio bridge forwards current
 request/response MCP tools, negotiated session/protocol headers, and JSON or SSE

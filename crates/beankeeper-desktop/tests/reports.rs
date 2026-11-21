@@ -638,7 +638,7 @@ fn reports_reconciliation_and_review_share_the_workspace_shell() -> TestResult {
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.pair()?;
     let destinations = [
-        ("/", "Dashboard"),
+        ("/", "Your books"),
         ("/accounts", "Accounts"),
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),

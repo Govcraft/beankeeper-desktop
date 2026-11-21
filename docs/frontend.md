@@ -75,7 +75,7 @@ Integration tests launch a real server against a temporary encrypted ledger and
 exercise D3 pairing, protected deep links, errors, security headers and MCP
 isolation.
 Renderer tests seed accounts and posted transactions using upstream APIs and
-cover dashboard, complete account lists, filters, source-cursor pagination,
+cover the financial snapshot, complete account lists, filters, source-cursor pagination,
 transaction metadata, audit and agent identity, and company isolation.
 
 ## Browser review

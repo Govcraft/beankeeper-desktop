@@ -29,7 +29,7 @@ pub(crate) const HEALTH: &str = "beankeeper-desktop-v1";
 pub(crate) fn page(title: &str, description: &str, path: &str, content: Markup) -> Html<String> {
     let mut navigation = Markup::default();
     for (href, label) in [
-        ("/", "Dashboard"),
+        ("/", "Your books"),
         ("/accounts", "Accounts"),
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),
@@ -247,7 +247,7 @@ async fn view(
             if error.status().is_server_error() {
                 eprintln!("Ledger view failed: {error:?}");
             }
-            (error.status(), page("Unable to display this view", &error.to_string(), "", markup!("<p><a href=\"/\">Return to dashboard</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
+            (error.status(), page("Unable to display this view", &error.to_string(), "", markup!("<p><a href=\"/\">Return to your books</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,

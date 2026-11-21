@@ -2,7 +2,7 @@
 
 Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
 to the authenticated MCP endpoint; the browser displays the workspace. This
-preview shows your dashboard, accounts, transactions, financial reports, tax
+preview shows a financial snapshot, accounts, transactions, financial reports, tax
 summaries and reconciliation, with read-only ledger views and a browser review
 queue for agent proposals. Agents with a separate UI credential can navigate a
 paired tab and highlight rows over SSE.
@@ -205,7 +205,7 @@ a message and a `pairing_url`. `ui_status` still succeeds and reports the curren
 pairing state and tabs. With multiple connected tabs, choose the `tab_id` from status.
 Navigation/highlight are disabled by `--read-only`; status remains available.
 
-Real dashboard, account, register, transaction, review, financial report, tax
+Financial snapshot, account, register, transaction, review, financial report, tax
 summary and reconciliation URLs are supported with restorable filters. Tool
 results distinguish queued requests from the browser's confirmed view. See the [tool catalog, grant
 commands and tab design](docs/navigation.md) for arguments, examples and tests.
@@ -225,8 +225,8 @@ paired human session. Agent credentials cannot unlock browser views, and browser
 cookies cannot authorize MCP. Health and CSS remain public and data-free behind
 Host/Origin checks. After pairing, reopen a saved view URL to restore its filters.
 
-- **Dashboard** (`/`): company balances and recent activity, with links to
-  accounts and the register. Multi-currency books require a currency selection.
+- **Your books** (`/`) shows a short financial snapshot from the same summary
+  used by the agent, with optional links to the detailed views.
 - **Accounts** (`/accounts?company=acme`): all accounts for the selected company,
   grouped by account type, with links to each account's register.
 - **Register** (`/transactions?company=acme`): filter by account, inclusive date
@@ -317,9 +317,10 @@ cargo +1.91.0 check --workspace --all-targets --locked
 ```
 
 CI runs fmt, clippy with warnings denied, tests (including the embedded UI build)
-on stable, and a separate Rust 1.91 check. `Cargo.lock` pins `beankeeper-cli` to
-the `beankeeper-cli-v0.27.0` git tag. Update it deliberately with
-`cargo update -p beankeeper-cli` when adopting a newer CLI tag.
+on stable, and a separate Rust 1.91 check. `Cargo.lock` pins the library and CLI to the same upstream revision.
+This revision includes the shared financial summary behind `bk summary` and
+the `financial_summary` MCP tool. Advance both dependencies together when
+adopting a newer CLI release.
 
 ## License and updates
 
