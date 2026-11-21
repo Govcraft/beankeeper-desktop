@@ -169,9 +169,51 @@ def compress(directory, release_version, target, output):
             archive.add(directory, arcname=stem)
 
 
+def mcp_bundle(directory, release_version, target, output):
+    """Package the staged (and, where configured, OS-signed) native executable."""
+    stem = name(release_version, target)
+    platform = "win32" if "windows" in target else "darwin" if "darwin" in target else "linux"
+    executable = "bk.exe" if platform == "win32" else "bk"
+    entry_point = f"server/{executable}"
+    packaging = ROOT / "packaging/claude"
+    manifest = json.loads((packaging / "manifest.json").read_text(encoding="utf-8"))
+    manifest.update(
+        version=release_version,
+        compatibility={"platforms": [platform]},
+        server={
+            "type": "binary",
+            "entry_point": entry_point,
+            "mcp_config": {"command": "${__dirname}/" + entry_point, "args": ["mcp", "extension"]},
+        },
+    )
+
+    def zip_entry(path, mode):
+        entry = zipfile.ZipInfo(path)
+        entry.create_system = 3  # Encode Unix modes on all release runners.
+        entry.external_attr = (0o100000 | mode) << 16
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        return entry
+
+    output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output / f"{stem}.mcpb", "w") as archive:
+        archive.writestr(
+            zip_entry("manifest.json", 0o644),
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        )
+        with (directory / executable).open("rb") as source:
+            with archive.open(zip_entry(entry_point, 0o755), "w") as packed:
+                shutil.copyfileobj(source, packed)
+        for path, source in (
+            ("icon.png", packaging / "icon.png"),
+            ("SKILL.md", ROOT / "SKILL.md"),
+            ("LICENSE.md", directory / "LICENSE.md"),
+        ):
+            archive.writestr(zip_entry(path, 0o644), source.read_bytes())
+
+
 def checksums(output):
     assets = sorted(path for path in output.iterdir()
-                    if path.name.endswith((".tar.gz", ".deb", ".pkg", ".zip", ".exe")))
+                    if path.name.endswith((".tar.gz", ".deb", ".pkg", ".zip", ".exe", ".mcpb")))
     if not assets:
         raise ValueError("no release assets found")
     lines = []
@@ -232,7 +274,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "checksums", "update-manifest", "license-env"])
+    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "checksums", "update-manifest", "license-env"])
     parser.add_argument("--tag")
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary", type=Path)
@@ -259,6 +301,8 @@ def main():
             stage(args.binary, release_version, args.target, args.work)
         elif args.command == "installer":
             installer(directory, release_version, args.target, args.output)
+        elif args.command == "mcpb":
+            mcp_bundle(directory, release_version, args.target, args.output)
         else:
             compress(directory, release_version, args.target, args.output)
 

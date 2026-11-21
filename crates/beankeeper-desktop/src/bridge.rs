@@ -9,7 +9,7 @@ use std::{
     error::Error,
     fmt,
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
+const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask the owner for decisions before changing the books. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
 
 /// Connect an MCP stdio client to the already-running Desktop HTTP endpoint.
 #[derive(Args, Debug, Clone)]
@@ -109,8 +110,26 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
                 .ok_or(BridgeError::InvalidToken)?,
         )
     };
-    let url = local_url(&url)?;
-    let secret = PrivateFile::open(&token_file)
+    run_connected(&url, &token_file, None)
+}
+
+/// Start the service when launched from an accepted extension, then bridge MCP.
+///
+/// # Errors
+/// Returns actionable setup, service discovery, credential and transport errors.
+pub fn run_extension() -> Result<(), BridgeError> {
+    let (url, token_file) = crate::service::extension_connection()
+        .map_err(|error| BridgeError::Service(Box::new(error)))?;
+    run_connected(&url, &token_file, Some(EXTENSION_INSTRUCTIONS))
+}
+
+fn run_connected(
+    url: &str,
+    token_file: &Path,
+    instructions: Option<&'static str>,
+) -> Result<(), BridgeError> {
+    let url = local_url(url)?;
+    let secret = PrivateFile::open(token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
     let token = secret.expose_secret().trim();
@@ -134,6 +153,7 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
         url,
         session: None,
         protocol: None,
+        instructions,
     };
     let result = transport.forward(io::stdin().lock(), &mut io::stdout().lock());
     transport.close();
@@ -161,6 +181,7 @@ struct Transport {
     url: Url,
     session: Option<HeaderValue>,
     protocol: Option<String>,
+    instructions: Option<&'static str>,
 }
 
 impl Transport {
@@ -204,8 +225,13 @@ impl Transport {
             if let Some(session) = response.headers().get("Mcp-Session-Id") {
                 self.session = Some(session.clone());
             }
-            let replies = relay_response(response, message.get("id"), output)?;
-            if message.get("method").and_then(Value::as_str) == Some("initialize") {
+            let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
+            let relay = ReplyContext {
+                request_id: message.get("id"),
+                instructions: if initial { self.instructions } else { None },
+            };
+            let replies = relay_response(response, relay, output)?;
+            if initial {
                 self.protocol = replies.iter().find_map(|reply| {
                     reply
                         .get("result")?
@@ -232,9 +258,15 @@ impl Transport {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReplyContext<'a> {
+    request_id: Option<&'a Value>,
+    instructions: Option<&'static str>,
+}
+
 fn relay_response(
     response: Response,
-    request_id: Option<&Value>,
+    context: ReplyContext<'_>,
     output: &mut impl Write,
 ) -> Result<Vec<Value>, BridgeError> {
     if response.status() == StatusCode::ACCEPTED || response.status() == StatusCode::NO_CONTENT {
@@ -247,7 +279,7 @@ fn relay_response(
         .is_some_and(|value| value.starts_with("text/event-stream"));
     let mut reader = io::BufReader::new(response);
     if sse {
-        return relay_sse(&mut reader, request_id, output);
+        return relay_sse(&mut reader, context, output);
     }
     let mut contents = Vec::new();
     io::Read::read_to_end(
@@ -257,14 +289,35 @@ fn relay_response(
     if contents.len() as u64 > MAX_MESSAGE_BYTES {
         return Err(BridgeError::Protocol);
     }
-    let message = emit(&contents, output)?;
+    let message = emit(&contents, context, output)?;
     Ok(vec![message])
 }
 
-fn emit(contents: &[u8], output: &mut impl Write) -> Result<Value, BridgeError> {
-    let message: Value = serde_json::from_slice(contents).map_err(|_| BridgeError::Protocol)?;
+fn emit(
+    contents: &[u8],
+    context: ReplyContext<'_>,
+    output: &mut impl Write,
+) -> Result<Value, BridgeError> {
+    let mut message: Value = serde_json::from_slice(contents).map_err(|_| BridgeError::Protocol)?;
     if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(BridgeError::Protocol);
+    }
+    if let Some(instructions) = context.instructions
+        && context
+            .request_id
+            .is_some_and(|id| message.get("id") == Some(id))
+        && let Some(result) = message.get_mut("result").and_then(Value::as_object_mut)
+    {
+        let value = result
+            .entry("instructions")
+            .or_insert_with(|| Value::String(String::new()));
+        let Value::String(existing) = value else {
+            return Err(BridgeError::Protocol);
+        };
+        if !existing.is_empty() {
+            existing.push(' ');
+        }
+        existing.push_str(instructions);
     }
     serde_json::to_writer(&mut *output, &message).map_err(|_| BridgeError::Protocol)?;
     output.write_all(b"\n")?;
@@ -274,7 +327,7 @@ fn emit(contents: &[u8], output: &mut impl Write) -> Result<Value, BridgeError> 
 
 fn relay_sse(
     reader: &mut impl BufRead,
-    request_id: Option<&Value>,
+    context: ReplyContext<'_>,
     output: &mut impl Write,
 ) -> Result<Vec<Value>, BridgeError> {
     let mut data = String::new();
@@ -288,8 +341,8 @@ fn relay_sse(
         let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
             if !data.is_empty() {
-                let message = emit(data.as_bytes(), output)?;
-                let completed = request_id.is_some_and(|id| {
+                let message = emit(data.as_bytes(), context, output)?;
+                let completed = context.request_id.is_some_and(|id| {
                     message.get("id") == Some(id)
                         && (message.get("result").is_some() || message.get("error").is_some())
                 });
@@ -309,7 +362,11 @@ fn relay_sse(
             }
         }
         if read == 0 {
-            if request_id.is_some() && !replies.iter().any(|reply| reply.get("id") == request_id) {
+            if context.request_id.is_some()
+                && !replies
+                    .iter()
+                    .any(|reply| reply.get("id") == context.request_id)
+            {
                 return Err(BridgeError::Protocol);
             }
             return Ok(replies);
@@ -321,6 +378,13 @@ fn relay_sse(
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn Error>>;
+
+    fn reply(request_id: Option<&Value>) -> ReplyContext<'_> {
+        ReplyContext {
+            request_id,
+            instructions: None,
+        }
+    }
 
     #[test]
     fn credentials_never_go_to_nonlocal_urls() -> TestResult {
@@ -352,19 +416,19 @@ mod tests {
     fn sse_handles_comments_multiline_events_and_protocol_errors() -> TestResult {
         let data = b": keepalive\nevent: message\ndata: {\ndata: \"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
         let mut output = Vec::new();
-        let replies = relay_sse(&mut &data[..], Some(&Value::from(1)), &mut output)?;
+        let replies = relay_sse(&mut &data[..], reply(Some(&Value::from(1))), &mut output)?;
         assert_eq!(replies.len(), 2);
         assert_eq!(String::from_utf8(output)?.lines().count(), 2);
         assert!(matches!(
             relay_sse(
                 &mut &b"data: not-json\n\n"[..],
-                Some(&Value::from(1)),
+                reply(Some(&Value::from(1))),
                 &mut Vec::new()
             ),
             Err(BridgeError::Protocol)
         ));
         assert!(matches!(
-            relay_sse(&mut &b""[..], Some(&Value::from(1)), &mut Vec::new()),
+            relay_sse(&mut &b""[..], reply(Some(&Value::from(1))), &mut Vec::new()),
             Err(BridgeError::Protocol)
         ));
         Ok(())
@@ -442,6 +506,7 @@ mod tests {
             url,
             session: None,
             protocol: None,
+            instructions: None,
         };
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
         let mut output = Vec::new();

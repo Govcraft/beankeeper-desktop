@@ -37,6 +37,7 @@ passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-
 
 `bk --db /absolute/path/books.db service install` selects other books on the first
 install. Existing books must have compatible Desktop enrollment and credentials.
+Pass `--no-agents` to leave existing MCP client configuration alone.
 A conflicting existing MCP entry is left untouched and reported. Remove or rename
 that entry after inspecting it before choosing a new service setup. Reinstalls
 use the registered books; selecting a different ledger requires uninstalling the

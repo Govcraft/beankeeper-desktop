@@ -125,13 +125,40 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual((root / "usr/local/share/doc/beankeeper-desktop/LICENSE.md").read_bytes(),
                          (ROOT / "LICENSE.md").read_bytes())
 
+    def test_mcp_bundle_matches_each_native_release_target(self):
+        for target in release.TARGETS:
+            with self.subTest(target=target):
+                directory = release.stage(self.binary, "0.1.0-rc.1", target, self.root / "work")
+                release.mcp_bundle(directory, "0.1.0-rc.1", target, self.output)
+                with zipfile.ZipFile(self.output / f"{directory.name}.mcpb") as archive:
+                    manifest = json.loads(archive.read("manifest.json"))
+                    platform = (
+                        "win32" if "windows" in target else "darwin" if "darwin" in target else "linux"
+                    )
+                    binary = "server/bk.exe" if platform == "win32" else "server/bk"
+                    self.assertEqual(manifest["version"], "0.1.0-rc.1")
+                    self.assertEqual(manifest["compatibility"]["platforms"], [platform])
+                    self.assertEqual(manifest["server"]["type"], "binary")
+                    self.assertEqual(manifest["server"]["entry_point"], binary)
+                    self.assertEqual(
+                        manifest["server"]["mcp_config"],
+                        {"command": "${__dirname}/" + binary, "args": ["mcp", "extension"]},
+                    )
+                    member = archive.getinfo(binary)
+                    self.assertEqual(member.create_system, 3)
+                    self.assertEqual((member.external_attr >> 16) & 0o777, 0o755)
+                    self.assertEqual(archive.read(member), self.binary.read_bytes())
+                    self.assertEqual(archive.read("SKILL.md"), (ROOT / "SKILL.md").read_bytes())
+                    self.assertEqual(archive.read("LICENSE.md"), (ROOT / "LICENSE.md").read_bytes())
+                    self.assertTrue(archive.read(manifest["icon"]).startswith(b"\x89PNG"))
+
     def test_checksums_cover_every_final_asset_and_exclude_bundles(self):
-        for suffix in ("tar.gz", "deb", "pkg", "exe", "zip"):
+        for suffix in ("tar.gz", "deb", "pkg", "exe", "zip", "mcpb"):
             (self.output / f"bk-0.1.0-target.{suffix}").write_bytes(suffix.encode())
         (self.output / "bk-0.1.0-target.zip.sigstore").write_text("not an asset")
         release.checksums(self.output)
         manifest = (self.output / "checksums-sha256.txt").read_text().splitlines()
-        self.assertEqual(len(manifest), 5)
+        self.assertEqual(len(manifest), 6)
         for line in manifest:
             digest, filename = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.output / filename).read_bytes()).hexdigest())
