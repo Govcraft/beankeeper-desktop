@@ -63,7 +63,12 @@ pub fn command() -> Command {
         ))
         .subcommand(crate::setup::SetupOptions::augment_args(
             Command::new("setup")
-                .about("Create an encrypted ledger and configure your MCP clients"),
+                .about("Create an encrypted ledger and configure your MCP clients")
+                .subcommand(
+                    Command::new("status")
+                        .about("Read book and account setup status without changing the ledger")
+                        .after_help("Example: bk setup status --json"),
+                ),
         ))
         .subcommand(crate::product::LicenseOptions::augment_args(
             Command::new("license").about("Show, activate, or print compiled-in license trust"),

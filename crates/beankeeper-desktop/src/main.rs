@@ -8,7 +8,7 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
-    links, product, server, service, setup, updates,
+    links, onboarding, product, server, service, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
@@ -79,6 +79,12 @@ fn main() -> ExitCode {
             let options =
                 OpenOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
             browser::open(options.bind)
+        }
+        Some(("setup", options)) if options.subcommand_name() == Some("status") => {
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
+                .unwrap_or_else(|error| error.exit());
+            return onboarding::run_status(ledger);
         }
         Some(("setup", options)) => {
             let options =
