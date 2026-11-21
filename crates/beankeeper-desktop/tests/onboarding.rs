@@ -285,11 +285,9 @@ fn setup_public_key() -> String {
 }
 
 fn setup_call(server: &Server, token: &str, name: &str, arguments: Value) -> TestResult<Value> {
-    rpc(server.request(
-        "tools/call",
-        json!({"name":name,"arguments":arguments}),
-        Some(token),
-    )?)
+    let mut params = json!({"name":name});
+    params["arguments"] = arguments;
+    rpc(server.request("tools/call", params, Some(token))?)
 }
 
 fn setup_cli(ledger: &Ledger, owner: &str, args: &[&str]) -> TestResult<Value> {
