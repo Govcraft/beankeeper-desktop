@@ -305,8 +305,9 @@ pub(crate) fn render(
     if !companies.iter().any(|c| c.slug == company) {
         return Err(ViewError::NotFound);
     }
-    let mut html = form(db, &companies, company, path, kind, query)?;
+    let mut html = String::new();
     let Some(kind) = kind else {
+        html = form(db, &companies, company, path, None, query)?;
         html.push_str("<section><h2>Choose a report</h2><ul>");
         for id in VIEW_IDS {
             let path = if *id == "reconciliation" {
@@ -344,6 +345,7 @@ pub(crate) fn render(
                 && nonempty(&query.year).is_none()
                 && nonempty(&query.filters.from).is_none()))
     {
+        html.insert_str(0, &form(db, &companies, company, path, Some(kind), query)?);
         html.push_str(
             "<p class=\"empty\">Choose the report filters above, then apply to see results.</p>",
         );
@@ -372,9 +374,20 @@ pub(crate) fn render(
             filename: format!("{id}.{format}"),
         });
     }
+    // Use upstream's resolved dates in the income form and download link rather
+    // than resolving the local clock a second time or leaving defaults hidden.
+    let mut query = query.clone();
+    if kind == Kind::Income {
+        query.filters.from = data["from"].as_str().map(str::to_owned);
+        query.filters.to = data["to"].as_str().map(str::to_owned);
+    }
+    html.insert_str(0, &form(db, &companies, company, path, Some(kind), &query)?);
     let currency = resolve_report_currency(db.conn(), company, nonempty(&query.filters.currency))
         .map_err(report_error)?;
     let _ = write!(html, "<p>Report currency: {}.</p>", escape(currency.code()));
+    if kind == Kind::Income {
+        html.push_str(&income_context(db, company, &data, currency.code())?);
+    }
     let _ = write!(
         html,
         "<p><a download href=\"{}\">Download JSON</a>",
@@ -393,6 +406,53 @@ pub(crate) fn render(
     value_html(&data, Some(currency.code()), &mut html);
     html.push_str("</section>");
     Ok(page(html))
+}
+
+fn income_context(
+    db: &Db,
+    company: &str,
+    data: &Value,
+    currency: &str,
+) -> Result<String, ViewError> {
+    let (Some(from), Some(to)) = (data["from"].as_str(), data["to"].as_str()) else {
+        return Err(ViewError::Invalid(
+            "The income statement did not include a reporting period.",
+        ));
+    };
+    let mut html = format!(
+        "<p>Reporting period: {} through {} (inclusive).</p>",
+        escape(from),
+        escape(to)
+    );
+    if data["total_revenue"].as_i64() != Some(0) || data["total_expenses"].as_i64() != Some(0) {
+        return Ok(html);
+    }
+    // Zero net balances can still contain offsetting postings. Check gross
+    // activity with upstream's query API before calling the period empty.
+    for account_type in ["revenue", "expense"] {
+        let balances = db::compute_trial_balance(
+            db.conn(),
+            company,
+            Some(account_type),
+            Some(from),
+            Some(to),
+            Some(currency),
+        )?;
+        if balances
+            .iter()
+            .any(|row| row.debit_total != 0 || row.credit_total != 0)
+        {
+            return Ok(html);
+        }
+    }
+    let _ = write!(
+        html,
+        "<p class=\"empty\">No revenue or expense activity in this range for {}. Choose different dates above to see another period, or <a href=\"/transactions?company={}&amp;currency={}\">view company transactions across all dates</a>.</p>",
+        escape(currency),
+        encode(company),
+        encode(currency)
+    );
+    Ok(html)
 }
 
 fn report_error(error: CliError) -> ViewError {

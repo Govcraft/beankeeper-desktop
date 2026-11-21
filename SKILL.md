@@ -40,6 +40,12 @@ grouping. Report HTML prefers upstream `*_display` decimal fields. Register
 `min_amount`/`max_amount` filters still use integer minor units; JSON/CSV downloads
 and raw audit/proposal payloads retain their original units.
 
+Income statements default to January 1 of the end year through today when dates
+are omitted. The form shows the effective dates, and empty ranges include a
+note and a link to company transactions across all dates. For historical books,
+pass explicit `from` and `to` dates, such as `2025-01-01` and `2025-12-31` for
+the 2025 demo. Zero totals alone do not mean the company has no activity.
+
 The review queue at `/review?company=SLUG` lists pending agent proposals. Link
 the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and
 current spend caps, then approve or reject using their paired browser session.

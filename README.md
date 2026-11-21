@@ -197,7 +197,9 @@ Host/Origin checks. After pairing, reopen a saved view URL to restore its filter
   including agent identity and token ID when the ledger records them.
 - **Reports** (`/reports`): income statement, balance sheet, cash flow, spending
   and net-worth trends, and budget variance. Date and currency filters use the
-  CLI report rules; every report offers a JSON download.
+  CLI report rules; every report offers a JSON download. The income statement
+  shows its effective dates and explains ranges with no revenue or expense
+  activity, with a link to company transactions across all dates.
 - **Tax summaries** (`/reports/schedule-c` and `/reports/1099`): tables and CSV/JSON
   downloads, including unmatched Schedule C categories and payee thresholds.
   These are bookkeeping summaries, not tax advice or filed forms.

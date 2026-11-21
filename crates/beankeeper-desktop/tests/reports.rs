@@ -1,6 +1,7 @@
 mod common;
 
 use beankeeper_cli::db::{self, Actor, Db};
+use chrono::{Datelike, Local};
 use common::{Ledger, Server, TestResult, rpc, token};
 use serde_json::{Value, json};
 
@@ -216,6 +217,229 @@ fn rendered_scalars(value: &Value, html: &str) {
         ),
         other => assert!(html.contains(&other.to_string()), "missing {other}"),
     }
+}
+
+fn post_income_activity(
+    db: &Db,
+    company: &str,
+    date: &str,
+    currency: &str,
+    debit: &str,
+    credit: &str,
+) -> TestResult {
+    db::post_transaction(
+        db.conn(),
+        &db::PostTransactionParams {
+            company_slug: company,
+            date,
+            currency,
+            description: "Income period fixture",
+            metadata: None,
+            entries: &[
+                db::PostEntryParams {
+                    account_code: debit.into(),
+                    direction: "debit".into(),
+                    amount: 10_000,
+                    memo: None,
+                    tax_category: None,
+                },
+                db::PostEntryParams {
+                    account_code: credit.into(),
+                    direction: "credit".into(),
+                    amount: 10_000,
+                    memo: None,
+                    tax_category: None,
+                },
+            ],
+            correlate: None,
+            reference: None,
+            on_conflict: db::ConflictStrategy::Error,
+            actor: &Actor::new("owner"),
+        },
+    )?;
+    Ok(())
+}
+
+#[test]
+fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_results() -> TestResult {
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    let today = Local::now().date_naive();
+    let previous_year = today.year() - 1;
+    let historical = format!("{previous_year}-01-10");
+    for company in ["acme", "other", "empty"] {
+        if company != "acme" {
+            db::create_company(db.conn(), company, company, None)?;
+        }
+        db::create_account(db.conn(), company, "1000", "Checking", "asset", None)?;
+        db::create_account(db.conn(), company, "4000", "Sales", "revenue", None)?;
+    }
+    post_income_activity(&db, "acme", &historical, "USD", "1000", "4000")?;
+    // Activity in another company or currency must not hide the empty-range note.
+    post_income_activity(&db, "other", &today.to_string(), "USD", "1000", "4000")?;
+    post_income_activity(&db, "acme", &today.to_string(), "MXN", "1000", "4000")?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let before = fingerprint(&db)?;
+    let previous_end = format!("{previous_year}-12-31");
+    let previous_start = format!("{previous_year}-01-01");
+    for (filters, args, empty) in [
+        (String::new(), vec![], true),
+        // Empty form submissions use the same defaults as omitted bounds.
+        ("&from=&to=".into(), vec![], true),
+        (
+            format!("&to={previous_end}"),
+            vec!["--to", previous_end.as_str()],
+            false,
+        ),
+        (
+            format!("&from={previous_start}"),
+            vec!["--from", previous_start.as_str()],
+            false,
+        ),
+        (
+            format!("&from={previous_start}&to={previous_end}"),
+            vec![
+                "--from",
+                previous_start.as_str(),
+                "--to",
+                previous_end.as_str(),
+            ],
+            false,
+        ),
+        (
+            "&from=1900-01-01&to=1900-12-31".into(),
+            vec!["--from", "1900-01-01", "--to", "1900-12-31"],
+            true,
+        ),
+    ] {
+        let mut cli_args = vec!["income-statement", "--currency", "USD"];
+        cli_args.extend(args);
+        let expected: Value = serde_json::from_str(&cli_report(&ledger, &cli_args, "json")?)?;
+        let expected = &expected["data"];
+        let path = format!(
+            "{}/reports/income-statement?company=acme&currency=USD{filters}",
+            server.base
+        );
+        let html = server
+            .client
+            .get(&path)
+            .send()?
+            .error_for_status()?
+            .text()?;
+        assert_eq!(
+            html.contains("No revenue or expense activity in this range for USD"),
+            empty,
+            "{path}: {html}"
+        );
+        for field in ["from", "to"] {
+            let date = expected[field].as_str().ok_or("resolved report date")?;
+            assert!(html.contains(&format!("name=\"{field}\" type=\"date\" value=\"{date}\"")));
+        }
+        assert!(html.contains(&format!(
+            "Reporting period: {} through {} (inclusive).",
+            expected["from"].as_str().ok_or("from")?,
+            expected["to"].as_str().ok_or("to")?
+        )));
+        let actual: Value = server
+            .client
+            .get(format!("{path}&format=json"))
+            .send()?
+            .json()?;
+        assert_eq!(&actual, expected);
+        let download = html
+            .split_once("<a download href=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(url, _)| url.replace("&amp;", "&"))
+            .ok_or("JSON download link")?;
+        assert!(download.contains(&format!(
+            "from={}",
+            expected["from"].as_str().ok_or("from")?
+        )));
+        assert!(download.contains(&format!("to={}", expected["to"].as_str().ok_or("to")?)));
+        let downloaded: Value = server
+            .client
+            .get(format!("{}{download}", server.base))
+            .send()?
+            .json()?;
+        assert_eq!(&downloaded, expected);
+        if empty {
+            assert!(html.contains("href=\"/transactions?company=acme&amp;currency=USD\""));
+            assert!(html.contains("Choose different dates above"));
+        }
+    }
+    for (filters, empty) in [
+        ("company=other&currency=USD", false),
+        ("company=acme&currency=MXN", false),
+        ("company=empty", true),
+    ] {
+        let html = server
+            .client
+            .get(format!(
+                "{}/reports/income-statement?{filters}",
+                server.base
+            ))
+            .send()?
+            .error_for_status()?
+            .text()?;
+        assert_eq!(
+            html.contains("No revenue or expense activity"),
+            empty,
+            "{filters}"
+        );
+    }
+    assert_eq!(before, fingerprint(&db)?);
+    Ok(())
+}
+
+#[test]
+fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> TestResult {
+    let ledger = fixture()?;
+    let db = ledger.db()?;
+    db::create_account(db.conn(), "acme", "4001", "Refunds", "revenue", None)?;
+    for (date, debit, credit) in [
+        ("2024-01-10", "1000", "4000"),
+        ("2024-01-10", "4000", "1000"),
+        ("2023-01-10", "5000", "1000"),
+        ("2023-01-10", "1000", "5000"),
+        ("2022-01-10", "1000", "4000"),
+        ("2022-01-10", "5000", "1000"),
+        ("2021-01-10", "1000", "4000"),
+        ("2021-01-10", "4001", "1000"),
+    ] {
+        post_income_activity(&db, "acme", date, "USD", debit, credit)?;
+    }
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let before = fingerprint(&db)?;
+    for year in [2021, 2022, 2023, 2024] {
+        let path = format!(
+            "{}/reports/income-statement?company=acme&currency=USD&to={year}-12-31",
+            server.base
+        );
+        let data: Value = server
+            .client
+            .get(format!("{path}&format=json"))
+            .send()?
+            .json()?;
+        assert_eq!(data["net_income"], 0);
+        if year != 2022 {
+            assert_eq!(data["total_revenue"], 0);
+            assert_eq!(data["total_expenses"], 0);
+        }
+        let html = server
+            .client
+            .get(&path)
+            .send()?
+            .error_for_status()?
+            .text()?;
+        assert!(
+            !html.contains("No revenue or expense activity"),
+            "{path}: {html}"
+        );
+    }
+    assert_eq!(before, fingerprint(&db)?);
+    Ok(())
 }
 
 #[test]

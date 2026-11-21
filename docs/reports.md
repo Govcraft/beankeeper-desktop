@@ -51,6 +51,15 @@ of the effective end year. Balance sheet and reconciliation include all history
 through `to` and reject a start date. Date defaults are recalculated on reload;
 use explicit bounds for a fixed reporting window.
 
+The income statement displays upstream's effective dates in the form and an
+inclusive reporting-period summary. Its JSON download link includes those dates
+to preserve the displayed window. When the range has no revenue or expense
+activity in the selected currency, an explicit note suggests changing the dates
+and links to that company's transactions across all dates. This also applies to
+empty books. Zero net income or offsetting postings alone do not trigger the
+note. The current-year default remains the same as the CLI; for the 2025 demo,
+select `from=2025-01-01&to=2025-12-31` to see its activity.
+
 Budget variance follows the CLI's whole-month model. Enter `year` for the full
 year, or provide both date bounds covering whole calendar months within one year.
 For example, `from=2026-02-01&to=2026-03-31` maps to CLI `--year 2026 --from 2 --to

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.6] - 2026-11-20
+
+### Fixed
+
+- Show resolved income statement dates in the form and reporting-period summary.
+  Empty ranges explain that no revenue or expense activity matches the selected
+  dates and currency, with a link to company transactions across all dates.
+  Offsetting postings are treated as activity, and JSON downloads retain the
+  displayed period.
+
 ## [0.1.0-rc.5] - 2026-11-20
 
 ### Fixed
