@@ -78,6 +78,9 @@ existence while generating the URL; an absent record produces the view's normal
 not-found state when opened. Existing dashboard links remain supported for
 compatibility, but agents should offer the matching detail view after answering.
 
+`financial_summary` returns ready-to-use arguments in `data.desktop_view.link`.
+Pass its `view_id` and `state` to `ui_get_link` after answering the question.
+
 ## Address types and URL compatibility
 
 CLI flags, MCP `ui_get_link`, `ui_show_view`, and saved-URL parsing all deserialize
@@ -96,6 +99,9 @@ or leading zeros; fractional precision is preserved. An unsupported filter key i
 now rejected even when its value is `null`; it cannot be carried into an unrelated
 view. Empty date and amount strings are invalid; omit an unused filter or use
 `null`. These changes tighten input validation without introducing a URL version.
+
+Register amount bounds are inclusive integer minor units. Include `currency`
+when the company records transactions in multiple currencies.
 
 Compile-time invariants (tenet 2): the enum and per-view filter structs prevent
 attaching register filters to reports, report-specific filters to another report,

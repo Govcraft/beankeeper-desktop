@@ -16,7 +16,7 @@ pub(crate) fn ledger(money: Money) -> String {
     let currency = money.currency();
     let value = money.amount().format_decimal(currency.minor_units());
     let (sign, whole, fraction) = decimal_parts(&value);
-    decorate(sign, whole, fraction, currency.code())
+    decorate(sign, whole, fraction, currency)
 }
 
 fn decimal_parts(value: &str) -> (&str, &str, &str) {
@@ -25,34 +25,20 @@ fn decimal_parts(value: &str) -> (&str, &str, &str) {
     (sign, whole, fraction)
 }
 
-/// Decorate an upstream major-unit display string, preserving its exact digits.
-pub(crate) fn decimal(value: &str, code: &str) -> Option<String> {
-    let currency = Currency::from_code(code).ok()?;
-    let (sign, whole, fraction) = decimal_parts(value);
-    if whole.is_empty()
-        || !whole.bytes().all(|b| b.is_ascii_digit())
-        || !fraction.bytes().all(|b| b.is_ascii_digit())
-        || fraction.len() != usize::from(currency.minor_units())
-    {
-        return None;
-    }
-    Some(decorate(sign, whole, fraction, code))
-}
-
-fn decorate(sign: &str, whole: &str, fraction: &str, code: &str) -> String {
-    let symbol = match code {
-        "USD" => "$",
-        "EUR" => "€",
-        "GBP" => "£",
-        "JPY" => "¥",
-        "CAD" => "CA$",
-        "AUD" => "A$",
-        "MXN" => "MX$",
+fn decorate(sign: &str, whole: &str, fraction: &str, currency: Currency) -> String {
+    let symbol = match currency {
+        Currency::USD => "$",
+        Currency::EUR => "€",
+        Currency::GBP => "£",
+        Currency::JPY => "¥",
+        Currency::CAD => "CA$",
+        Currency::AUD => "A$",
+        Currency::MXN => "MX$",
         _ => "",
     };
     // Valid currencies without a familiar symbol retain their ISO code and scale.
     let mut formatted = if symbol.is_empty() {
-        format!("{sign}{code} ")
+        format!("{sign}{} ", currency.code())
     } else {
         format!("{sign}{symbol}")
     };
@@ -98,29 +84,23 @@ mod tests {
 
     #[test]
     fn currencies_without_symbol_mappings_use_code_and_exact_major_units() {
-        for (code, value, display, expected) in [
-            ("CHF", 123_456, "1234.56", "CHF 1,234.56"),
-            ("CHF", -5, "-0.05", "-CHF 0.05"),
-            ("BHD", -1_234, "-1.234", "-BHD 1.234"),
-            ("KWD", 1, "0.001", "KWD 0.001"),
-            ("KWD", 0, "0.000", "KWD 0.000"),
+        for (code, value, expected) in [
+            ("CHF", 123_456, "CHF 1,234.56"),
+            ("CHF", -5, "-CHF 0.05"),
+            ("BHD", -1_234, "-BHD 1.234"),
+            ("KWD", 1, "KWD 0.001"),
+            ("KWD", 0, "KWD 0.000"),
         ] {
-            assert!(Currency::from_code(code).is_ok());
             assert_eq!(minor(value, code), expected);
-            assert_eq!(decimal(display, code).as_deref(), Some(expected));
         }
     }
 
     #[test]
-    fn invalid_currencies_and_display_strings_never_guess_a_scale() {
+    fn unknown_currency_keeps_minor_units_and_large_amounts_keep_exact_digits() {
         assert_eq!(minor(123, "XYZ"), "123 XYZ minor units (unknown currency)");
-        for value in ["1.2", "1.234", "1e2", "<script>", "", "NaN", "1,234.00"] {
-            assert!(decimal(value, "USD").is_none(), "{value}");
-        }
-        assert!(decimal("1.00", "XYZ").is_none());
         assert_eq!(
-            decimal("9007199254740993.01", "USD").as_deref(),
-            Some("$9,007,199,254,740,993.01")
+            minor(900_719_925_474_099_301_i64, "USD"),
+            "$9,007,199,254,740,993.01"
         );
     }
 }

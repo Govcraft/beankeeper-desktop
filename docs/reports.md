@@ -32,16 +32,13 @@ returns 404. Every URL accepts `company` and `currency`. An omitted company uses
 `bk --company` / `BEANKEEPER_COMPANY`, then the first listed company, visibly
 selected in the form. Companies are never silently combined. Currency is inferred
 by upstream when a company's books use one currency (USD for empty books).
-Multi-currency books require an explicit code. HTML shows each monetary field
-once, preferring its upstream `*_display` decimal value, with currency symbols,
-comma grouping and exact currency-specific precision. USD uses `$`, CAD `CA$`,
-AUD `A$`, MXN `MX$`, EUR `€`, GBP `£` and JPY `¥`; CHF, BHD and KWD use ISO
-code prefixes. Negative amounts have a leading minus sign. Formatting uses a
-fixed decimal point rather than the browser locale. Nested rows inherit the
-report currency unless they declare their own. Counts, IDs and percentages keep
-their original values. Unknown currency formats explicitly show minor units
-rather than guessing a scale. JSON retains integer minor-unit amounts and their
-original `_display` field names; tax CSV retains integer minor-unit amounts.
+Multi-currency books require an explicit code. HTML formats report amounts from
+currency-bearing ledger values, with symbols, comma grouping and exact currency
+precision. USD uses `$`, CAD `CA$`, AUD `A$`, MXN `MX$`, EUR `€`, GBP `£` and JPY
+`¥`. CHF, BHD and KWD use ISO code prefixes. Negative amounts have a leading
+minus sign. Formatting uses a fixed decimal point. Counts, IDs and percentages
+keep their original units. JSON retains the integer minor-unit amounts and
+`_display` fields in the CLI contract. Tax CSV retains integer minor units.
 
 ## Date and report filters
 

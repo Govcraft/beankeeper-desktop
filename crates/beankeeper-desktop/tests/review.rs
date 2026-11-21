@@ -4,9 +4,14 @@ pub mod common;
 
 use std::time::Duration;
 
+use beankeeper::types::Currency;
 use beankeeper_cli::{
     commands::verify,
-    db::{self, Actor, Db, proposals},
+    db::{
+        self, Actor, Db,
+        proposals::{self, ProposalState, ResolvedBy},
+        spend_limits::{Caps, SpendLimit},
+    },
     identity::{self, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, token};
@@ -55,17 +60,13 @@ impl ReviewFixture {
         )?;
         let owner = Actor::new("fixture-owner")
             .with_identity(identity::verify(db.conn(), token(&approver)?)?);
-        db::audit::set_spend_limit(
-            db.conn(),
-            &owner,
-            &db::spend_limits::SpendLimit {
-                agent_uri: proposer["agent_uri"].as_str().ok_or("proposer URI")?.into(),
-                company_slug: "acme".into(),
-                currency: "USD".into(),
-                max_post: Some(100),
-                daily_limit: Some(200),
-            },
-        )?;
+        let agent = proposer["agent_uri"]
+            .as_str()
+            .ok_or("proposer URI")?
+            .parse()?;
+        let caps = Caps::from_minor_units(Some(100), Some(200))?;
+        let limit = SpendLimit::new(agent, "acme".parse()?, Currency::USD, caps);
+        db::audit::set_spend_limit(db.conn(), &owner, &limit)?;
         Ok(Self {
             ledger,
             proposer,
@@ -197,28 +198,30 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
         format!("/review/{id}?company=acme")
     );
     let proposal = proposals::get(db.conn(), "acme", &id)?;
-    assert_eq!(proposal.status, "approved");
+    let ProposalState::Approved {
+        resolution,
+        transaction_id,
+    } = &proposal.state
+    else {
+        return Err("expected an approved proposal with a posting".into());
+    };
+    let ResolvedBy::Agent { uri, jti } = &resolution.by else {
+        return Err("expected human approval attribution".into());
+    };
     assert_eq!(
         proposal.proposer_uri,
         fixture.proposer["agent_uri"]
             .as_str()
-            .ok_or("proposer URI")?
+            .ok_or("proposer URI")?,
     );
-    assert_ne!(
-        proposal.resolved_by_uri.as_deref(),
-        Some(proposal.proposer_uri.as_str())
-    );
-    let (transaction, entries) = db::get_transaction(
-        db.conn(),
-        "acme",
-        proposal.transaction_id.ok_or("posted ID")?,
-    )?;
+    assert_ne!(uri, &proposal.proposer_uri);
+    let (transaction, entries) = db::get_transaction(db.conn(), "acme", *transaction_id)?;
     assert_eq!(
         transaction.posted_by.as_deref(),
         Some("desktop-local-human")
     );
-    assert_eq!(transaction.agent_uri, proposal.resolved_by_uri);
-    assert_eq!(transaction.token_jti, proposal.resolved_by_jti);
+    assert_eq!(transaction.agent_uri.as_deref(), Some(uri.as_str()));
+    assert_eq!(transaction.token_jti.as_deref(), Some(jti.as_str()));
     assert_ne!(
         transaction.token_jti.as_deref(),
         fixture.proposer["token_jti"].as_str()
@@ -266,13 +269,14 @@ fn human_rejection_records_reason_without_posting_and_cannot_be_approved_later()
     assert_eq!(response.status(), 303);
     let db = fixture.ledger.db()?;
     let proposal = proposals::get(db.conn(), "acme", &id)?;
-    assert_eq!(proposal.status, "rejected");
-    assert_eq!(proposal.reason.as_deref(), Some("Wrong <vendor> & amount"));
-    assert!(proposal.transaction_id.is_none());
-    assert_ne!(
-        proposal.resolved_by_uri.as_deref(),
-        Some(proposal.proposer_uri.as_str())
-    );
+    let ProposalState::Rejected { resolution, reason } = &proposal.state else {
+        return Err("expected a rejected proposal".into());
+    };
+    assert_eq!(reason.as_deref(), Some("Wrong <vendor> & amount"));
+    let ResolvedBy::Agent { uri, .. } = &resolution.by else {
+        return Err("expected human rejection attribution".into());
+    };
+    assert_ne!(uri, &proposal.proposer_uri);
     assert_eq!(transaction_count(&db)?, 0);
     assert_eq!(
         decision(&server, &id, "approve", csrf(&html)?)
@@ -338,7 +342,10 @@ fn approval_bearer_tokens_cannot_replace_or_mix_with_browser_authority() -> Test
         }
     }
     let db = fixture.ledger.db()?;
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", &id)?.state,
+        ProposalState::Pending
+    );
     assert_eq!(transaction_count(&db)?, 0);
     Ok(())
 }
@@ -390,7 +397,10 @@ fn proposal_resolution_and_deep_links_are_company_scoped() -> TestResult {
     assert!(default.contains("value=\"other\" selected"));
     assert!(!default.contains(&id));
     let db = fixture.ledger.db()?;
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", &id)?.state,
+        ProposalState::Pending
+    );
     assert_eq!(transaction_count(&db)?, 0);
     Ok(())
 }
@@ -422,7 +432,10 @@ fn verification_caches_its_last_result_and_explicit_recheck_detects_tampering() 
             .status(),
         500
     );
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", &id)?.state,
+        ProposalState::Pending
+    );
     assert_eq!(transaction_count(&db)?, 0);
     let failed_approval = queue(&server)?;
     assert!(failed_approval.contains("Verification failed. Ledger integrity is not confirmed."));
@@ -491,7 +504,10 @@ fn verification_failure_stays_visible_when_tampered_limits_prevent_queue_reads()
     assert!(failed.contains("Proposal data unavailable"));
     assert!(failed.contains("Re-run verification"));
     assert!(!failed.contains("Intact: hash chain"));
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", &id)?.state,
+        ProposalState::Pending
+    );
     assert_eq!(transaction_count(&db)?, 0);
     Ok(())
 }
@@ -519,7 +535,10 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
             .status(),
         403
     );
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", &id)?.state,
+        ProposalState::Pending
+    );
     assert_eq!(transaction_count(&db)?, 0);
     verify::execute_json(&db)?;
     Ok(())
@@ -560,7 +579,10 @@ fn assert_rejected_insert_is_atomic(
         500
     );
     assert_eq!(transaction_count(db)?, 0);
-    assert_eq!(proposals::get(db.conn(), "acme", id)?.status, "pending");
+    assert_eq!(
+        proposals::get(db.conn(), "acme", id)?.state,
+        ProposalState::Pending
+    );
     let after: i64 = db
         .conn()
         .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;

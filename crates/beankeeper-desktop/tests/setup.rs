@@ -5,7 +5,7 @@ use std::{error::Error, fs, os::unix::fs::PermissionsExt, path::Path, process::C
 
 use beankeeper_cli::{
     capability::Capability,
-    db::{self, Db},
+    db::{self, Db, spend_limits::Cap},
     identity,
 };
 use serde_json::Value;
@@ -183,8 +183,9 @@ fn bookkeeper_has_spend_caps_and_cannot_approve_or_administer() -> TestResult {
     let limits = db::spend_limits::list(db.conn(), agent.uri(), None)?;
     assert_eq!(limits.len(), 3);
     for limit in limits {
-        assert_eq!(limit.max_post, Some(1234));
-        assert_eq!(limit.daily_limit, Some(5678));
+        let caps = limit.caps();
+        assert_eq!(caps.max_post().map(Cap::minor_units), Some(1234));
+        assert_eq!(caps.daily_limit().map(Cap::minor_units), Some(5678));
     }
     assert_eq!(db::list_companies(db.conn())?.len(), 3);
     Ok(())

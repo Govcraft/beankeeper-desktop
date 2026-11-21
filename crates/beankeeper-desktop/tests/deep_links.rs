@@ -33,16 +33,25 @@ fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> T
     let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
     server.initialize(Some(reader))?;
     server.pair()?;
-    let summary = link(
-        &server,
-        reader,
-        "financial-summary",
-        json!({
+    let answer = rpc(server.request(
+        "tools/call",
+        json!({"name":"financial_summary","arguments":{
             "company":"acme","currency":"USD",
             "from":"2026-10-01","to":"2026-10-31",
             "compare_from":"2026-09-01","compare_to":"2026-09-30",
             "cash_account":["1000","1100"]
-        }),
+        }}),
+        Some(reader),
+    )?)?;
+    assert_ne!(answer["result"]["isError"], true, "{answer}");
+    let target = &answer["result"]["structuredContent"]["data"]["desktop_view"]["link"];
+    let summary = link(
+        &server,
+        reader,
+        target["view_id"]
+            .as_str()
+            .ok_or("upstream summary view ID")?,
+        target["state"].clone(),
     )?;
     let summary_page = server
         .client
