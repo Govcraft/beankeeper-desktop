@@ -7,7 +7,8 @@ param(
     }),
     [switch]$NoService = ($env:BK_NO_SERVICE -eq '1'),
     [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1'),
-    [switch]$RequireSignatures = ($env:BK_REQUIRE_SIGNATURES -eq '1')
+    [switch]$RequireSignatures = ($env:BK_REQUIRE_SIGNATURES -eq '1'),
+    [switch]$RequireAgentSetup = ($env:BK_REQUIRE_AGENT_SETUP -eq '1')
 )
 $ErrorActionPreference = 'Stop'
 $Repository = 'Govcraft/beankeeper-desktop'
@@ -73,6 +74,12 @@ function Install-Beankeeper {
         $reportedVersion = & $binary --version
         if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "bk $releaseVersion") {
             throw "Downloaded binary does not report bk $releaseVersion"
+        }
+        if ($RequireAgentSetup) {
+            & $binary service install --help 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "bk $releaseVersion lacks managed service installation. Select a compatible signed release." }
+            & $binary agents connect --help 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "bk $releaseVersion lacks agent registration. Select a compatible signed release." }
         }
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         $installed = Join-Path $InstallDir 'bk.exe'

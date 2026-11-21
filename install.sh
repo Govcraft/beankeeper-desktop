@@ -10,6 +10,7 @@
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
 #   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
+#   BK_REQUIRE_AGENT_SETUP=1 - require managed service and registration commands
 
 set -eu
 
@@ -106,6 +107,13 @@ download_and_install() {
     fi
 
     tar xzf "${BK_TEMP_DIR}/${ARCHIVE}" -C "$BK_TEMP_DIR"
+    candidate="${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk"
+    if [ "${BK_REQUIRE_AGENT_SETUP:-0}" = 1 ]; then
+        if ! "$candidate" service install --help >/dev/null 2>&1 ||
+            ! "$candidate" agents connect --help >/dev/null 2>&1; then
+            fatal "bk v${VERSION} lacks managed service or agent registration commands; select a compatible signed release"
+        fi
+    fi
 
     if [ -x "${INSTALL_DIR}/bk" ] && "${INSTALL_DIR}/bk" service --help >/dev/null 2>&1; then
         "${INSTALL_DIR}/bk" service stop || fatal "could not stop the existing background service"
@@ -113,11 +121,11 @@ download_and_install() {
     mkdir -p "$INSTALL_DIR"
     if [ -w "$INSTALL_DIR" ]; then
         # Rename a complete binary so a running inode is never overwritten.
-        install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/.bk-new-$$"
+        install -m755 "$candidate" "${INSTALL_DIR}/.bk-new-$$"
         mv -f "${INSTALL_DIR}/.bk-new-$$" "${INSTALL_DIR}/bk"
     else
         info "installing to ${INSTALL_DIR} (requires sudo)..."
-        sudo install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/.bk-new-$$"
+        sudo install -m755 "$candidate" "${INSTALL_DIR}/.bk-new-$$"
         sudo mv -f "${INSTALL_DIR}/.bk-new-$$" "${INSTALL_DIR}/bk"
     fi
 }

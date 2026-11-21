@@ -172,6 +172,24 @@ sys.exit({1 if fail else 0})
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assertTrue((self.destination / "bk").is_file())
 
+    def test_agent_install_rejects_older_binary_before_replacing_installed_copy(self):
+        binary = self.root / "bk"
+        binary.write_text('#!/bin/sh\n[ "$*" = "service install --help" ]\n')
+        directory = release.stage(binary, "0.1.0", "x86_64-unknown-linux-gnu", self.root / "old-work")
+        release.compress(directory, "0.1.0", "x86_64-unknown-linux-gnu", self.fixtures)
+        release.checksums(self.fixtures)
+        self.cosign()
+        self.bundles()
+        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1")
+        installed = self.destination / "bk"
+        installed.write_text("previous executable")
+
+        result = self.run_installer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks managed service or agent registration commands", result.stderr)
+        self.assertEqual(installed.read_text(), "previous executable")
+
     def test_skill_commands_install_verified_binary_and_connect(self):
         match = re.search(r"```sh\n(.*?)```", (ROOT / "SKILL.md").read_text(), re.DOTALL)
         self.assertIsNotNone(match, "missing Linux/macOS command block")
@@ -183,6 +201,7 @@ sys.exit({1 if fail else 0})
         binary.write_text(
             '#!/bin/sh\n'
             'if [ "$*" = "--version" ]; then printf "bk 0.1.0\\n"; exit 0; fi\n'
+            'if [ "${3:-}" = --help ]; then exit 0; fi\n'
             'printf "%s\\n" "$*" >> "$BK_TEST_CALLS"\n'
         )
         fixture_curl = self.bin / "curl-fixture"
