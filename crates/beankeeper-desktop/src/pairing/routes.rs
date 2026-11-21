@@ -382,6 +382,72 @@ mod tests {
 mod destination_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn full_destination_registry_still_serves_pairing_and_remembers_the_new_view()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let bound = listener.local_addr()?;
+        let (state, _) = PairingState::new(bound)?;
+        let now = Instant::now();
+        let mut oldest_cookie = None;
+        for index in 0..super::super::MAX_ENTRIES {
+            let cookie = state.remember_destination(
+                &HeaderMap::new(),
+                "/settings".into(),
+                now - std::time::Duration::from_secs((super::super::MAX_ENTRIES - index) as u64),
+            )?;
+            if oldest_cookie.is_none() {
+                oldest_cookie = Some(cookie);
+            }
+        }
+        let app = Router::new()
+            .route("/accounts", get(|| async { "protected view" }))
+            .route_layer(middleware::from_fn_with_state(state.clone(), human_guard));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let response = reqwest::Client::new()
+            .get(format!("http://{bound}/accounts?company=acme"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .ok_or("destination cookie")?
+            .to_str()?
+            .to_owned();
+        let body = response.text().await?;
+        assert!(body.contains("Pair this browser"));
+        assert!(body.contains("Your requested view will open automatically"));
+        assert!(!body.contains("Too many pairing links"));
+        assert!(!body.contains("protected view"));
+        {
+            let registry = state.lock(Instant::now())?;
+            assert_eq!(registry.destinations.len(), super::super::MAX_ENTRIES);
+            assert!(registry.sessions.is_empty());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            oldest_cookie
+                .ok_or("oldest cookie")?
+                .split(';')
+                .next()
+                .ok_or("cookie")?
+                .parse()?,
+        );
+        assert_eq!(state.take_destination(&headers, Instant::now())?, "/");
+        headers.insert(
+            header::COOKIE,
+            cookie.split(';').next().ok_or("cookie")?.parse()?,
+        );
+        assert_eq!(
+            state.take_destination(&headers, Instant::now())?,
+            "/accounts?company=acme"
+        );
+        server.abort();
+        Ok(())
+    }
+
     #[test]
     fn destinations_expire_are_consumed_and_never_authorize_a_session()
     -> Result<(), Box<dyn std::error::Error>> {

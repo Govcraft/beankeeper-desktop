@@ -151,26 +151,6 @@ impl ReportQuery {
         Ok(())
     }
 
-    /// Validate navigation without reading ledger data, including initial filter pages.
-    pub(crate) fn validate_navigation(&self, path: &str) -> Result<(), ViewError> {
-        self.validate_address(path)?;
-        if let Some(comparison) = self.comparison() {
-            comparison.validate_navigation(path)?;
-        }
-        if path == "/reports" {
-            return Ok(());
-        }
-        let kind = Kind::parse(path)?;
-        if (kind == Kind::Reconciliation && nonempty(&self.filters.account).is_none())
-            || (kind == Kind::Budget
-                && nonempty(&self.year).is_none()
-                && nonempty(&self.filters.from).is_none())
-        {
-            return Ok(());
-        }
-        self.command(kind).map(|_| ())
-    }
-
     fn command(&self, kind: Kind) -> Result<ReportCommand, ViewError> {
         let q = &self.filters;
         q.validate()?;

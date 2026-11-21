@@ -164,10 +164,19 @@ impl PairingState {
             destination.path = path;
             return Ok(String::new());
         }
-        if registry.destinations.len() >= MAX_ENTRIES {
-            return Err(PairingError::Capacity);
-        }
         let key = Secret::generate()?;
+        // A remembered view is optional convenience, so capacity must never
+        // replace the pairing page. Expiries are fixed at insertion, making the
+        // earliest expiry the oldest entry without tracking another timestamp.
+        if registry.destinations.len() >= MAX_ENTRIES
+            && let Some(oldest) = registry
+                .destinations
+                .iter()
+                .min_by_key(|(_, destination)| destination.expires)
+                .map(|(key, _)| *key)
+        {
+            registry.destinations.remove(&oldest);
+        }
         registry.destinations.insert(
             Secret::digest(key.expose()),
             Destination {

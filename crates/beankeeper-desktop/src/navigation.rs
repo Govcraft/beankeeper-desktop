@@ -47,21 +47,16 @@ impl TabId {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 struct Show {
-    view_id: crate::links::View,
-    #[serde(default)]
-    state: crate::links::AddressState,
+    #[serde(flatten)]
+    address: crate::links::ViewAddress,
     tab_id: Option<TabId>,
 }
 
 impl Show {
     fn url(&self) -> Result<String, &'static str> {
-        crate::links::ViewAddress {
-            view_id: self.view_id,
-            state: self.state.clone(),
-        }
-        .path()
+        self.address.path()
     }
 }
 
@@ -523,6 +518,28 @@ mod tests {
     }
 
     #[test]
+    fn navigation_schema_adds_tab_selection_to_the_shared_address_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = schemars::schema_for!(Show).to_value();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["unevaluatedProperties"], false);
+        assert!(schema["properties"]["tab_id"].is_object());
+        let variants = schema["oneOf"].as_array().ok_or("view alternatives")?;
+        assert_eq!(variants.len(), 16);
+        for variant in variants {
+            // tab_id is declared by the outer object and must remain allowed.
+            assert_ne!(variant["additionalProperties"], false);
+        }
+        let input = json!({"view_id":"accounts","tab_id":"tab_01h455vb4pex5vsknk084sn02q"});
+        let show: Show = serde_json::from_value(input)?;
+        assert_eq!(show.url()?, "/accounts");
+        assert!(
+            serde_json::from_value::<Show>(json!({"view_id":"accounts","injected":true})).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn view_addresses_use_real_routes_and_validate_detail_identifiers()
     -> Result<(), Box<dyn std::error::Error>> {
         for (input, expected) in [
@@ -550,10 +567,12 @@ mod tests {
             "..",
             "transaction_01h455vb4pex5vsknk084sn02q",
         ] {
-            let show: Show = serde_json::from_value(
-                json!({"view_id":"review_detail","state":{"proposal_id":id}}),
-            )?;
-            assert!(show.url().is_err());
+            assert!(
+                serde_json::from_value::<Show>(
+                    json!({"view_id":"review_detail","state":{"proposal_id":id}}),
+                )
+                .is_err()
+            );
         }
         Ok(())
     }

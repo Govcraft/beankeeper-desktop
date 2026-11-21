@@ -23,7 +23,8 @@ credential. It returns readable text and this structured shape:
 }
 ```
 
-Other optional state fields are returned as `null`. No credential is included.
+Applicable optional state fields are returned as `null`; filters belonging to other
+views are omitted. No credential is included.
 `url` uses the actual listener port. `path` is local and URL-encoded, bounded to
 4096 bytes. Unknown views, fields, mismatched filters, invalid dates or IDs and
 oversized addresses return `isError: true` with `code: "VALIDATION"` and a
@@ -75,6 +76,43 @@ selects a view, not a download or an approval action. Record links do not verify
 existence while generating the URL; an absent record produces the view's normal
 not-found state when opened. Existing dashboard links remain supported for
 compatibility, but agents should offer the matching detail view after answering.
+
+## Address types and URL compatibility
+
+CLI flags, MCP `ui_get_link`, `ui_show_view`, and saved-URL parsing all deserialize
+into the same `ViewAddress` enum, tagged by `view_id`. Each variant owns only its
+supported filter set. The wire envelope remains `view_id` plus optional `state`;
+`ui_show_view` also accepts `tab_id`. The generated MCP schema describes each
+variant separately, including required detail IDs and rejecting unknown filters.
+`reports` with `state.report_kind` remains a compatibility spelling, represented
+by a second tagged enum with the same per-report filter types.
+
+Existing paths, query names, escaping, filter units, default selections, and
+positive integer transaction IDs remain supported. Proposal IDs reuse the upstream
+proposal TypeID. Report aliases canonicalize to the direct report path, including
+`/reconciliation`. Decimal values and numeric strings can canonicalize their sign
+or leading zeros; fractional precision is preserved. An unsupported filter key is
+now rejected even when its value is `null`; it cannot be carried into an unrelated
+view. Empty date and amount strings are invalid; omit an unused filter or use
+`null`. These changes tighten input validation without introducing a URL version.
+
+Compile-time invariants (tenet 2): the enum and per-view filter structs prevent
+attaching register filters to reports, report-specific filters to another report,
+or record IDs to another detail view. Dates, amounts, clearance, currency, account
+codes, years and IDs use types, including upstream ledger types where available.
+Validated filter sets and scalar wrappers have private fields and no unchecked
+constructors, so callers cannot mutate a validated value into an invalid one.
+
+Runtime invariants: serde parses untrusted values once into those types and checks
+relationships between values, such as chronological dates, paired comparison
+bounds, amount ordering, matching budget years and whole calendar months. These
+depend on the supplied values and cannot be proved by the compiler. Exact decimal
+precision and SQLite bounds are checked against an explicit currency at this
+boundary; when currency is omitted, the view resolves the ledger currency and
+upstream performs its currency-dependent check. Record existence also requires a
+ledger read. URL serialization only encodes the typed values and enforces the
+4096-byte resource limit; it has no view/filter validation matrix. CLI and MCP
+retain the named `VALIDATION` error for invalid link requests.
 
 ## Shared upstream identifiers
 
@@ -135,8 +173,10 @@ while the human opens the terminal's one-time pairing URL in that same browser
 and confirms **Pair this browser**. Confirmation returns to that destination,
 including its encoded filters. Opening multiple detail links before pairing
 keeps the most recently visited destination. After expiry or restart, reopen the
-original detail link before pairing. The destination lookup cookie grants no
-authority. See [pairing and recovery](browser-pairing.md#returning-to-an-optional-detail-link).
+original detail link before pairing. At the 64-entry limit, a new destination
+evicts the oldest remembered entry and the pairing page still loads. The owner
+whose entry was evicted can reopen the original link. The destination lookup
+cookie grants no authority. See [pairing and recovery](browser-pairing.md#returning-to-an-optional-detail-link).
 
 An existing paired browser arriving from chat may initially withhold its Strict
 cookie. The same-origin **continue to your requested view** link restores that

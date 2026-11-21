@@ -189,6 +189,47 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
         assert_eq!(result["result"]["isError"], true);
         assert_eq!(result["result"]["structuredContent"]["code"], "VALIDATION");
     }
+    for (view, state, flags) in [
+        (
+            "transactions",
+            json!({"from":"2026-02-30"}),
+            vec!["--from", "2026-02-30"],
+        ),
+        (
+            "transactions",
+            json!({"min_amount":"2","max_amount":"1"}),
+            vec!["--min-amount", "2", "--max-amount", "1"],
+        ),
+        (
+            "balance-sheet",
+            json!({"from":"2026-01-01"}),
+            vec!["--from", "2026-01-01"],
+        ),
+        (
+            "reports",
+            json!({"report_kind":"trend","threshold":"600"}),
+            vec!["--report-kind", "trend", "--threshold", "600"],
+        ),
+        (
+            "review_detail",
+            json!({"proposal_id":"not-a-proposal"}),
+            vec!["--proposal-id", "not-a-proposal"],
+        ),
+    ] {
+        let mcp = rpc(server.request(
+            "tools/call",
+            json!({"name":"ui_get_link","arguments":{"view_id":view,"state":state}}),
+            Some(reader),
+        )?)?;
+        let cli = clean_command()
+            .args(["--json", "ui", "link", "--view-id", view])
+            .args(flags)
+            .output()?;
+        assert!(!cli.status.success());
+        let cli: Value = serde_json::from_slice(&cli.stdout)?;
+        assert_eq!(cli["code"], "VALIDATION");
+        assert_eq!(cli, mcp["result"]["structuredContent"]);
+    }
     Ok(())
 }
 
