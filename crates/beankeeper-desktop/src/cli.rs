@@ -27,7 +27,7 @@ pub struct OpenOptions {
     pub bind: SocketAddr,
 }
 
-fn loopback_address(value: &str) -> Result<SocketAddr, String> {
+pub(crate) fn loopback_address(value: &str) -> Result<SocketAddr, String> {
     let address: SocketAddr = value
         .parse()
         .map_err(|error| format!("invalid address: {error}"))?;
@@ -46,6 +46,14 @@ pub fn command() -> Command {
         .subcommand(ServeOptions::augment_args(Command::new("serve").about(
             "Serve the embedded UI and authenticated MCP on one listener",
         )))
+        .subcommand(
+            Command::new("ui")
+                .about("Optional Desktop view links")
+                .subcommand_required(true)
+                .subcommand(crate::links::LinkOptions::augment_args(
+                    Command::new("link").about("Return a view URL without opening a browser"),
+                )),
+        )
         .subcommand(OpenOptions::augment_args(
             Command::new("open").about("Open the running Desktop UI in your default browser"),
         ))

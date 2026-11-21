@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod browser;
 pub mod cli;
 pub mod license;
+pub mod links;
 mod money;
 mod navigation;
 pub mod pairing;
@@ -22,6 +23,8 @@ use std::{error::Error, fmt, io, net::SocketAddr};
 /// Startup and browser-launch failures owned by the Desktop host.
 #[derive(Debug)]
 pub enum DesktopError {
+    /// A requested view cannot apply these filters.
+    Link(links::LinkError),
     /// License or update command failed.
     Product(product::ProductError),
     /// Onboarding could not finish safely.
@@ -47,6 +50,7 @@ pub enum DesktopError {
 impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Link(error) => write!(f, "VALIDATION: {error}"),
             Self::Product(error) => write!(f, "{error}"),
             Self::Pairing(error) => write!(f, "{error}"),
             Self::Setup(error) => write!(f, "{error}"),
@@ -76,6 +80,7 @@ impl fmt::Display for DesktopError {
 impl Error for DesktopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Link(error) => Some(error),
             Self::Product(error) => Some(error),
             Self::Pairing(error) => Some(error),
             Self::Setup(error) => Some(error),

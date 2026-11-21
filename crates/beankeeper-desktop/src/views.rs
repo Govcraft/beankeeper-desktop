@@ -19,6 +19,10 @@ const SCAN_LIMIT: usize = 1_000;
 pub(crate) struct ViewQuery {
     pub company: Option<String>,
     pub account: Option<String>,
+    pub category: Option<String>,
+    pub payee: Option<String>,
+    pub compare_from: Option<String>,
+    pub compare_to: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub min_amount: Option<String>,
@@ -159,11 +163,37 @@ fn amount(value: &Option<String>) -> Result<Option<i64>, ViewError> {
 }
 
 impl ViewQuery {
+    pub(crate) fn comparison(&self) -> Option<Self> {
+        self.compare_to.as_ref()?;
+        Some(Self {
+            from: self.compare_from.clone(),
+            to: self.compare_to.clone(),
+            compare_from: None,
+            compare_to: None,
+            offset: None,
+            ..self.clone()
+        })
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ViewError> {
-        if [nonempty(&self.from), nonempty(&self.to)]
+        if [self.compare_from.as_deref(), self.compare_to.as_deref()]
             .into_iter()
             .flatten()
             .any(|date| !valid_date(date))
+        {
+            return Err(ViewError::Invalid(
+                "Comparison dates must be valid YYYY-MM-DD calendar dates.",
+            ));
+        }
+        if [
+            nonempty(&self.from),
+            nonempty(&self.to),
+            nonempty(&self.compare_from),
+            nonempty(&self.compare_to),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|date| !valid_date(date))
         {
             return Err(ViewError::Invalid(
                 "Dates must be valid calendar dates in YYYY-MM-DD format.",
@@ -174,6 +204,15 @@ impl ViewQuery {
             return Err(ViewError::Invalid(
                 "The start date must not be after the end date.",
             ));
+        }
+        match (nonempty(&self.compare_from), nonempty(&self.compare_to)) {
+            (Some(from), Some(to)) if from <= to => {}
+            (None, None | Some(_)) => {}
+            _ => {
+                return Err(ViewError::Invalid(
+                    "Comparison requires compare_from and compare_to in chronological order.",
+                ));
+            }
         }
         if matches!((amount(&self.min_amount)?, amount(&self.max_amount)?), (Some(min), Some(max)) if min > max)
         {
@@ -198,6 +237,10 @@ impl ViewQuery {
         let mut url = format!("{path}?company={}", encode(company));
         for (name, value) in [
             ("account", &self.account),
+            ("category", &self.category),
+            ("payee", &self.payee),
+            ("compare_from", &self.compare_from),
+            ("compare_to", &self.compare_to),
             ("from", &self.from),
             ("to", &self.to),
             ("min_amount", &self.min_amount),
@@ -249,6 +292,21 @@ fn company_form(
         );
     }
     html.push_str("</select></label>");
+    for (name, value) in [
+        ("category", &query.category),
+        ("payee", &query.payee),
+        ("compare_from", &query.compare_from),
+        ("compare_to", &query.compare_to),
+    ] {
+        if let Some(value) = value {
+            let _ = write!(
+                html,
+                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                escape(value)
+            );
+        }
+    }
+
     if path == "/transactions" {
         html.push_str(&input("account", "Account code", "text", &query.account));
         html.push_str(&input("from", "From date (inclusive)", "date", &query.from));
@@ -301,6 +359,14 @@ fn company_form(
 
 pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage, ViewError> {
     query.validate()?;
+    if path == "/transactions"
+        && query.compare_to.is_some()
+        && nonempty(&query.compare_from).is_none()
+    {
+        return Err(ViewError::Invalid(
+            "Register comparison requires compare_from and compare_to.",
+        ));
+    }
     let (title, description, nav) = match path {
         "/" => (
             "Dashboard",
@@ -340,7 +406,23 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
     match path {
         "/" => dashboard(db, company, query, &mut content)?,
         "/accounts" => accounts(db, company, query, &mut content)?,
-        "/transactions" => register(db, company, query, &mut content)?,
+        "/transactions" => {
+            register(db, company, query, &mut content)?;
+            if let Some(comparison) = query.comparison() {
+                let _ = write!(
+                    content,
+                    "<section aria-label=\"Comparison period\"><h2>Comparison period: {} through {}</h2>",
+                    escape(comparison.from.as_deref().unwrap_or_default()),
+                    escape(comparison.to.as_deref().unwrap_or_default())
+                );
+                let mut comparison_html = String::new();
+                register(db, company, &comparison, &mut comparison_html)?;
+                content.push_str(
+                    &comparison_html.replace("id=\"transaction-", "id=\"comparison-transaction-"),
+                );
+                content.push_str("</section>");
+            }
+        }
         _ => {
             let id = path
                 .trim_start_matches("/transactions/")
@@ -509,10 +591,26 @@ fn matches_extra(
             return Ok(false);
         }
     }
+    if let Some(payee) = nonempty(&query.payee) {
+        let metadata = txn
+            .metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        if metadata
+            .as_ref()
+            .and_then(|value| value.get("payee"))
+            .and_then(serde_json::Value::as_str)
+            != Some(payee)
+        {
+            return Ok(false);
+        }
+    }
     let min = amount(&query.min_amount)?;
     let max = amount(&query.max_amount)?;
     Ok(entries.iter().any(|entry| {
-        nonempty(&query.account).is_none_or(|account| entry.account_code == account)
+        nonempty(&query.category)
+            .is_none_or(|category| entry.tax_category.as_deref() == Some(category))
+            && nonempty(&query.account).is_none_or(|account| entry.account_code == account)
             && nonempty(&query.status).is_none_or(|status| entry.status == status)
             && min.is_none_or(|min| entry.amount >= min)
             && max.is_none_or(|max| entry.amount <= max)
@@ -522,6 +620,7 @@ fn matches_extra(
 fn register(db: &Db, company: &str, query: &ViewQuery, html: &mut String) -> Result<(), ViewError> {
     let mut params = ListTransactionParams::for_company(company);
     params.account_filter = nonempty(&query.account);
+    params.tax_category_filter = nonempty(&query.category);
     params.from_date = nonempty(&query.from);
     params.to_date = nonempty(&query.to);
     let currency = nonempty(&query.currency)
@@ -557,6 +656,16 @@ fn register(db: &Db, company: &str, query: &ViewQuery, html: &mut String) -> Res
         }
     }
     html.push_str("<section><h2>Register</h2><p>Ordered by transaction date, then ID, oldest first. Amount and clearance filters match the same entry. Search is literal and case-insensitive.</p>");
+    for (label, value) in [
+        ("Tax category", &query.category),
+        ("Payee (exact)", &query.payee),
+        ("From date", &query.from),
+        ("Through date", &query.to),
+    ] {
+        if let Some(value) = nonempty(value) {
+            let _ = write!(html, "<p>{label}: {}.</p>", escape(value));
+        }
+    }
     transaction_table(db, &rows, company, html)?;
     let _ = write!(
         html,
@@ -961,6 +1070,15 @@ mod tests {
         assert!(page.content.contains(">Coffee</a>"));
         assert!(!page.content.contains(">Other description</a>"));
         assert!(page.content.contains("1 matching transactions shown"));
+        let category_on_other_leg = ViewQuery {
+            category: Some("sales".into()),
+            ..query.clone()
+        };
+        assert!(
+            render(&db, "/transactions", &category_on_other_leg)?
+                .content
+                .contains("0 matching transactions shown")
+        );
         // The cleared cash entry must not make the uncleared revenue account match.
         let different_account = ViewQuery {
             account: Some("4000".into()),
