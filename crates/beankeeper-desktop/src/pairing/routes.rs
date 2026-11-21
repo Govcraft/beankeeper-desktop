@@ -3,17 +3,20 @@ use std::time::Instant;
 use axum::{
     Form, Router,
     body::{Body, to_bytes},
-    extract::{FromRequest, Query, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    extract::{FromRequest, FromRequestParts, Query, Request, State},
+    handler::Handler,
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{MethodRouter, get, post},
 };
 use serde::Deserialize;
 
-use crate::markup::markup;
+use crate::{boundary::SameOrigin, markup::markup};
 
-use super::{AgentKey, PairingError, PairingState, secret::Secret};
+use super::{
+    AgentKey, HumanSession, HumanWrite, LinkKind, PairingError, PairingState, secret::Secret,
+};
 
 impl IntoResponse for PairingError {
     fn into_response(self) -> Response {
@@ -25,6 +28,57 @@ impl IntoResponse for PairingError {
         };
         (status, self.to_string()).into_response()
     }
+}
+
+impl<S: Sync> FromRequestParts<S> for HumanSession {
+    type Rejection = PairingError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .remove::<Self>()
+            .ok_or(PairingError::Unauthorized)
+    }
+}
+
+impl<S: Sync> FromRequestParts<S> for HumanWrite {
+    type Rejection = PairingError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .remove::<Self>()
+            .ok_or(PairingError::Unauthorized)
+    }
+}
+
+impl<S: Sync> FromRequestParts<S> for SameOrigin {
+    type Rejection = PairingError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .remove::<Self>()
+            .ok_or(PairingError::Unauthorized)
+    }
+}
+
+/// Axum handler arguments for protected POST routes. The first tuple entry is
+/// axum's marker; the first request extractor must carry write authorization.
+pub(crate) trait HumanPostArgs {}
+
+impl<M> HumanPostArgs for (M, HumanWrite) {}
+impl<M, A> HumanPostArgs for (M, HumanWrite, A) {}
+impl<M, A, B> HumanPostArgs for (M, HumanWrite, A, B) {}
+impl<M, A, B, C> HumanPostArgs for (M, HumanWrite, A, B, C) {}
+
+pub(crate) fn human_post<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: Handler<T, S>,
+    T: HumanPostArgs + 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    post(handler)
 }
 
 #[derive(Deserialize)]
@@ -50,9 +104,9 @@ struct Association {
 
 pub(crate) fn router(state: PairingState) -> Router {
     Router::new()
-        .route("/api/session/logout", post(logout))
-        .route("/api/session/pairing", post(new_link))
-        .route("/api/session/associate", post(associate))
+        .route("/api/session/logout", human_post(logout))
+        .route("/api/session/pairing", human_post(new_link))
+        .route("/api/session/associate", human_post(associate))
         .route_layer(middleware::from_fn_with_state(state.clone(), human_guard))
         .route("/pair", get(pair).post(pair_browser))
         .with_state(state)
@@ -72,7 +126,7 @@ async fn pair(
             let link = registry
                 .links
                 .get(&Secret::digest(&token))
-                .filter(|link| link.agent.is_none())
+                .filter(|link| matches!(link.kind, LinkKind::Browser))
                 .ok_or(PairingError::InvalidLink)?;
             // Displaying a link must never consume it: browsers and link handlers
             // may issue speculative or duplicate GETs before the human sees it.
@@ -85,7 +139,7 @@ async fn pair(
             let link = registry
                 .links
                 .get(&Secret::digest(&invite))
-                .filter(|link| link.agent.is_some())
+                .filter(|link| matches!(link.kind, LinkKind::AgentInvite(_)))
                 .ok_or(PairingError::InvalidLink)?;
             let session = match session {
                 Ok(session) => session,
@@ -100,7 +154,7 @@ async fn pair(
                 }
                 Err(error) => return Err(error),
             };
-            Ok(crate::ui::message("Connect your agent", markup!("<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>", session.csrf.expose(), link.secret.expose())).into_response())
+            Ok(crate::ui::message("Connect your agent", markup!("<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>", session.csrf_token(), link.secret.expose())).into_response())
         }
         _ => Err(PairingError::InvalidLink),
     }
@@ -108,26 +162,14 @@ async fn pair(
 
 async fn pair_browser(
     State(state): State<PairingState>,
+    origin: SameOrigin,
     headers: HeaderMap,
     Form(form): Form<BrowserPairing>,
 ) -> Result<Response, PairingError> {
     if headers.contains_key(header::AUTHORIZATION) {
         return Err(PairingError::Unauthorized);
     }
-    let authority = headers
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .ok_or(PairingError::Unauthorized)?;
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    // There is no session CSRF token before pairing. The unpredictable one-use
-    // token and an exact Origin check protect this initial form submission.
-    if origins.next().and_then(|origin| origin.to_str().ok())
-        != Some(format!("http://{authority}").as_str())
-        || origins.next().is_some()
-    {
-        return Err(PairingError::Unauthorized);
-    }
-    let cookie = state.redeem(&form.token, authority, Instant::now())?;
+    let cookie = state.redeem(&form.token, &origin, Instant::now())?;
     let destination = state.take_destination(&headers, Instant::now())?;
     let mut response = Redirect::to(&destination).into_response();
     response.headers_mut().insert(
@@ -142,7 +184,7 @@ async fn pair_browser(
     Ok(response)
 }
 
-/// Applied to all browser routes, so future cookie writes inherit both checks.
+/// Authenticates browser routes and provides the proof required by their handlers.
 pub(crate) async fn human_guard(
     State(state): State<PairingState>,
     mut request: Request,
@@ -165,6 +207,11 @@ pub(crate) async fn human_guard(
             *request.method(),
             Method::GET | Method::HEAD | Method::OPTIONS
         ) {
+            let origin = request
+                .extensions()
+                .get::<SameOrigin>()
+                .cloned()
+                .ok_or(PairingError::Unauthorized)?;
             let csrf = if let Some(token) = request.headers().get("x-csrf-token") {
                 if request.headers().get_all("x-csrf-token").iter().count() != 1 {
                     return Err(PairingError::Unauthorized);
@@ -188,9 +235,11 @@ pub(crate) async fn human_guard(
                     .0
                     .csrf
             };
-            state.authorize_write(request.headers(), &csrf, now)?;
+            let write = state.authorize_write(session, &origin, &csrf, Instant::now())?;
+            request.extensions_mut().insert(write);
+        } else {
+            request.extensions_mut().insert(session);
         }
-        request.extensions_mut().insert(session);
         Ok::<_, PairingError>(request)
     }
     .await;
@@ -225,13 +274,13 @@ pub(crate) async fn human_guard(
 }
 
 async fn logout(
+    write: HumanWrite,
     State(state): State<PairingState>,
-    headers: HeaderMap,
 ) -> Result<Response, PairingError> {
     state
         .lock(Instant::now())?
         .sessions
-        .remove(&Secret::digest(state.cookie(&headers)?));
+        .remove(&write.session().cookie_key);
     let mut response = Redirect::to("/").into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -244,7 +293,10 @@ async fn logout(
     Ok(response)
 }
 
-async fn new_link(State(state): State<PairingState>) -> Result<Html<String>, PairingError> {
+async fn new_link(
+    _write: HumanWrite,
+    State(state): State<PairingState>,
+) -> Result<Html<String>, PairingError> {
     let url = state.browser_link(Instant::now())?;
     Ok(crate::ui::message(
         "Pair another browser",
@@ -257,11 +309,11 @@ async fn new_link(State(state): State<PairingState>) -> Result<Html<String>, Pai
 }
 
 async fn associate(
+    write: HumanWrite,
     State(state): State<PairingState>,
-    headers: HeaderMap,
     Form(form): Form<Association>,
 ) -> Result<Redirect, PairingError> {
-    state.associate(&headers, &form.invite, Instant::now())?;
+    state.associate(&write, &form.invite, Instant::now())?;
     Ok(Redirect::to("/"))
 }
 
@@ -326,6 +378,26 @@ pub(crate) async fn mcp_guard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boundary::{LocalBoundary, LocalOrigin};
+
+    #[tokio::test]
+    async fn protected_post_requires_the_middleware_proof() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let bound = listener.local_addr()?;
+        let app = Router::new().route(
+            "/protected",
+            human_post(|_: HumanWrite| async { StatusCode::NO_CONTENT }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let result = reqwest::Client::new()
+            .post(format!("http://{bound}/protected"))
+            .send()
+            .await;
+        server.abort();
+        assert_eq!(result?.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn token_expiring_after_the_confirmation_page_cannot_be_redeemed()
@@ -335,6 +407,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "127.0.0.1:8750".parse()?);
         headers.insert(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
+        let Some(LocalOrigin::Same(origin)) = LocalBoundary::new(8750).check(&headers) else {
+            return Err("local same-origin request".into());
+        };
         let page = pair(
             State(state.clone()),
             headers.clone(),
@@ -356,6 +431,7 @@ mod tests {
             .expires = now;
         let response = pair_browser(
             State(state.clone()),
+            origin,
             headers,
             Form(BrowserPairing {
                 token: token.into(),

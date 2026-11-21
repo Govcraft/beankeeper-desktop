@@ -1,5 +1,7 @@
 //! Strict listener-wide Host and same-origin validation.
 
+use std::sync::Arc;
+
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
@@ -10,7 +12,22 @@ use axum::{
 /// Local HTTP authorities accepted on the listener's actual bound port.
 #[derive(Clone, Debug)]
 pub struct LocalBoundary {
-    authorities: [String; 3],
+    authorities: [Arc<str>; 3],
+}
+
+pub(crate) enum LocalOrigin {
+    Absent,
+    Same(SameOrigin),
+}
+
+/// This request supplied the same Origin as its validated local Host.
+#[derive(Clone)]
+pub(crate) struct SameOrigin(Arc<str>);
+
+impl SameOrigin {
+    pub(crate) fn authority(&self) -> &str {
+        &self.0
+    }
 }
 
 impl LocalBoundary {
@@ -19,16 +36,16 @@ impl LocalBoundary {
     pub fn new(port: u16) -> Self {
         Self {
             authorities: [
-                format!("127.0.0.1:{port}"),
-                format!("localhost:{port}"),
-                format!("[::1]:{port}"),
+                format!("127.0.0.1:{port}").into(),
+                format!("localhost:{port}").into(),
+                format!("[::1]:{port}").into(),
             ],
         }
     }
 
     /// Exact hosts for the upstream MCP transport's defense in depth.
     pub fn authorities(&self) -> impl Iterator<Item = &str> {
-        self.authorities.iter().map(String::as_str)
+        self.authorities.iter().map(AsRef::as_ref)
     }
 
     /// Exact origins for the upstream MCP transport.
@@ -42,31 +59,41 @@ impl LocalBoundary {
     /// this request's validated Host, including scheme and actual bound port.
     #[must_use]
     pub fn accepts(&self, headers: &HeaderMap) -> bool {
+        self.check(headers).is_some()
+    }
+
+    pub(crate) fn check(&self, headers: &HeaderMap) -> Option<LocalOrigin> {
         let mut hosts = headers.get_all(header::HOST).iter();
-        let Some(host) = hosts.next().and_then(|host| host.to_str().ok()) else {
-            return false;
-        };
-        if hosts.next().is_some() || !self.authorities().any(|allowed| allowed == host) {
-            return false;
+        let host = hosts.next()?.to_str().ok()?;
+        if hosts.next().is_some() {
+            return None;
         }
+        let authority = self
+            .authorities
+            .iter()
+            .find(|allowed| allowed.as_ref() == host)?;
         let mut origins = headers.get_all(header::ORIGIN).iter();
         let Some(origin) = origins.next() else {
-            return true;
+            return Some(LocalOrigin::Absent);
         };
-        origins.next().is_none()
-            && origin
-                .to_str()
-                .is_ok_and(|origin| origin == format!("http://{host}"))
+        let origin = origin.to_str().ok()?;
+        if origins.next().is_some() || origin.strip_prefix("http://") != Some(host) {
+            return None;
+        }
+        Some(LocalOrigin::Same(SameOrigin(Arc::clone(authority))))
     }
 }
 
 pub(crate) async fn guard(
     State(boundary): State<LocalBoundary>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let pairing_url = request.uri().path() == "/pair";
-    let mut response = if boundary.accepts(request.headers()) {
+    let mut response = if let Some(origin) = boundary.check(request.headers()) {
+        if let LocalOrigin::Same(proof) = origin {
+            request.extensions_mut().insert(proof);
+        }
         next.run(request).await
     } else {
         (
