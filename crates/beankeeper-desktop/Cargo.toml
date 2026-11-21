@@ -52,3 +52,6 @@ tempfile = "3.27.0"
 [target."cfg(windows)".dependencies]
 self-replace = "1.5.1"
 windows-permissions = "0.2.4"
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }

@@ -11,6 +11,11 @@ use beankeeper_cli::cli::Cli;
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::NamedTempFile;
 
+use crate::private_file::PrivateFile;
+
+#[cfg(unix)]
+const PASSPHRASE_FILE_LIMIT: usize = 64 * 1024;
+
 /// Native credential service name, shared across supported operating systems.
 pub const SERVICE: &str = "beankeeper-desktop";
 
@@ -42,7 +47,7 @@ pub fn restrict_file(path: &Path) -> io::Result<()> {
         "private credential files are unsupported on this platform",
     ));
     #[cfg(any(unix, windows))]
-    validate_private_file(path)
+    PrivateFile::open(path).map(drop)
 }
 
 /// Protect a staging directory before the ledger is initialized inside it.
@@ -89,76 +94,6 @@ fn restrict_windows_acl(path: &Path) -> io::Result<()> {
         Some(dacl),
         None,
     )?;
-    Ok(())
-}
-
-/// Refuse credentials readable by other users or reached through a symlink.
-///
-/// # Errors
-/// Returns an error for unsafe permissions or inaccessible files.
-pub fn validate_private_file(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    let denied = || {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "credential file is not private to the current user",
-        )
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(denied());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(denied());
-        }
-    }
-    #[cfg(windows)]
-    {
-        use windows_permissions::{
-            LocalBox, Sid,
-            constants::{AceType, SeObjectType, SecurityInformation},
-            utilities, wrappers,
-        };
-        let user = utilities::current_process_sid()?;
-        let system: LocalBox<Sid> = "SY".parse()?;
-        let descriptor = wrappers::GetNamedSecurityInfo(
-            path,
-            SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Owner | SecurityInformation::Dacl,
-        )?;
-        if !descriptor
-            .owner()
-            .is_some_and(|owner| owner == user.as_ref() || owner == system.as_ref())
-        {
-            return Err(denied());
-        }
-        let sddl = wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
-            &descriptor,
-            SecurityInformation::Dacl,
-        )?;
-        if !sddl.to_string_lossy().starts_with("D:P") {
-            return Err(denied());
-        }
-        let dacl = descriptor.dacl().ok_or_else(denied)?;
-        for index in 0..dacl.len() {
-            let ace = dacl.get_ace(index).ok_or_else(denied)?;
-            if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
-                || !ace
-                    .sid()
-                    .is_some_and(|sid| sid == user.as_ref() || sid == system.as_ref())
-            {
-                return Err(denied());
-            }
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private credential files are unsupported on this platform",
-    ));
-    #[cfg(any(unix, windows))]
     Ok(())
 }
 
@@ -316,17 +251,25 @@ impl FileSecretStore {
 }
 
 #[cfg(unix)]
-fn check_private(path: &Path, directory: bool) -> Result<(), KeychainError> {
+fn check_private_parent(path: &Path) -> Result<(), KeychainError> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
-        || (directory && !metadata.is_dir())
-        || (!directory && !metadata.is_file())
+        || !metadata.is_dir()
         || metadata.permissions().mode() & 0o077 != 0
     {
         return Err(KeychainError::InsecureFile);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn file_store_error(error: io::Error) -> KeychainError {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        KeychainError::InsecureFile
+    } else {
+        KeychainError::Io(error)
+    }
 }
 
 #[cfg(unix)]
@@ -344,9 +287,11 @@ impl SecretStore for FileSecretStore {
             use std::os::unix::fs::DirBuilderExt;
             builder.recursive(true).mode(0o700).create(parent)?;
         }
-        check_private(parent, true)?;
-        if self.path.symlink_metadata().is_ok() {
-            check_private(&self.path, false)?;
+        check_private_parent(parent)?;
+        match PrivateFile::open(&self.path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(file_store_error(error)),
         }
         let mut pending = NamedTempFile::new_in(parent)?;
         pending
@@ -366,14 +311,13 @@ impl SecretStore for FileSecretStore {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        match fs::symlink_metadata(&self.path) {
+        let file = match PrivateFile::open(&self.path) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        check_private(parent, true)?;
-        check_private(&self.path, false)?;
-        let passphrase = SecretString::from(fs::read_to_string(&self.path)?);
+            Err(error) => return Err(file_store_error(error)),
+        };
+        check_private_parent(parent)?;
+        let passphrase = file.read_secret(PASSPHRASE_FILE_LIMIT)?;
         validate_passphrase(&passphrase)?;
         Ok(Some(passphrase))
     }
@@ -565,14 +509,14 @@ mod tests {
         let path = directory.path().join("credential");
         fs::write(&path, b"")?;
         restrict_file(&path)?;
-        validate_private_file(&path)?;
+        PrivateFile::open(&path)?;
         assert!(restrict_file(directory.path()).is_err());
-        assert!(validate_private_file(directory.path()).is_err());
+        assert!(PrivateFile::open(directory.path()).is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt, symlink};
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
-            assert!(validate_private_file(&path).is_err());
+            assert!(PrivateFile::open(&path).is_err());
             let link = directory.path().join("link");
             symlink(&path, &link)?;
             assert!(restrict_file(&link).is_err());

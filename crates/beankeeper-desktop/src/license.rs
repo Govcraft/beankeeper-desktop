@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt, fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     num::NonZeroU32,
     path::Path,
     str::FromStr,
@@ -18,11 +18,14 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Datelike, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
 use mti::prelude::MagicTypeId;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+
+use crate::private_file::PrivateFile;
 
 const FORMAT: &str = "beankeeper-license-v1";
 const MAX_PAYLOAD: usize = 16_384;
-const MAX_FILE: u64 = 32_768;
+const MAX_FILE: usize = 32_768;
 
 /// A validated service-issued license TypeID.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +159,7 @@ pub fn verify_offline(bytes: &[u8], keys: &TrustedKeys) -> Result<LicenseClaims,
     if keys.0.is_empty() {
         return Err(LicenseError::Unconfigured);
     }
-    if bytes.len() as u64 > MAX_FILE {
+    if bytes.len() > MAX_FILE {
         return Err(LicenseError::TooLarge);
     }
     let envelope: Envelope =
@@ -211,8 +214,8 @@ pub fn activate(
         fs::create_dir_all(parent)?;
         crate::setup::keychain::restrict_directory(parent)?;
     }
-    match fs::symlink_metadata(path) {
-        Ok(_) => crate::setup::keychain::validate_private_file(path)?,
+    match PrivateFile::open(path) {
+        Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -229,16 +232,19 @@ pub fn activate(
 /// # Errors
 /// Refuses insecure files, malformed content, and licenses no longer trusted.
 pub fn load(path: &Path, keys: &TrustedKeys) -> Result<Option<LicenseClaims>, LicenseError> {
-    match fs::symlink_metadata(path) {
+    let file = match PrivateFile::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
-        Ok(_) => crate::setup::keychain::validate_private_file(path)?,
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MAX_FILE + 1)
-        .read_to_end(&mut bytes)?;
-    verify_offline(&bytes, keys).map(Some)
+    };
+    let bytes = file.read_bytes(MAX_FILE).map_err(|error| {
+        if error.kind() == io::ErrorKind::FileTooLarge {
+            LicenseError::TooLarge
+        } else {
+            error.into()
+        }
+    })?;
+    verify_offline(bytes.expose_secret(), keys).map(Some)
 }
 
 fn valid_key_id(value: &str) -> bool {
@@ -455,7 +461,7 @@ mod tests {
             }
             assert!(verify_offline(&serde_json::to_vec(&envelope)?, &keys()).is_err());
         }
-        assert!(verify_offline(&vec![b' '; MAX_FILE as usize + 1], &keys()).is_err());
+        assert!(verify_offline(&vec![b' '; MAX_FILE + 1], &keys()).is_err());
         assert!(TrustedKeys::from_json(b"{}").is_err());
         assert!(decode("AA=").is_err());
         assert!(decode("AB").is_err());

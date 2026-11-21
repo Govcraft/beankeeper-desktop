@@ -22,7 +22,10 @@ use beankeeper_cli::{
 use clap::{Args, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
+
+const SETUP_METADATA_LIMIT: usize = 64 * 1024;
 
 /// Least-privilege grants for the user's MCP client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -232,7 +235,7 @@ fn run_with_store(
         }
     }
     if kit.exists() {
-        keychain::validate_private_file(&kit)?;
+        PrivateFile::open(&kit)?;
     }
     let supplied = passphrase::resolve_passphrase(
         cli.passphrase.passphrase_fd,
@@ -291,7 +294,7 @@ fn run_with_store(
             .transpose()?;
         let metadata = serde_json::json!({"secret_store_file": file_store});
         if marker.exists() {
-            keychain::validate_private_file(&marker)?;
+            PrivateFile::open(&marker)?;
             let mut pending = tempfile::NamedTempFile::new_in(
                 marker
                     .parent()
@@ -327,8 +330,7 @@ fn run_with_store(
     }
     if !options.no_open {
         if options.no_start {
-            keychain::validate_private_file(&token_file)?;
-            let token = fs::read_to_string(&token_file)?;
+            let token = PrivateFile::open(&token_file)?.read_secret(BEARER_FILE_LIMIT)?;
             if !running_for_ledger(options.bind, &token)? {
                 return Err(crate::DesktopError::NotRunning(crate::server::local_url(
                     options.bind,
@@ -349,9 +351,8 @@ fn provision(
 ) -> Result<(), SetupError> {
     let conn = db.conn();
     if token_file.exists() {
-        keychain::validate_private_file(token_file)?;
-        let raw = fs::read_to_string(token_file)?;
-        let agent = identity::verify(conn, raw.trim())?;
+        let raw = PrivateFile::open(token_file)?.read_secret(BEARER_FILE_LIMIT)?;
+        let agent = identity::verify(conn, raw.expose_secret().trim())?;
         if agent.capabilities() != options.preset.capabilities() {
             return Err(SetupError::Invalid(
                 "existing token has a different preset; use upstream agent issuance for explicit credential changes",
@@ -368,13 +369,12 @@ fn provision(
     let actor = if db::policy::get(conn)?.enforce
         || roots.as_array().is_some_and(|rows| !rows.is_empty())
     {
-        keychain::validate_private_file(owner_file)?;
-        let raw = fs::read_to_string(owner_file).map_err(|_| {
+        let raw = PrivateFile::open(owner_file)?.read_secret(BEARER_FILE_LIMIT).map_err(|_| {
             SetupError::Invalid(
                 "existing ledger requires its owner credential; recover it before resuming setup",
             )
         })?;
-        let owner = identity::verify(conn, raw.trim())?;
+        let owner = identity::verify(conn, raw.expose_secret().trim())?;
         if !owner.allows(beankeeper_cli::capability::Capability::Admin)? {
             return Err(SetupError::Invalid("owner credential lacks ledger/admin"));
         }
@@ -547,8 +547,7 @@ fn super_start(
     };
     // Accept an existing server only if it authenticates this ledger's token.
     let token_path = cli.db.with_extension("agent-token");
-    keychain::validate_private_file(&token_path)?;
-    let token = fs::read_to_string(&token_path)?;
+    let token = PrivateFile::open(&token_path)?.read_secret(BEARER_FILE_LIMIT)?;
     if running_for_ledger(options.bind, &token)? {
         return Ok(());
     }
@@ -630,12 +629,13 @@ fn registered_store(ledger: &Path) -> Result<Option<Box<dyn SecretStore>>, Setup
         return Ok(None);
     }
     let marker = keychain::canonical_ledger(ledger)?.with_extension("desktop.json");
-    if !marker.exists() {
-        return Ok(None);
-    }
-    keychain::validate_private_file(&marker)?;
-    let bytes = fs::read(marker)?;
-    let metadata: serde_json::Value = serde_json::from_slice(&bytes)
+    let file = match PrivateFile::open(&marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let bytes = file.read_bytes(SETUP_METADATA_LIMIT)?;
+    let metadata: serde_json::Value = serde_json::from_slice(bytes.expose_secret())
         .map_err(|_| SetupError::Invalid("invalid Desktop setup metadata"))?;
     let store: Box<dyn SecretStore> = match metadata.get("secret_store_file") {
         Some(serde_json::Value::String(path)) => Box::new(FileSecretStore::new(path.into())),
@@ -645,7 +645,7 @@ fn registered_store(ledger: &Path) -> Result<Option<Box<dyn SecretStore>>, Setup
     Ok(Some(store))
 }
 
-fn running_for_ledger(bind: SocketAddr, token: &str) -> Result<bool, SetupError> {
+fn running_for_ledger(bind: SocketAddr, token: &SecretString) -> Result<bool, SetupError> {
     if crate::browser::open_with(bind, |_| Ok(())).is_err() {
         return Ok(false);
     }
@@ -656,7 +656,7 @@ fn running_for_ledger(bind: SocketAddr, token: &str) -> Result<bool, SetupError>
         .build()
         .map_err(crate::DesktopError::from)?;
     let url = format!("{}mcp", crate::server::local_url(bind));
-    let response = client.post(&url).bearer_auth(token)
+    let response = client.post(&url).bearer_auth(token.expose_secret().trim())
         .header("Accept", "application/json, text/event-stream")
         .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"desktop-setup","version":env!("CARGO_PKG_VERSION")}
@@ -675,7 +675,7 @@ fn running_for_ledger(bind: SocketAddr, token: &str) -> Result<bool, SetupError>
         ))?;
     let _ = client
         .delete(&url)
-        .bearer_auth(token)
+        .bearer_auth(token.expose_secret().trim())
         .header("Mcp-Session-Id", session)
         .header("MCP-Protocol-Version", "2025-11-25")
         .send();

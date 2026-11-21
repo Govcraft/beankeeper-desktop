@@ -1,15 +1,17 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
     license::{self, LicenseClaims, LicenseError, TrustedKeys},
+    private_file::PrivateFile,
     updates::{self, UpdateError},
 };
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
+use secrecy::{ExposeSecret, SecretString};
 use std::{
     error::Error,
     fmt, fs,
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -258,9 +260,19 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-fn redeem(code_file: &std::path::Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
-    use secrecy::ExposeSecret;
+fn read_redemption_secret(path: &Path) -> Result<SecretString, ProductError> {
+    PrivateFile::open(path)?
+        .read_secret(4096)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::FileTooLarge => {
+                ProductError::Configuration("license input exceeds size limit")
+            }
+            io::ErrorKind::InvalidData => ProductError::Redemption,
+            _ => error.into(),
+        })
+}
 
+fn redeem(code_file: &Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
     let service = license_service_origin()?;
     let mut url = reqwest::Url::parse(&service)
         .map_err(|_| ProductError::Configuration("invalid license service URL"))?;
@@ -281,18 +293,12 @@ fn redeem(code_file: &std::path::Path, storefront: &str) -> Result<Vec<u8>, Prod
         ));
     }
     url.set_path("/api/v1/licenses/redeem");
-    crate::setup::keychain::validate_private_file(code_file)?;
-    let code = secrecy::SecretString::from(
-        String::from_utf8(bounded_file(code_file, 4096)?).map_err(|_| ProductError::Redemption)?,
-    );
+    let code = read_redemption_secret(code_file)?;
     let recovery_token = if storefront == "etsy" {
         let path = std::env::var_os("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE")
             .map(PathBuf::from)
             .ok_or(ProductError::Configuration("Etsy redemption requires BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE; retain this separate private recovery credential before redeeming a single-use code"))?;
-        crate::setup::keychain::validate_private_file(&path)?;
-        let token = secrecy::SecretString::from(
-            String::from_utf8(bounded_file(&path, 4096)?).map_err(|_| ProductError::Redemption)?,
-        );
+        let token = read_redemption_secret(&path)?;
         let value = token.expose_secret().trim();
         if !(32..=512).contains(&value.len()) || value == code.expose_secret().trim() {
             return Err(ProductError::Configuration(
