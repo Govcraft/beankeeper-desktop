@@ -189,27 +189,7 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
         assert!(detail.contains(expected), "missing {expected}");
     }
     let db = fixture.ledger.db()?;
-    let before: i64 = db
-        .conn()
-        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
-    db.conn().execute_batch("CREATE TRIGGER fixture_reject_post BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'fixture posting failure'); END;")?;
-    assert_eq!(
-        decision(&server, &id, "approve", csrf(&html)?)
-            .send()?
-            .status(),
-        500
-    );
-    assert_eq!(transaction_count(&db)?, 0);
-    assert_eq!(proposals::get(db.conn(), "acme", &id)?.status, "pending");
-    let after: i64 = db
-        .conn()
-        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
-    assert_eq!(
-        before, after,
-        "failed posting must not leave a resolution audit"
-    );
-    db.conn()
-        .execute_batch("DROP TRIGGER fixture_reject_post;")?;
+    assert_rejected_insert_is_atomic(&db, &server, &id, csrf(&html)?)?;
     let response = decision(&server, &id, "approve", csrf(&html)?).send()?;
     assert_eq!(response.status(), 303);
     assert_eq!(
@@ -562,5 +542,33 @@ fn generated_proposal_link_opens_the_exact_pending_review() -> TestResult {
     let html = server.client.get(url).send()?.error_for_status()?.text()?;
     assert!(html.contains(&id));
     assert!(html.contains("deep-linked-proposal"));
+    Ok(())
+}
+
+fn assert_rejected_insert_is_atomic(
+    db: &Db,
+    server: &Server,
+    id: &str,
+    csrf_token: &str,
+) -> TestResult {
+    let before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+    db.conn().execute_batch("CREATE TRIGGER fixture_reject_post BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'fixture posting failure'); END;")?;
+    assert_eq!(
+        decision(server, id, "approve", csrf_token).send()?.status(),
+        500
+    );
+    assert_eq!(transaction_count(db)?, 0);
+    assert_eq!(proposals::get(db.conn(), "acme", id)?.status, "pending");
+    let after: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+    assert_eq!(
+        before, after,
+        "failed posting must not leave a resolution audit"
+    );
+    db.conn()
+        .execute_batch("DROP TRIGGER fixture_reject_post;")?;
     Ok(())
 }

@@ -96,6 +96,7 @@ fn settings_ignores_other_version_and_legacy_update_results_without_rewriting_ca
 fn settings_shows_verified_license_status_and_specific_failures() -> TestResult {
     let ledger = Ledger::new()?;
     let directory = tempfile::tempdir()?;
+    let state_dir = directory.path().join("desktop-state");
     let keys_path = directory.path().join("keys.json");
     let input_path = directory.path().join("license.json");
     std::fs::write(
@@ -106,12 +107,12 @@ fn settings_shows_verified_license_status_and_specific_failures() -> TestResult 
     let mut command = ledger.command();
     command
         .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
         .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path);
     let mut server = Server::launch(command)?;
     let settings = format!("{}/settings", server.base);
     assert_eq!(server.client.get(&settings).send()?.status(), 401);
     server.pair()?;
-    let state_dir = server._cwd.path().join("desktop-state");
     let activated = clean_command()
         .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
         .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path)
@@ -345,16 +346,7 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
             .get("access-control-allow-origin")
             .is_none()
     );
-    // Exercise duplicate Host handling in the actual HTTP parser/guard too.
-    let mut stream = std::net::TcpStream::connect(authority)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    write!(
-        stream,
-        "GET / HTTP/1.1\r\nHost: {authority}\r\nHost: evil.example\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut status = String::new();
-    BufReader::new(stream).read_line(&mut status)?;
-    assert!(status.contains("400") || status.contains("403"), "{status}");
+    assert_duplicate_hosts_rejected(authority)?;
     Ok(())
 }
 
@@ -1022,33 +1014,7 @@ fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> Tes
             .text()?
             .contains("Acme")
     );
-    // A browser cookie alone cannot authorize MCP; invalid bearers also fail.
-    for bearer in [None, Some("invalid")] {
-        assert_eq!(
-            server.request("tools/list", json!({}), bearer)?.status(),
-            401
-        );
-    }
-    for path in [
-        "/transactions?from=2026-02-30",
-        "/transactions?offset=garbage",
-    ] {
-        assert_eq!(
-            server
-                .client
-                .get(format!("{}{path}", server.base))
-                .send()?
-                .status(),
-            400
-        );
-    }
-    let html = server.client.get(&server.base).send()?.text()?;
-    assert_eq!(
-        human_post(&server, "/accounts", format!("csrf={}", csrf_from(&html)?))
-            .send()?
-            .status(),
-        405
-    );
+    assert_paired_browser_boundary(&server)?;
     Ok(())
 }
 
@@ -1185,5 +1151,50 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
     assert!(snapshot.contains("You can ask your agent"));
     assert!(snapshot.contains("href=\"/reports?company=acme"));
     assert!(!snapshot.contains("Recent activity"));
+    Ok(())
+}
+
+fn assert_duplicate_hosts_rejected(authority: &str) -> TestResult {
+    // Exercise duplicate Host handling in the actual HTTP parser/guard too.
+    let mut stream = std::net::TcpStream::connect(authority)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: {authority}\r\nHost: evil.example\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut status = String::new();
+    BufReader::new(stream).read_line(&mut status)?;
+    assert!(status.contains("400") || status.contains("403"), "{status}");
+    Ok(())
+}
+
+fn assert_paired_browser_boundary(server: &Server) -> TestResult {
+    // A browser cookie alone cannot authorize MCP; invalid bearers also fail.
+    for bearer in [None, Some("invalid")] {
+        assert_eq!(
+            server.request("tools/list", json!({}), bearer)?.status(),
+            401
+        );
+    }
+    for path in [
+        "/transactions?from=2026-02-30",
+        "/transactions?offset=garbage",
+    ] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}{path}", server.base))
+                .send()?
+                .status(),
+            400
+        );
+    }
+    let html = server.client.get(&server.base).send()?.text()?;
+    assert_eq!(
+        human_post(server, "/accounts", format!("csrf={}", csrf_from(&html)?))
+            .send()?
+            .status(),
+        405
+    );
     Ok(())
 }

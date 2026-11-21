@@ -26,7 +26,7 @@ const STYLE: &str = include_str!("../../../ui/style.css");
 const SESSION_CONTROLS: &str = include_str!("../../../ui/session.html");
 pub(crate) const HEALTH: &str = "beankeeper-desktop-v1";
 
-pub(crate) fn page(title: &str, description: &str, path: &str, content: Markup) -> Html<String> {
+pub(crate) fn page(title: &str, description: &str, path: &str, content: &Markup) -> Html<String> {
     let mut navigation = Markup::default();
     for (href, label) in [
         ("/", "Your books"),
@@ -59,7 +59,7 @@ pub(crate) fn session_controls(session: &HumanSession) -> Markup {
     markup!(SESSION_CONTROLS, connection, csrf, csrf)
 }
 
-pub(crate) fn message(title: &str, content: Markup) -> Html<String> {
+pub(crate) fn message(title: &str, content: &Markup) -> Html<String> {
     page(title, "", "", content)
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
                     "License and updates",
                     "Offline license and last update check",
                     "/settings",
-                    markup!("<pre>{}</pre>{}", status, session_controls(&session)),
+                    &markup!("<pre>{}</pre>{}", status, session_controls(&session)),
                 )
             }),
         )
@@ -114,20 +114,17 @@ async fn report(
     uri: Uri,
     query: Result<Query<ReportQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let mut query = match query {
-        Ok(Query(query)) => query,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                page(
-                    "Invalid report filters",
-                    "Check the URL filters and try again.",
-                    "/reports",
-                    markup!("<p><a href=\"/reports\">Choose a report</a></p>"),
-                ),
-            )
-                .into_response();
-        }
+    let Ok(Query(mut query)) = query else {
+        return (
+            StatusCode::BAD_REQUEST,
+            page(
+                "Invalid report filters",
+                "Check the URL filters and try again.",
+                "/reports",
+                &markup!("<p><a href=\"/reports\">Choose a report</a></p>"),
+            ),
+        )
+            .into_response();
     };
     if query.filters.company.is_none() {
         query.filters.company = state.company;
@@ -147,7 +144,7 @@ async fn report(
             view.title,
             view.description,
             view.nav,
-            with_session(view.content, &session),
+            &with_session(view.content, &session),
         )
         .into_response(),
         Ok(Ok(Ok(ReportResponse::Download {
@@ -175,7 +172,7 @@ async fn report(
                     "Unable to display this report",
                     &error.to_string(),
                     "/reports",
-                    markup!(
+                    &markup!(
                         "<p><a href=\"/reports\">Choose a report</a> and check your filters.</p>"
                     ),
                 ),
@@ -188,7 +185,7 @@ async fn report(
                 "Ledger unavailable",
                 "The ledger could not be read. Check the server terminal and try again.",
                 "/reports",
-                Markup::default(),
+                &Markup::default(),
             ),
         )
             .into_response(),
@@ -201,23 +198,20 @@ async fn view(
     uri: Uri,
     query: Result<Query<ViewQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let mut query = match query {
-        Ok(Query(query)) => query,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                page(
-                    "Invalid filters",
-                    "Check your URL filters and try again.",
-                    "",
-                    markup!(
-                        "<p><a href=\"/transactions\">Reset register filters</a></p>{}",
-                        session_controls(&session)
-                    ),
+    let Ok(Query(mut query)) = query else {
+        return (
+            StatusCode::BAD_REQUEST,
+            page(
+                "Invalid filters",
+                "Check your URL filters and try again.",
+                "",
+                &markup!(
+                    "<p><a href=\"/transactions\">Reset register filters</a></p>{}",
+                    session_controls(&session)
                 ),
-            )
-                .into_response();
-        }
+            ),
+        )
+            .into_response();
     };
     if query.company.is_none() {
         query.company = state.company;
@@ -240,14 +234,14 @@ async fn view(
             view.title,
             view.description,
             view.nav,
-            with_session(view.content, &session),
+            &with_session(view.content, &session),
         )
         .into_response(),
         Ok(Ok(Err(error))) => {
             if error.status().is_server_error() {
                 eprintln!("Ledger view failed: {error:?}");
             }
-            (error.status(), page("Unable to display this view", &error.to_string(), "", markup!("<p><a href=\"/\">Return to your books</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
+            (error.status(), page("Unable to display this view", &error.to_string(), "", &markup!("<p><a href=\"/\">Return to your books</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -255,7 +249,7 @@ async fn view(
                 "Ledger unavailable",
                 "The ledger could not be read. Try again or check the server terminal.",
                 "",
-                session_controls(&session),
+                &session_controls(&session),
             ),
         )
             .into_response(),
@@ -277,7 +271,7 @@ mod tests {
             "Title {{description}}",
             "Café & bread {{content}}",
             "/reports",
-            markup!("<p>{}</p>", "Daily summary"),
+            &markup!("<p>{}</p>", "Daily summary"),
         );
         assert!(body.contains("<h1>Title {{description}}</h1>"));
         assert!(body.contains("<p class=\"intro\">Café &amp; bread {{content}}</p>"));

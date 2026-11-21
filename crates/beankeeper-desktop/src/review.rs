@@ -66,7 +66,7 @@ impl ApprovalAuthority {
                 // Upstream generates a unique TypeID from this name prefix.
                 name: "desktop_human",
                 capabilities: &capabilities,
-                ttl: Duration::from_secs(12 * 60 * 60),
+                ttl: Duration::from_hours(12),
                 public_key: None,
                 generate_key: true,
             },
@@ -274,7 +274,7 @@ impl ProposalStatus {
     }
 }
 
-fn failure(error: CliError, session: Option<&HumanSession>) -> Response {
+fn failure(error: &CliError, session: Option<&HumanSession>) -> Response {
     let status = match error {
         CliError::NotFound(_) => StatusCode::NOT_FOUND,
         CliError::Validation(_) => StatusCode::CONFLICT,
@@ -300,7 +300,7 @@ fn failure(error: CliError, session: Option<&HumanSession>) -> Response {
             "Review unavailable",
             message,
             "/review",
-            markup!(
+            &markup!(
                 "<p><a href=\"/review\">Return to review queue</a></p>{}",
                 session.map(ui::session_controls).unwrap_or_default()
             ),
@@ -323,9 +323,9 @@ where
     .await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => failure(error, session.as_ref()),
+        Ok(Err(error)) => failure(&error, session.as_ref()),
         Err(_) => failure(
-            CliError::General("review worker failed".into()),
+            &CliError::General("review worker failed".into()),
             session.as_ref(),
         ),
     }
@@ -422,31 +422,7 @@ fn render(
         .filter(|value| !value.is_empty())
         .or_else(|| review.company.as_ref().map(CompanySlug::as_str))
         .or_else(|| companies.first().map(|company| company.slug.as_str()));
-    let mut html = Markup::default();
-    write_markup!(
-        html,
-        "<section aria-labelledby=\"verification\"><h2 id=\"verification\">Ledger verification</h2><p>Last checked: <time>{}</time>. This is a snapshot; re-run after changes made outside this browser.</p>",
-        verification
-            .at()
-            .to_rfc3339_opts(SecondsFormat::Millis, true)
-    );
-    match verification {
-        Verification::Passed { .. } => write_markup!(
-            html,
-            "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>"
-        ),
-        Verification::Failed { error, .. } => write_markup!(
-            html,
-            "<p role=\"alert\"><strong>Verification failed. Ledger integrity is not confirmed.</strong> {}</p>",
-            error
-        ),
-    }
-    write_markup!(
-        html,
-        "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
-        session.csrf_token(),
-        selected_company.unwrap_or_default()
-    );
+    let mut html = verification_panel(verification, session, selected_company);
     let mut proposal_html = Markup::default();
     let result = (|| -> Result<(), CliError> {
         let html = &mut proposal_html;
@@ -525,9 +501,42 @@ fn render(
         "Review queue",
         "Your agent proposes. You review the full posting and decide.",
         "/review",
-        html,
+        &html,
     )
     .into_response())
+}
+
+fn verification_panel(
+    verification: &Verification,
+    session: &HumanSession,
+    company: Option<&str>,
+) -> Markup {
+    let mut html = Markup::default();
+    write_markup!(
+        html,
+        "<section aria-labelledby=\"verification\"><h2 id=\"verification\">Ledger verification</h2><p>Last checked: <time>{}</time>. This is a snapshot; re-run after changes made outside this browser.</p>",
+        verification
+            .at()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+    );
+    match verification {
+        Verification::Passed { .. } => write_markup!(
+            html,
+            "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>"
+        ),
+        Verification::Failed { error, .. } => write_markup!(
+            html,
+            "<p role=\"alert\"><strong>Verification failed. Ledger integrity is not confirmed.</strong> {}</p>",
+            error
+        ),
+    }
+    write_markup!(
+        html,
+        "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
+        session.csrf_token(),
+        company.unwrap_or_default()
+    );
+    html
 }
 
 fn summary(
@@ -558,9 +567,10 @@ fn summary(
         .find(|limit| limit.currency == proposal.currency)
     {
         let cap = |value: Option<i64>| {
-            value
-                .map(|value| money::minor(value, &limit.currency))
-                .unwrap_or_else(|| "uncapped".into())
+            value.map_or_else(
+                || "uncapped".into(),
+                |value| money::minor(value, &limit.currency),
+            )
         };
         write_markup!(
             html,

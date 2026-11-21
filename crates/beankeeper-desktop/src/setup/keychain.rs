@@ -275,7 +275,7 @@ fn file_store_error(error: io::Error) -> KeychainError {
 #[cfg(unix)]
 impl SecretStore for FileSecretStore {
     fn store(&self, _ledger: &Path, passphrase: &SecretString) -> Result<(), KeychainError> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         validate_passphrase(passphrase)?;
         let parent = self
             .path
@@ -284,7 +284,6 @@ impl SecretStore for FileSecretStore {
             .unwrap_or(Path::new("."));
         if !parent.exists() {
             let mut builder = fs::DirBuilder::new();
-            use std::os::unix::fs::DirBuilderExt;
             builder.recursive(true).mode(0o700).create(parent)?;
         }
         check_private_parent(parent)?;

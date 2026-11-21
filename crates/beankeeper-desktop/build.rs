@@ -10,12 +10,14 @@
 //! `cargo:rustc-env` values cannot contain newlines, so JSON from
 //! packaging/license-embed.json is compacted before it is forwarded.
 
-fn main() {
+fn main() -> Result<(), std::env::VarError> {
     println!("cargo:rerun-if-env-changed=BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON");
     println!("cargo:rerun-if-env-changed=BEANKEEPER_LICENSE_SERVICE_URL");
 
-    let embed_path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../packaging/license-embed.json");
+    let manifest_dir =
+        std::env::var_os("CARGO_MANIFEST_DIR").ok_or(std::env::VarError::NotPresent)?;
+    let embed_path =
+        std::path::PathBuf::from(manifest_dir).join("../../packaging/license-embed.json");
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
@@ -34,7 +36,7 @@ fn main() {
         .or_else(|| file_defaults.as_ref().map(|d| d.url.clone()));
 
     if release
-        && (keys.as_ref().is_none_or(|s| s.is_empty()) || url.as_ref().is_none_or(|s| s.is_empty()))
+        && (keys.as_ref().is_none_or(String::is_empty) || url.as_ref().is_none_or(String::is_empty))
     {
         panic!(
             "release builds must embed license trust: set BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON and \
@@ -52,6 +54,7 @@ fn main() {
             rustc_env("BEANKEEPER_LICENSE_SERVICE_URL", &url);
         }
     }
+    Ok(())
 }
 
 struct LicenseEmbed {
@@ -64,9 +67,10 @@ fn nonempty_env(key: &str) -> Option<String> {
 }
 
 fn rustc_env(key: &str, value: &str) {
-    if value.contains('\n') || value.contains('\r') {
-        panic!("cargo:rustc-env={key} cannot contain newlines");
-    }
+    assert!(
+        !value.contains(['\n', '\r']),
+        "cargo:rustc-env={key} cannot contain newlines"
+    );
     println!("cargo:rustc-env={key}={value}");
 }
 

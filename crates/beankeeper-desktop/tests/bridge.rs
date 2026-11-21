@@ -163,6 +163,6 @@ fn invalid_bridge_token_fails_without_disclosing_credentials() -> TestResult {
         &mut child.0.stdout.take().ok_or("missing stdout")?,
         &mut protocol_output,
     )?;
-    assert!(protocol_output.is_empty());
+    assert_eq!(protocol_output, "");
     Ok(())
 }

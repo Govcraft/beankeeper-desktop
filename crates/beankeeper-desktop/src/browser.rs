@@ -1,6 +1,6 @@
 //! Bounded, proxy-free detection before launching the user's default browser.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{io::Read, net::SocketAddr, time::Duration};
 
 use crate::{DesktopError, server::local_url, ui::HEALTH};
 
@@ -37,7 +37,6 @@ pub fn open_with(
     }
     // Bound the body too: unrelated services must not make `bk open` allocate
     // an unbounded response while trying to identify a Desktop listener.
-    use std::io::Read;
     let mut body = String::new();
     response.take(64).read_to_string(&mut body)?;
     if body != HEALTH {

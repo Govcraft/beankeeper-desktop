@@ -138,6 +138,10 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     );
     assert_eq!(historical["books"][0]["imported_history"], "source_unknown");
 
+    assert_status_requires_ledger_read(&db, &server)
+}
+
+fn assert_status_requires_ledger_read(db: &Db, server: &Server) -> TestResult {
     let credentials = [Capability::Navigate.path().to_owned()];
     let other = identity::issue(
         db.conn(),
