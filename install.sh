@@ -7,6 +7,7 @@
 # Options (environment variables):
 #   BK_VERSION   - version to install (default: latest)
 #   BK_INSTALL   - install directory (default: /usr/local/bin)
+#   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
 
 set -eu
 
@@ -98,6 +99,7 @@ download_and_install() {
 
 verify_signatures() {
     if ! command -v cosign >/dev/null 2>&1; then
+        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] || fatal "cosign is required to verify this release"
         warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
         return
     fi
@@ -109,6 +111,7 @@ verify_signatures() {
             -o "${BK_TEMP_DIR}/${ARTIFACT}.sigstore" -w '%{http_code}')"; then
             :
         elif [ "$BUNDLE_STATUS" = 404 ]; then
+            [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] || fatal "required Sigstore bundle missing for ${ARTIFACT} (HTTP 404)"
             warn "Sigstore bundle missing for ${ARTIFACT} (HTTP 404): this release predates Sigstore signing; only the SHA-256 checksum will be checked for this artifact; release authenticity is not verified"
             continue
         else

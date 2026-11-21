@@ -1,6 +1,23 @@
 # Offline integration tests against the Windows binary built by this job.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+# Validate the PowerShell example embedded in the agent skill on this runner.
+$guide = Get-Content "$root/SKILL.md" -Raw
+$fence = [regex]::Match($guide, '(?s)```powershell\r?\n(.*?)```')
+if (-not $fence.Success) { throw 'Missing PowerShell install commands in SKILL.md' }
+$guideTokens = $null
+$guideErrors = $null
+$guideAst = [System.Management.Automation.Language.Parser]::ParseInput($fence.Groups[1].Value, [ref]$guideTokens, [ref]$guideErrors)
+if ($guideErrors.Count -gt 0) { throw "Invalid PowerShell install commands: $guideErrors" }
+$guideCommands = $guideAst.FindAll({ param($ast) $ast -is [System.Management.Automation.Language.CommandAst] }, $true)
+foreach ($required in @(
+    '& $bkSetup -RequireSignatures -NoService -InstallDir $bkDir',
+    '& $bk service install --no-agents',
+    '& $bk agents connect --all --json',
+    '& $bk service status --json'
+)) {
+    if ($guideCommands.Extent.Text -notcontains $required) { throw "Missing install command in SKILL.md: $required" }
+}
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
 $fixture = Join-Path $temporary 'fixtures'
 $destination = Join-Path $temporary 'installed'
@@ -54,6 +71,8 @@ function Assert-Rejected([string]$Message) {
 try {
     Install-Beankeeper # legacy bundle 404 fallback
     if (-not (Test-Path "$destination/bk.exe")) { throw 'Legacy install failed' }
+    $RequireSignatures = $true
+    Assert-Rejected 'Required Sigstore bundle missing'
     $script:bundleStatus = 200
     Install-Beankeeper
     if ($script:verified.Count -ne 2 -or $script:verified -notcontains $artifact -or $script:verified -notcontains 'checksums-sha256.txt') {
@@ -64,7 +83,7 @@ try {
     $script:signatureFails = $false
     $script:bundleStatus = 503
     Assert-Rejected 'Simulated HTTP error'
-    $script:bundleStatus = 404
+    $script:bundleStatus = 200
     "$('0' * 64)  $artifact" | Set-Content $manifest
     Assert-Rejected 'Checksum mismatch'
     '' | Set-Content $manifest
