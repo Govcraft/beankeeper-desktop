@@ -25,6 +25,7 @@ const MAX_BINARY: u64 = 512 * 1024 * 1024;
 pub enum UpdateError {
     Io(io::Error),
     Network,
+    Http(reqwest::StatusCode),
     Invalid(&'static str),
     Signature,
     Json(serde_json::Error),
@@ -33,9 +34,13 @@ impl fmt::Display for UpdateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "update file operation failed: {e}"),
-            Self::Network => f.write_str(
-                "update download failed; check connectivity and retry after the daily interval",
-            ),
+            Self::Network => f.write_str("the release server could not be reached"),
+            Self::Http(status) if *status == reqwest::StatusCode::NOT_FOUND => {
+                f.write_str("the release file was not found (HTTP 404)")
+            }
+            Self::Http(status) => {
+                write!(f, "the release server returned HTTP {}", status.as_u16())
+            }
             Self::Invalid(reason) => write!(f, "update refused: {reason}"),
             Self::Signature => f.write_str(
                 "Sigstore verification failed; install cosign and require a valid release bundle",
@@ -226,7 +231,11 @@ fn download(url: &str, limit: u64) -> Result<Vec<u8>, UpdateError> {
         .get(url)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|_| UpdateError::Network)?;
+        .map_err(|error| {
+            error
+                .status()
+                .map_or(UpdateError::Network, UpdateError::Http)
+        })?;
     let mut bytes = Vec::new();
     response.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
@@ -262,6 +271,35 @@ fn write_cache(path: &Path, cache: &Cache) -> Result<(), UpdateError> {
     pending.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
+
+fn cached_status(cache: &Cache) -> String {
+    let message = match cache.message.as_str() {
+        "" | "Update check did not complete." => {
+            "The last update check has not completed. It may still be running or may have been interrupted."
+                .into()
+        }
+        // Older caches lost the HTTP status. Do not imply a connectivity problem
+        // when the response could have been a missing release feed instead.
+        "update download failed; check connectivity and retry after the daily interval" => {
+            "Could not check for updates: the release server could not be reached or returned an unsuccessful response. Checks run at most once per day."
+                .into()
+        }
+        message if cache.manifest.is_some() => message.to_owned(),
+        message => format!(
+            "Could not check for updates: {}. Checks run at most once per day.",
+            message.trim_end_matches('.')
+        ),
+    };
+    let attempted_at = i64::try_from(cache.last_attempt)
+        .ok()
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
+        .map_or_else(
+            || "unavailable (invalid cached time)".into(),
+            |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        );
+    format!("{message}\nLast attempt: {attempted_at}.")
+}
+
 /// Last checked state, read without any network request. Opt-out hides stale results.
 pub fn status(path: &Path, disabled: bool) -> Result<String, UpdateError> {
     if disabled {
@@ -271,10 +309,7 @@ pub fn status(path: &Path, disabled: bool) -> Result<String, UpdateError> {
     if cache.last_attempt == 0 {
         return Ok("Updates have not been checked. Run `bk update-check`.".into());
     }
-    Ok(format!(
-        "{} Last attempt: {} (Unix seconds).",
-        cache.message, cache.last_attempt
-    ))
+    Ok(cached_status(&cache))
 }
 /// At most one network attempt per day, including failures and process restarts.
 /// Opt-out is evaluated before files or the network are accessed.
@@ -687,6 +722,109 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn cached_status_formats_legacy_attempt_in_utc_without_changing_cache() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        // Exact cache shape and failure message written by Desktop 0.1.0-rc.1.
+        let bytes = br#"{"last_attempt":1795226804,"manifest":null,"message":"update download failed; check connectivity and retry after the daily interval"}"#;
+        fs::write(&path, bytes)?;
+        assert_eq!(
+            status(&path, false)?,
+            "Could not check for updates: the release server could not be reached or returned an unsuccessful response. Checks run at most once per day.\nLast attempt: 2026-11-21 02:06:44 UTC."
+        );
+        assert_eq!(fs::read(&path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn unchecked_and_disabled_status_need_no_valid_cache() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        assert_eq!(
+            status(&path, false)?,
+            "Updates have not been checked. Run `bk update-check`."
+        );
+        assert!(!path.exists());
+        fs::write(&path, b"invalid cache")?;
+        assert_eq!(
+            status(&path, true)?,
+            "Automatic update checks are disabled."
+        );
+        assert!(status(&path, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_attempt_and_invalid_timestamp_do_not_claim_success() {
+        let mut cache = Cache {
+            last_attempt: 1_795_226_804,
+            // A previous successful manifest may remain during a new attempt.
+            manifest: Some(manifest(b"fixture", "x86_64-unknown-linux-gnu")),
+            message: "Update check did not complete.".into(),
+        };
+        assert_eq!(
+            cached_status(&cache),
+            "The last update check has not completed. It may still be running or may have been interrupted.\nLast attempt: 2026-11-21 02:06:44 UTC."
+        );
+        for seconds in [i64::MAX as u64, u64::MAX] {
+            cache.last_attempt = seconds;
+            let status = cached_status(&cache);
+            assert!(status.ends_with("Last attempt: unavailable (invalid cached time)."));
+            assert!(!status.contains(&seconds.to_string()));
+        }
+    }
+
+    #[test]
+    fn completed_checks_distinguish_success_http_network_and_verification_failures() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        let available = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+        let mut older = available.clone();
+        older.version = "0.0.0".into();
+        let cases = [
+            (
+                Ok(available),
+                "Desktop 9.10.0 is available. Run `bk self-update`.",
+            ),
+            (Ok(older), "Desktop is up to date."),
+            (
+                Err(UpdateError::Http(reqwest::StatusCode::NOT_FOUND)),
+                "Could not check for updates: the release file was not found (HTTP 404). Checks run at most once per day.",
+            ),
+            (
+                Err(UpdateError::Http(reqwest::StatusCode::SERVICE_UNAVAILABLE)),
+                "Could not check for updates: the release server returned HTTP 503. Checks run at most once per day.",
+            ),
+            (
+                Err(UpdateError::Network),
+                "Could not check for updates: the release server could not be reached. Checks run at most once per day.",
+            ),
+            (
+                Err(UpdateError::Signature),
+                "Could not check for updates: Sigstore verification failed; install cosign and require a valid release bundle. Checks run at most once per day.",
+            ),
+        ];
+        for (day, (result, expected)) in cases.into_iter().enumerate() {
+            let now = 1_795_226_804 + day as u64 * DAY;
+            let expected = format!(
+                "{expected}\nLast attempt: {} UTC.",
+                DateTime::<Utc>::from_timestamp(now as i64, 0)
+                    .ok_or("fixture timestamp")?
+                    .format("%Y-%m-%d %H:%M:%S")
+            );
+            assert_eq!(check_with(&path, false, now, || result)?, expected);
+            assert_eq!(status(&path, false)?, expected);
+            assert_eq!(
+                check_with(&path, false, now + 1, || panic!(
+                    "cached status fetched again"
+                ))?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn opt_out_daily_cache_failure_and_clock_rollback_make_no_extra_requests() -> TestResult {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("state/updates.json");
@@ -707,7 +845,7 @@ mod tests {
         }
         assert!(
             check_with(&path, false, 2 * DAY, || Err(UpdateError::Network))?
-                .contains("download failed")
+                .contains("Could not check for updates: the release server could not be reached")
         );
         assert!(read_cache(&path)?.manifest.is_none());
         check_with(&path, false, 2 * DAY + 1, || {

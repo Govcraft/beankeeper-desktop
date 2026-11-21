@@ -96,8 +96,14 @@ public trust roots from Sigstore, independently of the GitHub metadata request.
 once per day. `bk update-check` shares the persisted attempt time and process
 lock, so failures, restarts, concurrent CLI/UI use and backward clock changes do
 not cause repeated checks. A crash lock expires after one day. The cache is
-`updates.json` in the same state directory. Errors are visible alongside the
-last attempt time; there is no force-check bypass of the daily interval.
+`updates.json` in the same state directory. Both the CLI and Settings show the
+outcome separately from a readable UTC last-attempt time, for example
+`Last attempt: 2026-11-21 02:06:44 UTC.` An incomplete check is identified as
+still running or interrupted. Failed checks explain the reason, including the
+HTTP status for an unsuccessful release response, such as a missing release
+file (HTTP 404). Older cached failures cannot recover the lost HTTP status and
+describe both possible causes: an unreachable server or an unsuccessful response.
+There is no force-check bypass of the daily interval.
 
 Set `BEANKEEPER_NO_UPDATE_CHECK=1` or `true` to opt out. This prevents checks
 before accessing cache files or the network and disables `bk self-update` until

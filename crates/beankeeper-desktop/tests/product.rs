@@ -68,6 +68,42 @@ fn opt_out_and_self_update_refuse_network_and_leave_no_cache() -> TestResult {
     assert!(!dir.path().join("state").exists());
     Ok(())
 }
+
+#[test]
+fn update_check_cli_displays_cached_outcome_and_readable_utc_attempt() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let state = dir.path().join("state");
+    fs::create_dir(&state)?;
+    let now = beankeeper_desktop::updates::now();
+    let cache = serde_json::to_vec(&serde_json::json!({
+        "last_attempt": now,
+        "manifest": null,
+        "message": "update download failed; check connectivity and retry after the daily interval"
+    }))?;
+    fs::write(state.join("updates.json"), &cache)?;
+    let output = command(dir.path())
+        .env("BEANKEEPER_NO_UPDATE_CHECK", "0")
+        .arg("update-check")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout)?;
+    let attempted_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now.try_into()?, 0)
+        .ok_or("fixture timestamp")?;
+    assert!(text.contains("Could not check for updates:"));
+    assert!(text.contains(&format!(
+        "Last attempt: {} UTC.",
+        attempted_at.format("%Y-%m-%d %H:%M:%S")
+    )));
+    assert!(!text.contains("Unix seconds"));
+    assert!(!text.contains(&now.to_string()));
+    assert_eq!(fs::read(state.join("updates.json"))?, cache);
+    assert!(!state.join("updates.lock").exists());
+    Ok(())
+}
 #[test]
 fn redemption_requires_configured_service_and_trust_before_claim_consumption() -> TestResult {
     let dir = tempfile::tempdir()?;
