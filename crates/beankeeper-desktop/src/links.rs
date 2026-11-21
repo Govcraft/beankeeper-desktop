@@ -7,129 +7,224 @@ use filters::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum View {
-    Dashboard,
-    Accounts,
-    Transactions,
-    Transaction,
-    Reports,
-    #[serde(rename = "income-statement")]
-    IncomeStatement,
-    #[serde(rename = "balance-sheet")]
-    BalanceSheet,
-    #[serde(rename = "cash-flow")]
-    CashFlow,
+/// The report catalog, route lookup, and address encoders share this set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportKind {
+    Income,
+    Balance,
+    Cash,
     Trend,
-    #[serde(rename = "budget-variance")]
-    BudgetVariance,
-    #[serde(rename = "schedule-c")]
-    ScheduleC,
-    #[serde(rename = "1099")]
-    #[value(name = "1099")]
-    Vendor1099,
+    Budget,
+    Schedule,
+    Vendor,
     Reconciliation,
-    Review,
-    #[value(name = "review_detail")]
-    ReviewDetail,
-    Settings,
 }
 
-/// Each variant can carry only the filters implemented by its destination.
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "view_id", rename_all = "snake_case", deny_unknown_fields)]
-#[schemars(extend("type" = "object"))]
-pub(crate) enum ViewAddress {
-    Dashboard {
-        #[serde(default)]
-        state: Validated<Dashboard>,
-    },
-    Accounts {
-        #[serde(default)]
-        state: Validated<Company>,
-    },
-    Transactions {
-        #[serde(default)]
-        state: Validated<Transactions>,
-    },
-    Transaction {
-        state: Validated<Transaction>,
-    },
-    Reports {
-        #[serde(default)]
-        state: ReportSelector,
-    },
-    #[serde(rename = "income-statement")]
-    IncomeStatement {
-        #[serde(default)]
-        state: Validated<Period>,
-    },
-    #[serde(rename = "balance-sheet")]
-    BalanceSheet {
-        #[serde(default)]
-        state: Validated<Balance>,
-    },
-    #[serde(rename = "cash-flow")]
-    CashFlow {
-        #[serde(default)]
-        state: Validated<Cash>,
-    },
-    Trend {
-        #[serde(default)]
-        state: Validated<Trend>,
-    },
-    #[serde(rename = "budget-variance")]
-    BudgetVariance {
-        #[serde(default)]
-        state: Validated<Budget>,
-    },
-    #[serde(rename = "schedule-c")]
-    ScheduleC {
-        #[serde(default)]
-        state: Validated<Period>,
-    },
-    #[serde(rename = "1099")]
-    Vendor1099 {
-        #[serde(default)]
-        state: Validated<Vendor>,
-    },
-    Reconciliation {
-        #[serde(default)]
-        state: Validated<Reconciliation>,
-    },
-    Review {
-        #[serde(default)]
-        state: Validated<Company>,
-    },
-    ReviewDetail {
-        state: Validated<ReviewDetail>,
-    },
-    Settings {
-        #[serde(default)]
-        state: Validated<Empty>,
-    },
+impl ReportKind {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Income,
+        Self::Balance,
+        Self::Cash,
+        Self::Trend,
+        Self::Budget,
+        Self::Schedule,
+        Self::Vendor,
+        Self::Reconciliation,
+    ];
+
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::Income => "/reports/income-statement",
+            Self::Balance => "/reports/balance-sheet",
+            Self::Cash => "/reports/cash-flow",
+            Self::Trend => "/reports/trend",
+            Self::Budget => "/reports/budget-variance",
+            Self::Schedule => "/reports/schedule-c",
+            Self::Vendor => "/reports/1099",
+            Self::Reconciliation => "/reconciliation",
+        }
+    }
+
+    pub(crate) fn parse(path: &str) -> Option<Self> {
+        if path == "/reports/reconciliation" {
+            return Some(Self::Reconciliation);
+        }
+        Self::ALL.into_iter().find(|kind| kind.path() == path)
+    }
+
+    fn view(self) -> View {
+        match self {
+            Self::Income => View::IncomeStatement,
+            Self::Balance => View::BalanceSheet,
+            Self::Cash => View::CashFlow,
+            Self::Trend => View::Trend,
+            Self::Budget => View::BudgetVariance,
+            Self::Schedule => View::ScheduleC,
+            Self::Vendor => View::Vendor1099,
+            Self::Reconciliation => View::Reconciliation,
+        }
+    }
+}
+
+// CLI selectors and the MCP schema share one list of view names.
+macro_rules! desktop_views {
+    ($($variant:ident as $wire:literal => $(#[$attr:meta])* $filters:ty),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Serialize, clap::ValueEnum)]
+        pub(crate) enum View {
+            $(#[serde(rename = $wire)] #[value(name = $wire)] $variant,)+
+        }
+
+        /// Each variant carries only the filters implemented by its destination.
+        #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+        #[serde(tag = "view_id", deny_unknown_fields)]
+        #[schemars(extend("type" = "object"))]
+        pub(crate) enum ViewAddress {
+            $(#[serde(rename = $wire)] $variant { $(#[$attr])* state: $filters },)+
+        }
+    };
+}
+
+desktop_views! {
+    Dashboard as "dashboard" => #[serde(default)] Validated<Dashboard>,
+    Accounts as "accounts" => #[serde(default)] Validated<Company>,
+    Transactions as "transactions" => #[serde(default)] Validated<Transactions>,
+    Transaction as "transaction" => Validated<Transaction>,
+    Reports as "reports" => #[serde(default)] ReportSelector,
+    IncomeStatement as "income-statement" => #[serde(default)] Validated<Period>,
+    BalanceSheet as "balance-sheet" => #[serde(default)] Validated<Balance>,
+    CashFlow as "cash-flow" => #[serde(default)] Validated<Cash>,
+    Trend as "trend" => #[serde(default)] Validated<Trend>,
+    BudgetVariance as "budget-variance" => #[serde(default)] Validated<Budget>,
+    ScheduleC as "schedule-c" => #[serde(default)] Validated<Period>,
+    Vendor1099 as "1099" => #[serde(default)] Validated<Vendor>,
+    Reconciliation as "reconciliation" => #[serde(default)] Validated<Reconciliation>,
+    Review as "review" => #[serde(default)] Validated<Company>,
+    ReviewDetail as "review_detail" => Validated<ReviewDetail>,
+    Settings as "settings" => #[serde(default)] Validated<Empty>,
+}
+
+pub(crate) const HOME: &str = "/";
+pub(crate) const ACCOUNTS: &str = "/accounts";
+pub(crate) const TRANSACTIONS: &str = "/transactions";
+pub(crate) const TRANSACTION_ROUTE: &str = "/transactions/{id}";
+pub(crate) const REPORTS: &str = "/reports";
+pub(crate) const REPORT_ROUTE: &str = "/reports/{id}";
+pub(crate) const REVIEW: &str = "/review";
+pub(crate) const REVIEW_ROUTE: &str = "/review/{id}";
+pub(crate) const SETTINGS: &str = "/settings";
+
+const TRANSACTION_PREFIX: &str = "/transactions/";
+const REVIEW_PREFIX: &str = "/review/";
+
+pub(crate) enum LedgerRoute {
+    Home,
+    Accounts,
+    Register,
+    Transaction(values::TransactionId),
+}
+
+impl LedgerRoute {
+    pub(crate) fn parse(path: &str) -> Result<Self, &'static str> {
+        match path {
+            HOME => Ok(Self::Home),
+            ACCOUNTS => Ok(Self::Accounts),
+            TRANSACTIONS => Ok(Self::Register),
+            path => path
+                .strip_prefix(TRANSACTION_PREFIX)
+                .ok_or("Unknown ledger view.")?
+                .parse()
+                .map(Self::Transaction)
+                .map_err(|_| "Invalid transaction ID."),
+        }
+    }
+}
+
+fn parse_view_segment(
+    path: &str,
+) -> Result<(View, serde_json::Map<String, serde_json::Value>), &'static str> {
+    let mut fields = serde_json::Map::new();
+    let view = match path {
+        REPORTS => View::Reports,
+        REVIEW => View::Review,
+        SETTINGS => View::Settings,
+        path => {
+            if let Some(id) = path.strip_prefix(REVIEW_PREFIX) {
+                let id: values::ProposalId = id.parse().map_err(|_| "Invalid proposal ID.")?;
+                fields.insert("proposal_id".into(), serde_json::json!(id));
+                View::ReviewDetail
+            } else if let Some(report) = ReportKind::parse(path) {
+                report.view()
+            } else {
+                match LedgerRoute::parse(path)? {
+                    LedgerRoute::Home => View::Dashboard,
+                    LedgerRoute::Accounts => View::Accounts,
+                    LedgerRoute::Register => View::Transactions,
+                    LedgerRoute::Transaction(id) => {
+                        fields.insert("transaction_id".into(), serde_json::json!(id));
+                        View::Transaction
+                    }
+                }
+            }
+        }
+    };
+    Ok((view, fields))
+}
+
+/// A route recognized by Desktop, with its browser query preserved as visited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct LocalViewUrl(String);
+
+impl LocalViewUrl {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LocalViewUrl {
+    type Error = &'static str;
+
+    fn try_from(url: String) -> Result<Self, Self::Error> {
+        if url.len() > 4096
+            || url
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '#' | '\\'))
+        {
+            return Err("Expected a local Desktop view address.");
+        }
+        // Query semantics belong to the GET handler. The browser may report
+        // empty optional form fields or the explicitly selected HTML format.
+        let path = url.split_once('?').map_or(url.as_str(), |(path, _)| path);
+        parse_view_segment(path)?;
+        Ok(Self(url))
+    }
 }
 
 impl ViewAddress {
+    pub(crate) fn local_url(&self) -> Result<LocalViewUrl, &'static str> {
+        self.path().map(LocalViewUrl)
+    }
+
     pub(crate) fn path(&self) -> Result<String, &'static str> {
         let (route, fields) = match self {
-            Self::Dashboard { state } => ("/".into(), fields(state)?),
-            Self::Accounts { state } => ("/accounts".into(), fields(state)?),
-            Self::Transactions { state } => ("/transactions".into(), fields(state)?),
+            Self::Dashboard { state } => (HOME.into(), fields(state)?),
+            Self::Accounts { state } => (ACCOUNTS.into(), fields(state)?),
+            Self::Transactions { state } => (TRANSACTIONS.into(), fields(state)?),
             Self::Transaction { state } => (state.route(), fields(state)?),
             Self::Reports { state } => return state.path(),
-            Self::IncomeStatement { state } => ("/reports/income-statement".into(), fields(state)?),
-            Self::BalanceSheet { state } => ("/reports/balance-sheet".into(), fields(state)?),
-            Self::CashFlow { state } => ("/reports/cash-flow".into(), fields(state)?),
-            Self::Trend { state } => ("/reports/trend".into(), fields(state)?),
-            Self::BudgetVariance { state } => ("/reports/budget-variance".into(), fields(state)?),
-            Self::ScheduleC { state } => ("/reports/schedule-c".into(), fields(state)?),
-            Self::Vendor1099 { state } => ("/reports/1099".into(), fields(state)?),
-            Self::Reconciliation { state } => ("/reconciliation".into(), fields(state)?),
-            Self::Review { state } => ("/review".into(), fields(state)?),
+            Self::IncomeStatement { state } => (ReportKind::Income.path().into(), fields(state)?),
+            Self::BalanceSheet { state } => (ReportKind::Balance.path().into(), fields(state)?),
+            Self::CashFlow { state } => (ReportKind::Cash.path().into(), fields(state)?),
+            Self::Trend { state } => (ReportKind::Trend.path().into(), fields(state)?),
+            Self::BudgetVariance { state } => (ReportKind::Budget.path().into(), fields(state)?),
+            Self::ScheduleC { state } => (ReportKind::Schedule.path().into(), fields(state)?),
+            Self::Vendor1099 { state } => (ReportKind::Vendor.path().into(), fields(state)?),
+            Self::Reconciliation { state } => {
+                (ReportKind::Reconciliation.path().into(), fields(state)?)
+            }
+            Self::Review { state } => (REVIEW.into(), fields(state)?),
             Self::ReviewDetail { state } => (state.route(), fields(state)?),
-            Self::Settings { state } => ("/settings".into(), fields(state)?),
+            Self::Settings { state } => (SETTINGS.into(), fields(state)?),
         };
         encode_path(route, fields)
     }
@@ -213,35 +308,7 @@ pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
     if url.path() != raw_path {
         return Err("Invalid view path.");
     }
-    let mut fields = serde_json::Map::new();
-    let view_id = match raw_path {
-        "/" => View::Dashboard,
-        "/accounts" => View::Accounts,
-        "/transactions" => View::Transactions,
-        "/reports" => View::Reports,
-        "/reconciliation" => View::Reconciliation,
-        "/review" => View::Review,
-        "/settings" => View::Settings,
-        _ => {
-            if let Some(id) = raw_path.strip_prefix("/transactions/") {
-                fields.insert(
-                    "transaction_id".into(),
-                    serde_json::json!(id.parse::<i64>().map_err(|_| "Invalid transaction ID.")?),
-                );
-                View::Transaction
-            } else if let Some(id) = raw_path.strip_prefix("/review/") {
-                fields.insert("proposal_id".into(), serde_json::json!(id));
-                View::ReviewDetail
-            } else if let Some(id) = raw_path.strip_prefix("/reports/") {
-                if !crate::reports::VIEW_IDS.contains(&id) {
-                    return Err("Unknown report view.");
-                }
-                serde_json::from_value(serde_json::json!(id)).map_err(|_| "Unknown report view.")?
-            } else {
-                return Err("Unknown Desktop view.");
-            }
-        }
-    };
+    let (view_id, mut fields) = parse_view_segment(raw_path)?;
     for (key, value) in url.query_pairs() {
         if fields.contains_key(key.as_ref())
             || ["transaction_id", "proposal_id", "report_kind"].contains(&key.as_ref())

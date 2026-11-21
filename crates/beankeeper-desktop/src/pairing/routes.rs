@@ -108,7 +108,7 @@ pub(crate) fn router(state: PairingState) -> Router {
         .route("/api/session/pairing", human_post(new_link))
         .route("/api/session/associate", human_post(associate))
         .route_layer(middleware::from_fn_with_state(state.clone(), human_guard))
-        .route("/pair", get(pair).post(pair_browser))
+        .route(super::PAIR_ROUTE, get(pair).post(pair_browser))
         .with_state(state)
 }
 

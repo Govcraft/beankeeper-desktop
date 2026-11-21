@@ -186,8 +186,8 @@ pub(crate) fn router(
         verification: None,
     })));
     Ok(Router::new()
-        .route("/review", get(queue))
-        .route("/review/{id}", get(detail))
+        .route(crate::links::REVIEW, get(queue))
+        .route(crate::links::REVIEW_ROUTE, get(detail))
         .route("/review/{id}/approve", pairing::human_post(approve))
         .route("/review/{id}/reject", pairing::human_post(reject))
         .route("/review/verify", pairing::human_post(recheck))
