@@ -103,7 +103,9 @@ class PackagingTests(unittest.TestCase):
                 hook = control.extractfile("postinst").read().decode()
                 self.assertIn('BK_NO_SERVICE', hook)
                 self.assertIn('runuser -u "$owner"', hook)
-                self.assertIn('/usr/bin/bk service install', hook)
+                self.assertIn('run_as_owner service install --no-agents', hook)
+                self.assertIn('run_as_owner agents connect --all', hook)
+                self.assertIn('BK_NO_AGENTS', hook)
             with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"])) as payload:
                 self.assertEqual(payload.extractfile("usr/bin/bk").read(), self.binary.read_bytes())
                 self.assertEqual(payload.getmember("usr/bin/bk").mode, 0o755)
@@ -119,7 +121,9 @@ class PackagingTests(unittest.TestCase):
         arguments = run.call_args.args[0]
         root = Path(arguments[arguments.index("--root") + 1])
         hooks = Path(arguments[arguments.index("--scripts") + 1])
-        self.assertIn('/usr/local/bin/bk service install', (hooks / 'postinstall').read_text())
+        self.assertIn('run_as_owner service install --no-agents', (hooks / 'postinstall').read_text())
+        self.assertIn('run_as_owner agents connect --all', (hooks / 'postinstall').read_text())
+        self.assertIn('BK_NO_AGENTS', (hooks / 'postinstall').read_text())
         self.assertIn('BK_NO_SERVICE', (hooks / 'postinstall').read_text())
         self.assertEqual((root / "usr/local/bin/bk").read_bytes(), self.binary.read_bytes())
         self.assertEqual((root / "usr/local/share/doc/beankeeper-desktop/LICENSE.md").read_bytes(),

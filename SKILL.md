@@ -23,6 +23,29 @@ ledger MCP client after restarting hosting. CLI equivalents are
 Uninstall removes hosting while preserving all books and credentials.
 See [background hosting](docs/service.md) for storage and recovery details.
 
+## Connect a local agent
+
+Installers register Beankeeper with detected clients by default. Run
+`bk agents detect --json` to see which clients are available. To repair the
+connection, use `bk agents connect --all` or select one client, such as
+`bk agents connect codex`. Restart the client to load the updated configuration.
+Use `bk agents doctor --json` to check the managed configuration and make a
+read-only tool call through the local service.
+
+Supported clients are Claude Desktop, Claude Code, Codex CLI, Cursor, Gemini
+CLI, VS Code with Copilot, and Grok Build. An installed Beankeeper extension
+manages its own Claude Desktop connection. ChatGPT and hosted Grok appear as
+unsupported local configurations. Configuration changes leave other server
+entries in place and keep a private `.beankeeper-backup` beside the original.
+`bk agents disconnect <client>` removes the managed entries and skill for that
+client. Remove the Beankeeper extension from Claude Desktop Settings to
+remove an extension-managed connection.
+
+To install without changing agent settings, use `BK_NO_AGENTS=1` or the shell
+installer's `--no-agents` option. PowerShell accepts `-NoAgents`.
+The Windows setup executable accepts `/NOAGENTS=1`. The background service can
+still run and you can connect a client later.
+
 For manual foreground hosting, the owner can still run
 `bk --db /path/to/books.db setup` once in a terminal. It creates encrypted books,
 stores the passphrase in the OS keychain, prepares a private recovery kit and

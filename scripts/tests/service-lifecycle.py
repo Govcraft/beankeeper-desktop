@@ -51,7 +51,7 @@ def exercise_extension(binary, root, base_env):
 
     def run(executable, *arguments, **kwargs):
         return subprocess.run(
-            [str(executable), *arguments], env=env, capture_output=True,
+            [str(executable), *arguments], env=kwargs.pop("env", env), capture_output=True,
             text=True, encoding="utf-8", timeout=120, **kwargs,
         )
 
@@ -90,12 +90,31 @@ def exercise_extension(binary, root, base_env):
         assert not books.read_bytes().startswith(b"SQLite format 3")
         assert {path: path.read_bytes() if path.exists() else None for path in client_configs} == before
 
+        # Exercise the same authenticated tool through the public doctor command.
+        agent_env = {**env, "CODEX_HOME": str(parent / "codex")}
+        if sys.platform.startswith("linux"):
+            agent_env["XDG_CONFIG_HOME"] = env.get("XDG_CONFIG_HOME", str(home / ".config"))
+            agent_env["HOME"] = str(parent / "agent-home")
+        connected = run(installed, "agents", "connect", "codex", "--json", env=agent_env)
+        assert connected.returncode == 0, connected.stdout + connected.stderr
+        doctor = run(installed, "agents", "doctor", "codex", "--json", env=agent_env)
+        assert doctor.returncode == 0, doctor.stdout + doctor.stderr
+        diagnostic = json.loads(doctor.stdout)
+        assert diagnostic["data"]["agents"][0]["state"] == "configured"
+        assert diagnostic["data"]["service"]["state"] == "ready"
+        assert diagnostic["data"]["service"]["endpoint"] == status["mcp_endpoint"]
+
         # An explicitly stopped service must stay stopped on the next launch.
         stopped = run(installed, "service", "stop")
         assert stopped.returncode == 0, stopped.stderr
         output = run(installed, "mcp", "extension", input=messages)
         assert output.returncode != 0 and "SERVICE_NOT_READY" in output.stderr
         assert not output.stdout
+        doctor = run(installed, "agents", "doctor", "codex", "--json", env=agent_env)
+        assert doctor.returncode != 0, doctor.stdout + doctor.stderr
+        assert json.loads(doctor.stdout)["data"]["service"]["error"]["code"] == "SERVICE_NOT_READY"
+        disconnected = run(installed, "agents", "disconnect", "codex", "--json", env=agent_env)
+        assert disconnected.returncode == 0, disconnected.stdout + disconnected.stderr
         print("Claude extension first launch, MCP tools, durable executable and persistent stop passed")
     finally:
         run(binary, "service", "uninstall")

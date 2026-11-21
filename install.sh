@@ -8,18 +8,24 @@
 #   BK_VERSION   - version to install (default: latest)
 #   BK_INSTALL   - install directory (default: ~/.local/bin)
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
+#   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
 
 set -eu
 
 REPO="Govcraft/beankeeper-desktop"
 INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
 NO_SERVICE="${BK_NO_SERVICE:-0}"
+NO_AGENTS="${BK_NO_AGENTS:-0}"
 
 main() {
-    case "${1:-}" in
-        --no-service) NO_SERVICE=1; shift ;;
-    esac
-    [ "$#" -eq 0 ] || fatal "usage: install.sh [--no-service]"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-service) NO_SERVICE=1 ;;
+            --no-agents) NO_AGENTS=1 ;;
+            *) fatal "usage: install.sh [--no-service] [--no-agents]" ;;
+        esac
+        shift
+    done
     detect_platform
     resolve_version
     if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
@@ -28,7 +34,10 @@ main() {
     download_and_install
     verify
     if [ "$NO_SERVICE" != 1 ]; then
-        "${INSTALL_DIR}/bk" service install || fatal "background setup failed; run ${INSTALL_DIR}/bk service install in your desktop session"
+        "${INSTALL_DIR}/bk" service install --no-agents || fatal "background setup failed; run bk service install --no-agents in your desktop session"
+        if [ "$NO_AGENTS" != 1 ]; then
+            "${INSTALL_DIR}/bk" agents connect --all || fatal "agent registration needs attention; run bk agents doctor and retry bk agents connect --all"
+        fi
     fi
 }
 

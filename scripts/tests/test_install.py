@@ -81,11 +81,12 @@ sys.exit({1 if fail else 0})
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         actions = self.root / "service-actions"
-        self.assertEqual(actions.read_text().splitlines(), ["service install"])
+        self.assertEqual(actions.read_text().splitlines(), ["service install --no-agents", "agents connect --all"])
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(actions.read_text().splitlines(),
-                         ["service install", "service --help", "service stop", "service install"])
+                         ["service install --no-agents", "agents connect --all", "service --help",
+                          "service stop", "service install --no-agents", "agents connect --all"])
 
     def test_service_install_has_environment_and_flag_opt_outs(self):
         self.env["BK_NO_SERVICE"] = "1"
@@ -98,6 +99,20 @@ sys.exit({1 if fail else 0})
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "service-actions").exists())
+
+    def test_agent_opt_out_keeps_background_hosting(self):
+        self.env["BK_NO_AGENTS"] = "1"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actions = self.root / "service-actions"
+        self.assertEqual(actions.read_text().splitlines(), ["service install --no-agents"])
+        (self.destination / "bk").unlink()
+        actions.unlink()
+        self.env.pop("BK_NO_AGENTS")
+        result = subprocess.run(["/bin/sh", str(ROOT / "install.sh"), "--no-agents"],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(actions.read_text().splitlines(), ["service install --no-agents"])
 
     def test_tampered_archive_never_replaces_installed_binary(self):
         (self.destination / "bk").write_text("previous version")
