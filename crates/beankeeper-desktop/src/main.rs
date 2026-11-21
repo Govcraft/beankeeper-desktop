@@ -53,7 +53,7 @@ impl DesktopCommand {
             Some(("setup", options)) if matches!(options.subcommand(), Some(("status", _))) => {
                 Ok(Self::SetupStatus)
             }
-            Some(("setup", options)) => {
+            Some(("setup", options)) if options.subcommand_name().is_none() => {
                 setup::SetupOptions::from_arg_matches(options).map(Self::Setup)
             }
             Some(("mcp", mcp)) => match mcp.subcommand() {

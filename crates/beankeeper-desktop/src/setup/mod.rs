@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 
-use agent_uri::AgentUri;
 use beankeeper::types::Currency;
 use beankeeper_cli::{
     capability::Capability,
@@ -22,12 +21,12 @@ use beankeeper_cli::{
         spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
-    identity::{self, IssueRequest, VerifiedAgent},
+    identity::{self, IssueRequest, IssuedCredential, VerifiedAgent},
     passphrase,
 };
 use clap::{Args, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, de::IgnoredAny};
+use serde::de::IgnoredAny;
 
 use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
@@ -632,7 +631,7 @@ fn provision(
     }
     if !owner_file.exists() {
         let issued = issue(db, &actor, "desktop_owner", OWNER_CAPABILITIES)?;
-        private_create(owner_file, issued.token.expose_secret().as_bytes())?;
+        private_create(owner_file, issued.token().expose_secret().as_bytes())?;
     }
     let mut companies = db::list_companies(conn)?;
     if companies.is_empty() {
@@ -649,18 +648,8 @@ fn provision(
         }
     }
     audit::set_policy(conn, &actor, true)?;
-    private_create(token_file, issued.token.expose_secret().as_bytes())?;
+    private_create(token_file, issued.token().expose_secret().as_bytes())?;
     Ok(())
-}
-
-// Adapt the upstream JSON contract at the boundary. Downstream provisioning
-// sees a credential that carries its token and agent URI together.
-#[derive(Deserialize)]
-struct IssuedCredential {
-    token: SecretString,
-    agent_uri: AgentUri,
-    #[serde(rename = "private_key")]
-    _private_key: Option<SecretString>,
 }
 
 fn issue(
@@ -673,7 +662,7 @@ fn issue(
         .iter()
         .map(|capability| capability.path().to_owned())
         .collect::<Vec<_>>();
-    let wire = identity::issue(
+    Ok(identity::issue_credential(
         db.conn(),
         actor,
         &IssueRequest {
@@ -683,9 +672,7 @@ fn issue(
             public_key: None,
             generate_key: true,
         },
-    )?;
-    serde_json::from_value(wire)
-        .map_err(|_| SetupError::Invalid("upstream returned an invalid issued credential"))
+    )?)
 }
 
 fn generate_passphrase() -> Result<SecretString, SetupError> {
@@ -1042,37 +1029,6 @@ mod tests {
         assert!(!Preset::Bookkeeper.matches_grants(&[post.clone(), read.clone()]));
         assert!(!Preset::Bookkeeper.matches_grants(&[propose, approve, post, read.clone()]));
         assert!(Preset::ReadOnly.matches_grants(&[read.clone(), read]));
-    }
-
-    #[test]
-    fn issued_credential_requires_a_token_and_agent_uri() -> Result<(), serde_json::Error> {
-        let agent_uri = "agent://example.com/assistant/chat/llm_chat_01h455vb4pex5vsknk084sn02q";
-        let credential: IssuedCredential = serde_json::from_value(serde_json::json!({
-            "token": "fixture-token",
-            "agent_uri": agent_uri,
-            "private_key": "fixture-private-key"
-        }))?;
-        assert_eq!(credential.token.expose_secret(), "fixture-token");
-        assert_eq!(credential.agent_uri.as_str(), agent_uri);
-        assert!(
-            serde_json::from_value::<IssuedCredential>(serde_json::json!({
-                "agent_uri": agent_uri
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<IssuedCredential>(serde_json::json!({
-                "token": "fixture-token"
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<IssuedCredential>(serde_json::json!({
-                "token": "fixture-token", "agent_uri": "not an agent URI"
-            }))
-            .is_err()
-        );
-        Ok(())
     }
 
     #[cfg(unix)]
