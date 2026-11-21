@@ -9,7 +9,7 @@ required to build or merge this work.
 
 ## Artifacts and versions
 
-Desktop uses its own workspace version, currently `0.1.0-rc.3`, rather than upstream's
+Desktop uses its own workspace version, currently `0.1.0-rc.4`, rather than upstream's
 CLI version. Keep the upstream tag convention `beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
@@ -216,7 +216,14 @@ inclusive license update-window comparison. It is independent of the client
 clock. The artifacts map covers the available archive targets from the matrix;
 archive names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. OS installers are not
 self-update inputs. Increment the workspace version before an actual release;
-this feature adds only an Unreleased changelog entry.
+keep its changelog entry in sync.
+
+Stable clients discover GitHub's latest stable release. RC clients select the
+highest stable or `-rc.N` semantic version among the 100 most recent release
+records. Both fetch the manifest and bundle from the selected exact tag, and
+require the signed manifest version to match. RC manifests use the same schema,
+archive layout and signature requirements as stable manifests. Stable clients
+never install prereleases.
 
 The client parses bounded metadata only to select the expected tag identity,
 then runs `cosign verify-blob --bundle ... --certificate-identity ...

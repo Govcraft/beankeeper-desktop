@@ -91,16 +91,29 @@ bk update-check
 bk self-update
 ```
 
-The feed is the `update-manifest.json` asset on the latest stable release of
-`Govcraft/beankeeper-desktop`, authenticated by `update-manifest.json.sigstore`.
+Stable builds discover the latest stable release of
+`Govcraft/beankeeper-desktop` through GitHub's releases API. RC builds query the
+100 most recent release records and select the highest semantic version among
+published stable and `-rc.N` releases, regardless of list order. Drafts, foreign
+tags, other prerelease formats, build metadata and inconsistent prerelease flags
+are ignored. An empty or unsupported release set is reported as a failed check.
+An RC build can discover its own release before any stable release exists,
+advance from `rc.2` to `rc.10`, or upgrade to the final stable release. A stable
+build never upgrades to an RC release, even of a higher version.
+
+The selected tag supplies both `update-manifest.json` and
+`update-manifest.json.sigstore` through tag-specific download URLs. The API
+only selects a tag; its asset URLs are never trusted. The manifest must verify
+against that exact tag and name the same version. Discovery failures, missing
+assets or invalid signatures are cached as failures without an unsigned fallback.
 `cosign` must be on PATH for both checks and installation. Missing cosign, missing
 bundles, invalid checksums, wrong signing identity and invalid metadata all
 prevent installation. This differs deliberately from the legacy command-line
 installers' checksum-only fallback. No self-update runs automatically.
 
-Checks send only `version` and `os` query parameters, with a fixed product User
-Agent. They send no company, account, transaction, passphrase, license ID or
-purchaser data. Downloads use bounded HTTPS requests. Cosign can retrieve its
+Discovery requests send the Desktop `version` and `os`, plus the RC list's
+`per_page=100` pagination parameter, with a fixed product User Agent. They send
+no company, account, transaction, passphrase, license ID or purchaser data. Downloads use bounded HTTPS requests. Cosign can retrieve its
 public trust roots from Sigstore, independently of the GitHub metadata request.
 
 `bk serve` checks after successful startup without delaying ledger access, then

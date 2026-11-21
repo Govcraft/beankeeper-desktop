@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.4] - 2026-11-20
+
+### Fixed
+
+- Discover published stable and RC releases for RC update checks without relying
+  on GitHub's stable-only latest release. Select by semantic version and verify
+  the manifest and bundle from the same exact tag. Stable clients stay on stable
+  releases; signed RC manifests and self-update archives are now supported.
+
 ## [0.1.0-rc.3] - 2026-11-20
 
 ### Fixed

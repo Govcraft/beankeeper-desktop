@@ -15,6 +15,8 @@ use std::{
 use tempfile::NamedTempFile;
 
 const REPOSITORY: &str = "https://github.com/Govcraft/beankeeper-desktop";
+const RELEASE_API: &str = "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases";
+const TAG_PREFIX: &str = "beankeeper-desktop-v";
 const DAY: u64 = 86_400;
 const MAX_METADATA: u64 = 2 * 1024 * 1024;
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
@@ -45,7 +47,7 @@ impl fmt::Display for UpdateError {
             Self::Signature => f.write_str(
                 "Sigstore verification failed; install cosign and require a valid release bundle",
             ),
-            Self::Json(_) => f.write_str("invalid update manifest or cache"),
+            Self::Json(_) => f.write_str("invalid release metadata or update cache"),
         }
     }
 }
@@ -88,14 +90,21 @@ pub struct Artifact {
 fn release_version(value: &str) -> Result<semver::Version, UpdateError> {
     let version =
         semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
-    if !version.pre.is_empty() || !version.build.is_empty() {
-        return Err(UpdateError::Invalid("only stable releases are supported"));
+    let supported_prerelease = version
+        .pre
+        .as_str()
+        .strip_prefix("rc.")
+        .is_some_and(|rc| !rc.is_empty() && rc.bytes().all(|byte| byte.is_ascii_digit()));
+    if (!version.pre.is_empty() && !supported_prerelease) || !version.build.is_empty() {
+        return Err(UpdateError::Invalid(
+            "only stable and rc.N releases are supported",
+        ));
     }
     Ok(version)
 }
 
 /// Local Desktop version. Prereleases such as 0.1.0-rc.1 are allowed so an rc
-/// binary can compare itself to a stable update manifest. Build metadata is not.
+/// binary can compare itself to stable and RC manifests. Build metadata is not.
 fn installed_version(value: &str) -> Result<semver::Version, UpdateError> {
     let version =
         semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
@@ -120,10 +129,71 @@ impl Manifest {
         }
         Ok(manifest)
     }
-    /// Compare versions numerically, including multi-digit minor versions.
+    /// Compare semantically, keeping stable installations off prereleases.
     pub fn newer_than(&self, current: &str) -> Result<bool, UpdateError> {
-        Ok(release_version(&self.version)? > installed_version(current)?)
+        let candidate = release_version(&self.version)?;
+        let current = installed_version(current)?;
+        Ok((!current.pre.is_empty() || candidate.pre.is_empty()) && candidate > current)
     }
+}
+
+/// Discovery is untrusted: only a constrained tag is used, never API asset URLs.
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+}
+
+fn select_release(releases: &[GithubRelease], current: &str) -> Result<String, UpdateError> {
+    let current = installed_version(current)?;
+    releases
+        .iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            let version = release_version(release.tag_name.strip_prefix(TAG_PREFIX)?).ok()?;
+            let prerelease = !version.pre.is_empty();
+            (release.prerelease == prerelease && (!current.pre.is_empty() || !prerelease))
+                .then_some(version)
+        })
+        .max()
+        .map(|version| version.to_string())
+        .ok_or(UpdateError::Invalid("no supported published release found"))
+}
+
+fn fetch_manifest(
+    current: &str,
+    mut fetch: impl FnMut(&str, u64) -> Result<Vec<u8>, UpdateError>,
+    verifier: &dyn BundleVerifier,
+) -> Result<Manifest, UpdateError> {
+    let prerelease = !installed_version(current)?.pre.is_empty();
+    let endpoint = if prerelease {
+        format!("{RELEASE_API}?per_page=100&")
+    } else {
+        format!("{RELEASE_API}/latest?")
+    };
+    let bytes = fetch(
+        &format!("{endpoint}version={current}&os={}", std::env::consts::OS),
+        MAX_METADATA,
+    )?;
+    let releases = if prerelease {
+        serde_json::from_slice::<Vec<GithubRelease>>(&bytes)?
+    } else {
+        vec![serde_json::from_slice::<GithubRelease>(&bytes)?]
+    };
+    let version = select_release(&releases, current)?;
+    let bytes = fetch(&asset_url(&version, "update-manifest.json"), MAX_METADATA)?;
+    let bundle = fetch(
+        &asset_url(&version, "update-manifest.json.sigstore"),
+        MAX_METADATA,
+    )?;
+    let manifest = verify_manifest(&bytes, &bundle, verifier)?;
+    if manifest.version != version {
+        return Err(UpdateError::Invalid(
+            "manifest version does not match release tag",
+        ));
+    }
+    Ok(manifest)
 }
 
 /// Verify release blobs against one exact workflow/tag and GitHub's OIDC issuer.
@@ -315,17 +385,7 @@ pub fn status(path: &Path, disabled: bool) -> Result<String, UpdateError> {
 /// Opt-out is evaluated before files or the network are accessed.
 pub fn check(path: &Path, disabled: bool, now: u64) -> Result<String, UpdateError> {
     check_with(path, disabled, now, || {
-        let url = format!(
-            "{REPOSITORY}/releases/latest/download/update-manifest.json?version={}&os={}",
-            env!("CARGO_PKG_VERSION"),
-            std::env::consts::OS
-        );
-        let bytes = download(&url, MAX_METADATA)?;
-        let bundle = download(
-            &format!("{REPOSITORY}/releases/latest/download/update-manifest.json.sigstore"),
-            MAX_METADATA,
-        )?;
-        verify_manifest(&bytes, &bundle, &Cosign)
+        fetch_manifest(env!("CARGO_PKG_VERSION"), download, &Cosign)
     })
 }
 fn check_with(
@@ -716,9 +776,166 @@ mod tests {
         let bytes = serde_json::to_vec(&unsupported)?;
         assert!(verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier).is_err());
         assert!(release_version("1.0.0/../../payload").is_err());
-        assert!(release_version("1.0.0-rc.1").is_err());
+        assert!(release_version("1.0.0-rc.1").is_ok());
         assert!(installed_version("1.0.0-rc.1").is_ok());
         assert!(installed_version("1.0.0/../../payload").is_err());
+        Ok(())
+    }
+    #[test]
+    fn release_channels_use_semver_and_reject_unsupported_versions() -> TestResult {
+        for version in [
+            "1.0.0-beta.1",
+            "1.0.0-rc",
+            "1.0.0-rc.01",
+            "1.0.0-rc.1.extra",
+            "1.0.0-rc.1+build",
+            "1.0.0+build",
+            "v1.0.0",
+            "../1.0.0",
+        ] {
+            assert!(release_version(version).is_err(), "accepted {version}");
+        }
+        let mut manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+        for (candidate, current, newer) in [
+            ("0.1.0-rc.10", "0.1.0-rc.2", true),
+            ("0.1.0-rc.2", "0.1.0-rc.10", false),
+            ("0.1.0-rc.2", "0.1.0-rc.2", false),
+            ("0.1.0", "0.1.0-rc.10", true),
+            ("0.1.0-rc.10", "0.1.0", false),
+            ("0.2.0-rc.1", "0.1.0", false),
+            ("0.2.0", "0.1.0", true),
+        ] {
+            manifest.version = candidate.into();
+            assert_eq!(
+                manifest.newer_than(current)?,
+                newer,
+                "{candidate} vs {current}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_selection_ignores_order_drafts_foreign_tags_and_other_channels() -> TestResult {
+        let releases: Vec<GithubRelease> = serde_json::from_value(serde_json::json!([
+            {"tag_name":"beankeeper-desktop-v0.1.0-rc.2","draft":false,"prerelease":true},
+            {"tag_name":"beankeeper-desktop-v0.1.0","draft":false,"prerelease":false},
+            {"tag_name":"beankeeper-desktop-v9.0.0","draft":true,"prerelease":false},
+            {"tag_name":"beankeeper-cli-v9.0.0","draft":false,"prerelease":false},
+            {"tag_name":"beankeeper-desktop-v9.0.0-beta.1","draft":false,"prerelease":true},
+            {"tag_name":"beankeeper-desktop-v9.0.0-rc.1","draft":false,"prerelease":false},
+            {"tag_name":"beankeeper-desktop-v9.0.0","draft":false,"prerelease":true},
+            {"tag_name":"beankeeper-desktop-v0.2.0-rc.10","draft":false,"prerelease":true},
+            {"tag_name":"beankeeper-desktop-v0.2.0-rc.2","draft":false,"prerelease":true}
+        ]))?;
+        assert_eq!(select_release(&releases, "0.1.0-rc.1")?, "0.2.0-rc.10");
+        assert_eq!(select_release(&releases, "0.1.0")?, "0.1.0");
+        assert_eq!(select_release(&releases[7..], "0.1.0-rc.1")?, "0.2.0-rc.10");
+        assert!(select_release(&releases[7..], "0.1.0").is_err());
+        assert!(select_release(&[], "0.1.0-rc.1").is_err());
+        assert!(select_release(&releases, "invalid").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_pins_manifest_and_bundle_to_selected_tag_and_caches_rc_result() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        for (current, version) in [
+            ("0.1.0-rc.1", "0.1.0-rc.1"),
+            ("0.1.0-rc.2", "0.1.0-rc.10"),
+            ("0.1.0-rc.10", "0.1.0"),
+            ("0.1.0", "0.1.0"),
+        ] {
+            let mut manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+            manifest.version = version.into();
+            let bytes = serde_json::to_vec(&manifest)?;
+            let release = serde_json::json!({
+                "tag_name": format!("{TAG_PREFIX}{version}"),
+                "draft": false, "prerelease": version.contains("-rc."),
+                "assets": [{"browser_download_url": "https://untrusted.example/payload"}]
+            });
+            let metadata = if current.contains("-rc.") {
+                serde_json::to_vec(&vec![release])?
+            } else {
+                serde_json::to_vec(&release)?
+            };
+            let mut urls = Vec::new();
+            let fetched = fetch_manifest(
+                current,
+                |url, limit| {
+                    assert_eq!(limit, MAX_METADATA);
+                    urls.push(url.to_owned());
+                    match urls.len() {
+                        1 => Ok(metadata.clone()),
+                        2 => Ok(bytes.clone()),
+                        3 => Ok(sign(&bytes)),
+                        _ => panic!("unexpected request"),
+                    }
+                },
+                &OfflineVerifier,
+            )?;
+            assert_eq!(fetched.version, version);
+            let endpoint = if current.contains("-rc.") {
+                format!("{RELEASE_API}?per_page=100&")
+            } else {
+                format!("{RELEASE_API}/latest?")
+            };
+            assert_eq!(
+                urls,
+                [
+                    format!("{endpoint}version={current}&os={}", std::env::consts::OS),
+                    asset_url(version, "update-manifest.json"),
+                    asset_url(version, "update-manifest.json.sigstore"),
+                ]
+            );
+            let checked_at = now();
+            let result = check_with(&path, false, checked_at, || Ok(fetched))?;
+            assert_eq!(
+                read_cache(&path)?
+                    .manifest
+                    .ok_or("missing cached manifest")?
+                    .version,
+                version
+            );
+            assert_eq!(
+                check_with(&path, false, checked_at + 1, || panic!(
+                    "daily cache ignored"
+                ))?,
+                result
+            );
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_rejects_mismatched_signed_manifests_and_missing_bundles() -> TestResult {
+        let mut manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+        manifest.version = "0.1.0-rc.2".into();
+        let bytes = serde_json::to_vec(&manifest)?;
+        for (bundle, expected) in [
+            (sign(&bytes), "manifest version does not match release tag"),
+            (Vec::new(), "Sigstore verification failed"),
+            (b"invalid bundle".to_vec(), "Sigstore verification failed"),
+        ] {
+            let result = fetch_manifest(
+                "0.1.0-rc.1",
+                |url, _| {
+                    if url.starts_with(RELEASE_API) {
+                        Ok(br#"[{"tag_name":"beankeeper-desktop-v0.1.0-rc.1","draft":false,"prerelease":true}]"#.to_vec())
+                    } else if url.ends_with(".sigstore") {
+                        Ok(bundle.clone())
+                    } else {
+                        Ok(bytes.clone())
+                    }
+                },
+                &OfflineVerifier,
+            );
+            assert!(result.is_err_and(|error| error.to_string().contains(expected)));
+        }
+        let command = cosign_command(Path::new("archive"), Path::new("bundle"), "0.1.0-rc.2")?;
+        assert!(command.get_args().any(|arg| arg == format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.2").as_str()));
         Ok(())
     }
     #[test]
@@ -945,6 +1162,42 @@ mod tests {
             );
         }
         assert_eq!(directory.path().read_dir()?.count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn rc_release_installs_only_after_manifest_archive_and_checksum_verification() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("bk");
+        fs::write(&destination, b"old executable")?;
+        let version = "0.1.0-rc.10";
+        let target = "x86_64-unknown-linux-gnu";
+        let archive = archive(version, target);
+        let mut manifest = manifest(&archive, target);
+        manifest.version = version.into();
+        let bytes = serde_json::to_vec(&manifest)?;
+        let manifest = verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier)?;
+        let checksums = format!("{}  {}\n", sha256(&archive), archive_name(version, target));
+        for bundle in [b"invalid".to_vec(), sign(&archive)] {
+            let result = install(
+                &manifest,
+                target,
+                ReleaseFiles {
+                    archive: &archive,
+                    bundle: &bundle,
+                    checksums: checksums.as_bytes(),
+                    checksums_bundle: &sign(checksums.as_bytes()),
+                },
+                &destination,
+                &OfflineVerifier,
+            );
+            if bundle == b"invalid" {
+                assert!(result.is_err());
+                assert_eq!(fs::read(&destination)?, b"old executable");
+            } else {
+                result?;
+                assert_eq!(fs::read(&destination)?, b"fixture executable");
+            }
+        }
         Ok(())
     }
     #[test]

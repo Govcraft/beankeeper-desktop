@@ -74,6 +74,9 @@ inspect it with `bk license`, check the signed release feed with
 separate open/ended update window is informational and never expires perpetual
 use. Update eligibility uses the signed release date. Missing activations and
 verification failures show their specific reason.
+Stable builds check stable releases; RC builds check stable
+and `-rc.N` releases among the 100 most recent GitHub release records. All
+updates require the signed manifest and bundles from the selected exact tag.
 License files, claim codes and recovery tokens are human-owned;
 never ask for them or perform activation on the human's behalf. Normal ledger
 and agent work does not require online license verification. Automatic update
