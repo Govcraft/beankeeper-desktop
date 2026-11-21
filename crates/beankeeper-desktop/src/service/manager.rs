@@ -293,11 +293,14 @@ fn windows_runner(paths: &Paths, config: &Config) -> Result<String, ServiceError
     for (key, path) in environment(paths) {
         script.push_str(&format!("$env:{key} = {}\n", ps(text(path)?)?));
     }
+    // Task Scheduler considers a launched action completed even when it returns
+    // an error. Keep its action alive and supervise the actual host directly.
     script.push_str(&format!(
-        "$process = Start-Process -FilePath {} -ArgumentList 'service','run' -NoNewWindow -Wait -PassThru -RedirectStandardOutput {} -RedirectStandardError {}\n# Start-Process may return a null ExitCode with redirected streams. Any\n# return of the long-running host is unexpected; stop disables the task\n# before terminating this runner. Report failure so Task Scheduler retries.\nexit 1\n",
+        "while ($true) {{\n    try {{\n        Start-Process -FilePath {} -ArgumentList 'service','run' -NoNewWindow -Wait -RedirectStandardOutput {} -RedirectStandardError {}\n    }} catch {{\n        Add-Content -LiteralPath {} -Encoding UTF8 -Value 'Unable to start Desktop host; retrying.'\n    }}\n    Start-Sleep -Seconds 2\n}}\n",
         ps(text(&config.executable)?)?,
         ps(text(&paths.logs.join("service-stdout.log"))?)?,
-        ps(text(&paths.log())?)?
+        ps(text(&paths.log())?)?,
+        ps(text(&paths.log())?)?,
     ));
     Ok(script)
 }
@@ -400,7 +403,8 @@ mod tests {
         assert!(runner.contains("Start-Process"));
         assert!(runner.contains("-RedirectStandardError"));
         assert!(!runner.contains("*>>"));
-        assert!(runner.ends_with("exit 1\n"));
+        assert!(runner.contains("while ($true)"));
+        assert!(runner.contains("Start-Sleep -Seconds 2"));
         assert!(!runner.contains("exit $process.ExitCode"));
         assert!(windows_task(&paths)?.contains("-WindowStyle Hidden"));
         Ok(())

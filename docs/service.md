@@ -103,12 +103,14 @@ Stop disables the label and boots it out of the user's GUI domain. Start enables
 and bootstraps it again. A logged-in GUI session is required.
 
 Windows uses a current-user interactive logon task with limited privileges,
-crash retry every minute (up to 999 consecutive retries), no runtime limit, and
-battery operation enabled. Stop disables the task before stopping it. The task
-runner redirects diagnostics to the protected log and reports unexpected host
-termination as failure so Task Scheduler retries, including after a forced kill.
-The task and lifecycle helpers hide their console windows. No administrator rights are
-needed for service management.
+no runtime limit, and battery operation enabled. Its hidden runner waits for the
+host and restarts it after a two-second delay whenever it exits. Task Scheduler
+can report an executed action as completed even when the action returns an error,
+so child-host recovery stays inside this small runner. The task also retains
+native startup retry settings (one minute, up to 999 attempts). Stop disables the
+task before stopping the runner and its host. Diagnostics go to the protected
+log, and lifecycle helpers hide their console windows. No administrator rights
+are needed for service management.
 
 These registrations follow the native [systemd service contract](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html),
 [launchd property-list contract](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5),

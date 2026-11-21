@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.error
 
 
 def main():
@@ -172,6 +173,11 @@ def main():
             assert stopped["installed"] and not stopped["running"]
             time.sleep(3)
             assert not status()["running"], "stop allowed an automatic restart"
+            try:
+                with client.open(restarted["desktop_url"] + "health", timeout=2):
+                    raise AssertionError("stopped host is still accepting requests")
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                pass
             # Replace the installed executable as an installer does. Reinstallation
             # must register the new inode/path and reuse existing books and secrets.
             replacement = root / ("replacement.exe" if os.name == "nt" else "replacement")
