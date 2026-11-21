@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -14,6 +15,14 @@ import sys
 import tempfile
 import time
 import urllib.request
+
+
+def safe_log_tail(path):
+    if not path.exists():
+        return "no service log"
+    content = path.read_text(encoding="utf-8", errors="replace")
+    content = re.sub(r"([?&]token=)[^\s&]+", r"\1[redacted]", content)
+    return content[-8000:]
 
 
 def main():
@@ -60,7 +69,7 @@ def main():
             if result.returncode:
                 log = root / "logs/service.log"
                 # Failure logs must never include recovery or credential files.
-                diagnostics = log.read_text(errors="replace")[-8000:] if log.exists() else "no service log"
+                diagnostics = safe_log_tail(log)
                 raise AssertionError(f"{' '.join(arguments)} failed:\n{result.stderr}\n{diagnostics}")
             return result.stdout
 
@@ -69,7 +78,7 @@ def main():
 
         def diagnostics():
             log = root / "logs/service.log"
-            details = log.read_text(encoding="utf-8", errors="replace")[-8000:] if log.exists() else "no log"
+            details = safe_log_tail(log)
             if os.name == "nt":
                 task = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
                     "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
@@ -113,7 +122,7 @@ def main():
             details = windows_task_diagnostics() if os.name == "nt" else ""
             log = root / "logs/service.log"
             if log.exists():
-                details += log.read_text(encoding="utf-8", errors="replace")[-8000:]
+                details += safe_log_tail(log)
             raise AssertionError(f"service did not reach expected state: {state}\n{details}")
 
         try:
