@@ -12,11 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use beankeeper_cli::cli::Cli;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 use secrecy::ExposeSecret;
-use crate::private_file::{PrivateFile, BEARER_FILE_LIMIT};
+use serde::{Deserialize, Serialize};
 
 use crate::setup::{self, keychain};
 
@@ -299,7 +299,7 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
     result.message = "Beankeeper is registered but is not ready. Inspect the service log; an expired or revoked agent token needs owner renewal.".into();
     let token_file = result.books.with_extension("agent-token");
     let token = PrivateFile::open(&token_file)?.read_secret(BEARER_FILE_LIMIT)?;
-    if setup::running_for_ledger(runtime.bind, token.expose_secret()).unwrap_or(false) {
+    if setup::running_for_ledger(runtime.bind, &token).unwrap_or(false) {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
