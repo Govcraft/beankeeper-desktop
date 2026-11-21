@@ -33,7 +33,8 @@ fn main() {
     let url = nonempty_env("BEANKEEPER_LICENSE_SERVICE_URL")
         .or_else(|| file_defaults.as_ref().map(|d| d.url.clone()));
 
-    if release && (keys.as_ref().is_none_or(|s| s.is_empty()) || url.as_ref().is_none_or(|s| s.is_empty()))
+    if release
+        && (keys.as_ref().is_none_or(|s| s.is_empty()) || url.as_ref().is_none_or(|s| s.is_empty()))
     {
         panic!(
             "release builds must embed license trust: set BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON and \
