@@ -8,12 +8,12 @@ use std::{
 };
 
 use axum::{
-    Extension, Form, Json, Router,
+    Form, Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response, Sse, sse::Event},
-    routing::{get, post},
+    routing::get,
 };
 use beankeeper_cli::{
     capability::Capability,
@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 
-use crate::pairing::{self, AgentKey, BrowserSessionId, PairingError, PairingState, Session};
+use crate::pairing::{
+    self, AgentKey, BrowserSessionId, HumanSession, HumanWrite, PairingError, PairingState,
+};
 
 const TAB_LIFETIME: Duration = Duration::from_secs(3);
 const MAX_TABS: usize = 128;
@@ -319,7 +321,8 @@ impl HostToolHandler for Navigation {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TabUpdate {
-    csrf: String,
+    #[serde(rename = "csrf")]
+    _csrf: serde::de::IgnoredAny,
     tab_id: Option<TabId>,
     url: String,
     #[serde(default)]
@@ -335,7 +338,7 @@ struct Events {
 
 pub(crate) fn router(navigation: Navigation, pairing: PairingState) -> Router {
     Router::new()
-        .route("/api/ui/tab", post(update))
+        .route("/api/ui/tab", pairing::human_post(update))
         .route("/api/ui/events", get(events))
         .with_state(navigation)
         .route_layer(middleware::from_fn_with_state(
@@ -378,12 +381,11 @@ fn local_view(url: &str) -> bool {
 }
 
 async fn update(
+    write: HumanWrite,
     State(state): State<Navigation>,
-    Extension(session): Extension<Session>,
     Form(input): Form<TabUpdate>,
 ) -> Response {
-    // human_guard already checked this field before the form extractor.
-    let _csrf = input.csrf;
+    let session_id = write.session().id();
     if !local_view(&input.url) || input.targets.len() > 4096 {
         return (StatusCode::BAD_REQUEST, "Invalid tab state").into_response();
     }
@@ -393,13 +395,13 @@ async fn update(
     tabs.retain(|_, tab| tab.seen.elapsed() < TAB_LIFETIME);
     let id = input
         .tab_id
-        .filter(|id| tabs.get(id).is_some_and(|tab| tab.session == session.id))
+        .filter(|id| tabs.get(id).is_some_and(|tab| &tab.session == session_id))
         .unwrap_or_else(TabId::new);
     if tabs.len() >= MAX_TABS && !tabs.contains_key(&id) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let tab = tabs.entry(id.clone()).or_insert_with(|| Tab {
-        session: session.id,
+        session: session_id.clone(),
         url: String::new(),
         title: String::new(),
         targets: Vec::new(),
@@ -445,7 +447,7 @@ impl Drop for StreamLease {
 
 async fn events(
     State(state): State<Navigation>,
-    Extension(session): Extension<Session>,
+    session: HumanSession,
     headers: HeaderMap,
     Query(input): Query<Events>,
 ) -> Result<Response, PairingError> {
@@ -453,7 +455,7 @@ async fn events(
         let mut tabs = state.tabs.lock().map_err(|_| PairingError::Unavailable)?;
         let tab = tabs
             .get_mut(&input.tab_id)
-            .filter(|tab| tab.session == session.id)
+            .filter(|tab| &tab.session == session.id())
             .ok_or(PairingError::Unauthorized)?;
         tab.connected = true;
         tab.epoch = tab.epoch.wrapping_add(1);
@@ -474,10 +476,10 @@ async fn events(
             let mut tabs = state.tabs.lock().ok()?;
             let tab = tabs
                 .get_mut(&input.tab_id)
-                .filter(|tab| tab.session == live.id && tab.epoch == lease.epoch)?;
+                .filter(|tab| &tab.session == live.id() && tab.epoch == lease.epoch)?;
             tab.seen = Instant::now();
-            let mut event = next_event(&mut tab.pending, live.agent.as_ref());
-            event["agent_associated"] = json!(live.agent.is_some());
+            let mut event = next_event(&mut tab.pending, live.agent());
+            event["agent_associated"] = json!(live.agent().is_some());
             let _keep_lease = &lease;
             Some(Ok::<_, Infallible>(
                 Event::default().event("ui").data(event.to_string()),

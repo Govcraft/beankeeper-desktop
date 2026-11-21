@@ -7,7 +7,7 @@ mod secret;
 
 pub use agent_key::AgentKey;
 pub use browser_session_id::BrowserSessionId;
-pub(crate) use routes::human_guard;
+pub(crate) use routes::{human_guard, human_post};
 pub(crate) use routes::{mcp_guard, router};
 
 use std::{
@@ -20,6 +20,8 @@ use std::{
 
 use axum::http::{HeaderMap, header};
 use secret::Secret;
+
+use crate::boundary::SameOrigin;
 
 const LINK_LIFETIME: Duration = Duration::from_secs(300);
 const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 3600);
@@ -67,20 +69,70 @@ impl From<io::Error> for PairingError {
     }
 }
 
-#[derive(Clone)]
 struct Link {
     secret: Secret,
     expires: Instant,
-    agent: Option<AgentKey>,
+    kind: LinkKind,
+}
+
+enum LinkKind {
+    Browser,
+    AgentInvite(AgentKey),
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Session {
-    pub(crate) id: BrowserSessionId,
-    pub(crate) csrf: Secret,
+struct Session {
+    id: BrowserSessionId,
+    csrf: Secret,
     authority: String,
     expires: Instant,
-    pub(crate) agent: Option<AgentKey>,
+    binding: Binding,
+}
+
+#[derive(Clone, Debug)]
+enum Binding {
+    BrowserOnly,
+    Agent(AgentKey),
+}
+
+/// A session authenticated by its private pairing cookie and exact Host.
+#[derive(Clone)]
+pub(crate) struct HumanSession {
+    session: Session,
+    cookie_key: [u8; 32],
+}
+
+impl fmt::Debug for HumanSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HumanSession").field(&self.session).finish()
+    }
+}
+
+impl HumanSession {
+    pub(crate) fn id(&self) -> &BrowserSessionId {
+        &self.session.id
+    }
+
+    pub(crate) fn csrf_token(&self) -> &str {
+        self.session.csrf.expose()
+    }
+
+    pub(crate) fn agent(&self) -> Option<&AgentKey> {
+        match &self.session.binding {
+            Binding::BrowserOnly => None,
+            Binding::Agent(agent) => Some(agent),
+        }
+    }
+}
+
+/// Proof that a human session also presented the same Origin and its CSRF token.
+#[derive(Clone)]
+pub(crate) struct HumanWrite(HumanSession);
+
+impl HumanWrite {
+    pub(crate) fn session(&self) -> &HumanSession {
+        &self.0
+    }
 }
 
 struct Destination {
@@ -222,32 +274,34 @@ impl PairingState {
     fn insert_link(
         &self,
         registry: &mut Registry,
-        agent: Option<AgentKey>,
+        kind: LinkKind,
         now: Instant,
     ) -> Result<String, PairingError> {
         if registry.links.len() >= MAX_ENTRIES {
             return Err(PairingError::Capacity);
         }
-        let secret = Secret::generate()?;
-        let url = self.link_url(&secret, agent.is_some());
-        registry.links.insert(
-            Secret::digest(secret.expose()),
-            Link {
-                secret,
-                agent,
-                expires: now + LINK_LIFETIME,
-            },
-        );
+        let link = Link {
+            secret: Secret::generate()?,
+            expires: now + LINK_LIFETIME,
+            kind,
+        };
+        let url = self.link_url(&link);
+        registry
+            .links
+            .insert(Secret::digest(link.secret.expose()), link);
         Ok(url)
     }
 
-    fn link_url(&self, secret: &Secret, invite: bool) -> String {
-        let kind = if invite { "invite" } else { "token" };
-        format!("{}pair?{kind}={}", self.base, secret.expose())
+    fn link_url(&self, link: &Link) -> String {
+        let kind = match link.kind {
+            LinkKind::Browser => "token",
+            LinkKind::AgentInvite(_) => "invite",
+        };
+        format!("{}pair?{kind}={}", self.base, link.secret.expose())
     }
 
     fn browser_link(&self, now: Instant) -> Result<String, PairingError> {
-        self.insert_link(&mut *self.lock(now)?, None, now)
+        self.insert_link(&mut *self.lock(now)?, LinkKind::Browser, now)
     }
 
     /// Return a five-minute, one-use agent association link for D4 navigation.
@@ -263,11 +317,11 @@ impl PairingState {
         if let Some(link) = registry
             .links
             .values()
-            .find(|link| link.agent.as_ref() == Some(&agent))
+            .find(|link| matches!(&link.kind, LinkKind::AgentInvite(owner) if *owner == agent))
         {
-            return Ok(self.link_url(&link.secret, true));
+            return Ok(self.link_url(link));
         }
-        self.insert_link(&mut registry, Some(agent), now)
+        self.insert_link(&mut registry, LinkKind::AgentInvite(agent), now)
     }
 
     /// Browser routing targets for an authenticated agent, excluding expired sessions.
@@ -286,19 +340,24 @@ impl PairingState {
             .lock(now)?
             .sessions
             .values()
-            .filter(|session| session.agent.as_ref() == Some(agent))
+            .filter(|session| matches!(&session.binding, Binding::Agent(owner) if owner == agent))
             .map(|session| session.id.clone())
             .collect())
     }
 
-    fn redeem(&self, token: &str, authority: &str, now: Instant) -> Result<String, PairingError> {
+    fn redeem(
+        &self,
+        token: &str,
+        origin: &SameOrigin,
+        now: Instant,
+    ) -> Result<String, PairingError> {
         let mut registry = self.lock(now)?;
         let digest = Secret::digest(token);
         let link = registry
             .links
             .get(&digest)
             .ok_or(PairingError::InvalidLink)?;
-        if link.agent.is_some() {
+        if !matches!(link.kind, LinkKind::Browser) {
             return Err(PairingError::InvalidLink);
         }
         if registry.sessions.len() >= MAX_ENTRIES {
@@ -308,9 +367,9 @@ impl PairingState {
         let session = Session {
             id: BrowserSessionId::new(),
             csrf: Secret::generate()?,
-            authority: authority.into(),
+            authority: origin.authority().into(),
             expires: now + SESSION_LIFETIME,
-            agent: None,
+            binding: Binding::BrowserOnly,
         };
         registry.links.remove(&digest);
         registry
@@ -347,72 +406,78 @@ impl PairingState {
         &self,
         headers: &HeaderMap,
         now: Instant,
-    ) -> Result<Session, PairingError> {
+    ) -> Result<HumanSession, PairingError> {
         // Bearer credentials never confer human authority, even with a cookie.
         if headers.contains_key(header::AUTHORIZATION) {
             return Err(PairingError::Unauthorized);
         }
+        let cookie_key = Secret::digest(self.cookie(headers)?);
         let registry = self.lock(now)?;
         let session = registry
             .sessions
-            .get(&Secret::digest(self.cookie(headers)?))
+            .get(&cookie_key)
             .ok_or(PairingError::Unauthorized)?;
-        if headers
-            .get(header::HOST)
-            .and_then(|host| host.to_str().ok())
-            != Some(&session.authority)
+        let mut hosts = headers.get_all(header::HOST).iter();
+        if hosts.next().and_then(|value| value.to_str().ok()) != Some(&session.authority)
+            || hosts.next().is_some()
         {
             return Err(PairingError::Unauthorized);
         }
-        Ok(session.clone())
+        Ok(HumanSession {
+            session: session.clone(),
+            cookie_key,
+        })
     }
 
     fn associate(
         &self,
-        headers: &HeaderMap,
+        write: &HumanWrite,
         invite: &str,
         now: Instant,
     ) -> Result<(), PairingError> {
-        let session = self.session(headers, now)?;
+        let session = write.session();
         let mut registry = self.lock(now)?;
         let digest = Secret::digest(invite);
-        let agent = registry
+        let link = registry
             .links
             .get(&digest)
-            .and_then(|link| link.agent.clone())
             .ok_or(PairingError::InvalidLink)?;
+        let LinkKind::AgentInvite(agent) = &link.kind else {
+            return Err(PairingError::InvalidLink);
+        };
+        let agent = agent.clone();
         let target = registry
             .sessions
-            .get_mut(&Secret::digest(self.cookie(headers)?))
-            .filter(|target| target.id == session.id)
+            .get_mut(&session.cookie_key)
+            .filter(|target| &target.id == session.id())
             .ok_or(PairingError::Unauthorized)?;
-        target.agent = Some(agent);
+        target.binding = Binding::Agent(agent);
         registry.links.remove(&digest);
         Ok(())
     }
 
     fn authorize_write(
         &self,
-        headers: &HeaderMap,
+        session: HumanSession,
+        origin: &SameOrigin,
         csrf: &str,
         now: Instant,
-    ) -> Result<Session, PairingError> {
-        let session = self.session(headers, now)?;
-        let mut origins = headers.get_all(header::ORIGIN).iter();
-        if origins.next().and_then(|origin| origin.to_str().ok())
-            != Some(format!("http://{}", session.authority).as_str())
-            || origins.next().is_some()
-            || !session.csrf.matches(csrf)
+    ) -> Result<HumanWrite, PairingError> {
+        if origin.authority() != session.session.authority
+            || !session.session.csrf.matches(csrf)
+            || !self.lock(now)?.sessions.contains_key(&session.cookie_key)
         {
             return Err(PairingError::Unauthorized);
         }
-        Ok(session)
+        Ok(HumanWrite(session))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boundary::{LocalBoundary, LocalOrigin};
+    use axum::http::HeaderValue;
 
     type TestResult = Result<(), Box<dyn Error>>;
 
@@ -425,6 +490,7 @@ mod tests {
     fn headers(cookie: &str) -> Result<HeaderMap, Box<dyn Error>> {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "127.0.0.1:8750".parse()?);
+        headers.insert(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
         headers.insert(
             header::COOKIE,
             cookie.split(';').next().ok_or("cookie")?.parse()?,
@@ -432,27 +498,55 @@ mod tests {
         Ok(headers)
     }
 
+    fn write_proof(
+        state: &PairingState,
+        headers: &HeaderMap,
+        csrf: &str,
+        now: Instant,
+    ) -> Result<HumanWrite, PairingError> {
+        let session = state.session(headers, now)?;
+        state.authorize_write(session, &verified_origin(headers)?, csrf, now)
+    }
+
+    fn verified_origin(headers: &HeaderMap) -> Result<SameOrigin, PairingError> {
+        match LocalBoundary::new(8750).check(headers) {
+            Some(LocalOrigin::Same(origin)) => Ok(origin),
+            _ => Err(PairingError::Unauthorized),
+        }
+    }
+
+    fn origin() -> Result<SameOrigin, PairingError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8750"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8750"),
+        );
+        verified_origin(&headers)
+    }
+
     #[test]
     fn links_are_random_single_use_and_expire_at_five_minutes() -> TestResult {
+        let origin = origin()?;
         let (state, launch) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
         let next = state.browser_link(now)?;
         assert_ne!(launch, next);
         assert_eq!(capability(&launch)?.len(), 64);
-        let cookie = state.redeem(capability(&launch)?, "127.0.0.1:8750", now)?;
+        let cookie = state.redeem(capability(&launch)?, &origin, now)?;
         assert!(!cookie.contains(capability(&launch)?));
         assert!(matches!(
-            state.redeem(capability(&launch)?, "127.0.0.1:8750", now),
+            state.redeem(capability(&launch)?, &origin, now),
             Err(PairingError::InvalidLink)
         ));
         assert!(matches!(
-            state.redeem(capability(&next)?, "127.0.0.1:8750", now + LINK_LIFETIME),
+            state.redeem(capability(&next)?, &origin, now + LINK_LIFETIME),
             Err(PairingError::InvalidLink)
         ));
         let fresh = state.browser_link(now + LINK_LIFETIME)?;
         assert!(
             state
-                .redeem(capability(&fresh)?, "127.0.0.1:8750", now + LINK_LIFETIME)
+                .redeem(capability(&fresh)?, &origin, now + LINK_LIFETIME)
                 .is_ok()
         );
         Ok(())
@@ -460,19 +554,19 @@ mod tests {
 
     #[test]
     fn concurrent_redemption_creates_exactly_one_session() -> TestResult {
+        let origin = origin()?;
         let (state, url) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let token = capability(&url)?.to_owned();
         let barrier = Arc::new(std::sync::Barrier::new(8));
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let state = state.clone();
+                let origin = origin.clone();
                 let token = token.clone();
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    state
-                        .redeem(&token, "127.0.0.1:8750", Instant::now())
-                        .is_ok()
+                    state.redeem(&token, &origin, Instant::now()).is_ok()
                 })
             })
             .collect();
@@ -487,18 +581,20 @@ mod tests {
     #[test]
     fn human_sessions_require_correct_host_origin_and_csrf_and_do_not_survive_restart() -> TestResult
     {
+        let origin = origin()?;
         let (state, url) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
-        let cookie = state.redeem(capability(&url)?, "127.0.0.1:8750", now)?;
+        let cookie = state.redeem(capability(&url)?, &origin, now)?;
         let mut headers = headers(&cookie)?;
         let session = state.session(&headers, now)?;
-        let csrf = session.csrf.expose();
-        assert!(state.authorize_write(&headers, csrf, now).is_err());
+        let csrf = session.csrf_token();
+        assert!(write_proof(&state, &headers, csrf, now).is_ok());
+        headers.remove(header::ORIGIN);
+        assert!(write_proof(&state, &headers, csrf, now).is_err());
         headers.insert(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
-        assert!(state.authorize_write(&headers, csrf, now).is_ok());
-        assert!(state.authorize_write(&headers, "incorrect", now).is_err());
+        assert!(write_proof(&state, &headers, "incorrect", now).is_err());
         headers.append(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
-        assert!(state.authorize_write(&headers, csrf, now).is_err());
+        assert!(write_proof(&state, &headers, csrf, now).is_err());
         headers.remove(header::ORIGIN);
         headers.insert(header::HOST, "localhost:8750".parse()?);
         assert!(state.session(&headers, now).is_err());
@@ -518,11 +614,7 @@ mod tests {
         headers.remove(header::AUTHORIZATION);
         let (restarted, _) = PairingState::new("127.0.0.1:8750".parse()?)?;
         assert!(restarted.session(&headers, now).is_err());
-        assert!(
-            restarted
-                .redeem(capability(&url)?, "127.0.0.1:8750", now)
-                .is_err()
-        );
+        assert!(restarted.redeem(capability(&url)?, &origin, now).is_err());
         assert!(state.session(&headers, now + SESSION_LIFETIME).is_err());
         assert!(!format!("{session:?}").contains(csrf));
         Ok(())
@@ -531,6 +623,7 @@ mod tests {
     #[test]
     fn agent_invites_cannot_create_human_sessions_and_route_only_to_the_confirming_browsers()
     -> TestResult {
+        let origin = origin()?;
         let (state, launch) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
         let agent = AgentKey::for_test("verified-agent-one");
@@ -541,37 +634,24 @@ mod tests {
             invite,
             state.agent_pairing_url(agent.clone(), now + Duration::from_secs(1))?
         );
-        assert!(
-            state
-                .redeem(capability(&invite)?, "127.0.0.1:8750", now)
-                .is_err()
-        );
-        assert!(
-            state
-                .associate(&HeaderMap::new(), capability(&invite)?, now)
-                .is_err()
-        );
-        let cookie = state.redeem(capability(&launch)?, "127.0.0.1:8750", now)?;
-        state.associate(&headers(&cookie)?, capability(&invite)?, now)?;
+        assert!(state.redeem(capability(&invite)?, &origin, now).is_err());
+        let cookie = state.redeem(capability(&launch)?, &origin, now)?;
+        let first_headers = headers(&cookie)?;
+        let first_session = state.session(&first_headers, now)?;
+        let first_csrf = first_session.csrf_token();
+        let first = write_proof(&state, &first_headers, first_csrf, now)?;
+        state.associate(&first, capability(&invite)?, now)?;
         assert_eq!(state.paired_sessions(&agent, now)?.len(), 1);
         assert!(state.paired_sessions(&other, now)?.is_empty());
-        assert!(
-            state
-                .associate(&headers(&cookie)?, capability(&invite)?, now)
-                .is_err()
-        );
+        assert!(state.associate(&first, capability(&invite)?, now).is_err());
         let second = state.browser_link(now)?;
-        let cookie2 = state.redeem(capability(&second)?, "127.0.0.1:8750", now)?;
+        let cookie2 = state.redeem(capability(&second)?, &origin, now)?;
         let invite2 = state.agent_pairing_url(agent.clone(), now)?;
-        state.associate(&headers(&cookie2)?, capability(&invite2)?, now)?;
-        let first_csrf = state.session(&headers(&cookie)?, now)?.csrf;
-        let mut second_headers = headers(&cookie2)?;
-        second_headers.insert(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
-        assert!(
-            state
-                .authorize_write(&second_headers, first_csrf.expose(), now)
-                .is_err()
-        );
+        let second_headers = headers(&cookie2)?;
+        let second_session = state.session(&second_headers, now)?;
+        let second = write_proof(&state, &second_headers, second_session.csrf_token(), now)?;
+        state.associate(&second, capability(&invite2)?, now)?;
+        assert!(write_proof(&state, &second_headers, first_csrf, now).is_err());
         let targets = state.paired_sessions(&agent, now)?;
         assert_eq!(targets.len(), 2);
         assert_ne!(targets[0], targets[1]);
@@ -613,26 +693,23 @@ mod tests {
 
     #[test]
     fn browser_sessions_are_bounded_and_absolute_expiry_frees_capacity() -> TestResult {
+        let origin = origin()?;
         let (state, launch) = PairingState::new("127.0.0.1:8750".parse()?)?;
         let now = Instant::now();
-        state.redeem(capability(&launch)?, "127.0.0.1:8750", now)?;
+        state.redeem(capability(&launch)?, &origin, now)?;
         for _ in 1..MAX_ENTRIES {
             let link = state.browser_link(now)?;
-            state.redeem(capability(&link)?, "127.0.0.1:8750", now)?;
+            state.redeem(capability(&link)?, &origin, now)?;
         }
         let link = state.browser_link(now)?;
         assert!(matches!(
-            state.redeem(capability(&link)?, "127.0.0.1:8750", now),
+            state.redeem(capability(&link)?, &origin, now),
             Err(PairingError::Capacity)
         ));
         let fresh = state.browser_link(now + SESSION_LIFETIME)?;
         assert!(
             state
-                .redeem(
-                    capability(&fresh)?,
-                    "127.0.0.1:8750",
-                    now + SESSION_LIFETIME
-                )
+                .redeem(capability(&fresh)?, &origin, now + SESSION_LIFETIME)
                 .is_ok()
         );
         Ok(())

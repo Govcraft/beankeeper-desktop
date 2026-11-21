@@ -6,14 +6,15 @@ use std::{
 };
 
 use axum::{
-    Extension, Form, Router,
+    Form, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::get,
 };
 use beankeeper_cli::{
+    capability::Capability,
     commands::verify,
     db::{
         self, Actor, Db,
@@ -22,13 +23,14 @@ use beankeeper_cli::{
     error::CliError,
     identity::{self, IssueRequest},
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::{
     markup::{Attribute, Markup, markup, write_markup},
     money,
-    pairing::{self, PairingState, Session},
+    pairing::{self, HumanSession, HumanWrite, PairingState},
     ui,
     views::encode,
 };
@@ -38,41 +40,134 @@ struct ReviewState(Arc<Mutex<Review>>);
 
 struct Review {
     db: Db,
-    company: Option<String>,
+    company: Option<CompanySlug>,
     // Never sourced from request bearer credentials or exposed to a client.
-    human_token: Option<SecretString>,
+    authority: ApprovalAuthority,
     verification: Option<Verification>,
 }
 
-struct Verification {
-    checked_at: String,
-    error: Option<String>,
+enum ApprovalAuthority {
+    PolicyOff,
+    Credential(SecretString),
 }
 
-impl Review {
-    fn actor(&self) -> Result<Actor, CliError> {
+impl ApprovalAuthority {
+    fn for_launch(db: &Db) -> Result<Self, CliError> {
+        if !db::policy::get(db.conn())?.enforce {
+            return Ok(Self::PolicyOff);
+        }
+
+        let capabilities =
+            [Capability::Read, Capability::Approve].map(|capability| capability.path().to_owned());
+        let issued = identity::issue(
+            db.conn(),
+            &Actor::new("desktop-local-human"),
+            &IssueRequest {
+                // Upstream generates a unique TypeID from this name prefix.
+                name: "desktop_human",
+                capabilities: &capabilities,
+                ttl: Duration::from_secs(12 * 60 * 60),
+                public_key: None,
+                generate_key: true,
+            },
+        )?;
+        let issued: IssuedApprovalCredential = serde_json::from_value(issued).map_err(|_| {
+            CliError::General("human approval credential could not be created".into())
+        })?;
+        Ok(Self::Credential(issued.token))
+    }
+
+    fn actor(&self, db: &Db) -> Result<Actor, CliError> {
         let actor = Actor::new("desktop-local-human");
-        match &self.human_token {
-            Some(token) => {
-                Ok(actor.with_identity(identity::verify(self.db.conn(), token.expose_secret())?))
+        match self {
+            Self::Credential(token) => {
+                Ok(actor.with_identity(identity::verify(db.conn(), token.expose_secret())?))
             }
-            None => Ok(actor),
+            Self::PolicyOff => Ok(actor),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct IssuedApprovalCredential {
+    #[serde(deserialize_with = "deserialize_approval_token")]
+    token: SecretString,
+}
+
+fn deserialize_approval_token<'de, D: Deserializer<'de>>(
+    input: D,
+) -> Result<SecretString, D::Error> {
+    let token = String::deserialize(input)?;
+    if token.is_empty() {
+        return Err(serde::de::Error::custom("approval credential is empty"));
+    }
+    Ok(SecretString::from(token))
+}
+
+enum Verification {
+    Passed { at: DateTime<Utc> },
+    Failed { at: DateTime<Utc>, error: CliError },
+}
+
+impl Verification {
+    fn check(db: &Db) -> Self {
+        let at = Utc::now();
+        match verify::execute_json(db) {
+            Ok(_) => Self::Passed { at },
+            Err(error) => Self::Failed { at, error },
         }
     }
 
-    fn recheck(&mut self) -> Result<(), CliError> {
-        let checked_at = self.db.conn().query_row(
-            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-            [],
-            |row| row.get(0),
-        )?;
-        self.verification = Some(Verification {
-            checked_at,
-            error: verify::execute_json(&self.db)
-                .err()
-                .map(|error| error.to_string()),
-        });
-        Ok(())
+    fn at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Passed { at } | Self::Failed { at, .. } => *at,
+        }
+    }
+}
+
+impl Review {
+    fn decide(
+        &mut self,
+        _write: &HumanWrite,
+        company: &CompanySlug,
+        id: &ProposalId,
+        decision: Decision,
+    ) -> Result<Response, CliError> {
+        let actor = self.authority.actor(&self.db)?;
+        let proposal = proposals::get(self.db.conn(), company.as_str(), id.as_str())?;
+        if actor.agent_uri() == Some(proposal.proposer_uri.as_str()) {
+            return Err(CliError::Forbidden(
+                "a proposer cannot approve or reject as the local human".into(),
+            ));
+        }
+
+        // A failed fresh check must not leave an older intact result visible.
+        self.verification = None;
+        // Full verification and resolution share one upstream savepoint.
+        let conn = self.db.conn();
+        db::audit::atomically(conn, || {
+            verify::execute_json(&self.db)?;
+            match decision {
+                Decision::Approve => {
+                    db::audit::approve_proposal(conn, &actor, company.as_str(), id.as_str())?;
+                }
+                Decision::Reject { reason } => {
+                    db::audit::reject_proposal(
+                        conn,
+                        &actor,
+                        company.as_str(),
+                        id.as_str(),
+                        reason.as_ref().map(NonEmptyReason::as_str),
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(Redirect::to(&format!(
+            "/review/{id}?company={}",
+            encode(company.as_str())
+        ))
+        .into_response())
     }
 }
 
@@ -83,42 +178,19 @@ pub(crate) fn router(
     company: Option<String>,
     pairing: PairingState,
 ) -> Result<Router, CliError> {
-    let human_token = if db::policy::get(db.conn())?.enforce {
-        let issued = identity::issue(
-            db.conn(),
-            &Actor::new("desktop-local-human"),
-            &IssueRequest {
-                // Upstream generates a unique TypeID from this name prefix.
-                name: "desktop_human",
-                capabilities: &["ledger/read".into(), "ledger/approve".into()],
-                ttl: Duration::from_secs(12 * 60 * 60),
-                public_key: None,
-                generate_key: true,
-            },
-        )?;
-        Some(SecretString::from(
-            issued["token"]
-                .as_str()
-                .ok_or_else(|| {
-                    CliError::General("human approval credential could not be created".into())
-                })?
-                .to_owned(),
-        ))
-    } else {
-        None
-    };
+    let authority = ApprovalAuthority::for_launch(&db)?;
     let state = ReviewState(Arc::new(Mutex::new(Review {
         db,
-        company,
-        human_token,
+        company: company.map(CompanySlug),
+        authority,
         verification: None,
     })));
     Ok(Router::new()
         .route("/review", get(queue))
         .route("/review/{id}", get(detail))
-        .route("/review/{id}/approve", post(approve))
-        .route("/review/{id}/reject", post(reject))
-        .route("/review/verify", post(recheck))
+        .route("/review/{id}/approve", pairing::human_post(approve))
+        .route("/review/{id}/reject", pairing::human_post(reject))
+        .route("/review/verify", pairing::human_post(recheck))
         .route_layer(middleware::from_fn_with_state(
             pairing,
             pairing::human_guard,
@@ -126,18 +198,83 @@ pub(crate) fn router(
         .with_state(state))
 }
 
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct CompanySlug(String);
+
+impl CompanySlug {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct ReviewQuery {
-    company: Option<String>,
+    company: Option<CompanySlug>,
 }
 
 #[derive(Deserialize)]
-struct Decision {
-    company: String,
+struct ApproveForm {
+    company: CompanySlug,
+}
+
+#[derive(Deserialize)]
+struct RejectForm {
+    company: CompanySlug,
     reason: Option<String>,
 }
 
-fn failure(error: CliError, session: Option<&Session>) -> Response {
+enum Decision {
+    Approve,
+    Reject { reason: Option<NonEmptyReason> },
+}
+
+struct NonEmptyReason(String);
+
+impl NonEmptyReason {
+    fn new(value: String) -> Option<Self> {
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProposalStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Withdrawn,
+}
+
+impl TryFrom<&str> for ProposalStatus {
+    type Error = CliError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            "withdrawn" => Ok(Self::Withdrawn),
+            _ => Err(CliError::Database("unrecognized proposal status".into())),
+        }
+    }
+}
+
+impl ProposalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Withdrawn => "withdrawn",
+        }
+    }
+}
+
+fn failure(error: CliError, session: Option<&HumanSession>) -> Response {
     let status = match error {
         CliError::NotFound(_) => StatusCode::NOT_FOUND,
         CliError::Validation(_) => StatusCode::CONFLICT,
@@ -172,7 +309,7 @@ fn failure(error: CliError, session: Option<&Session>) -> Response {
         .into_response()
 }
 
-async fn run<F>(state: ReviewState, session: Option<Session>, operation: F) -> Response
+async fn run<F>(state: ReviewState, session: Option<HumanSession>, operation: F) -> Response
 where
     F: FnOnce(&mut Review) -> Result<Response, CliError> + Send + 'static,
 {
@@ -196,7 +333,7 @@ where
 
 async fn queue(
     State(state): State<ReviewState>,
-    Extension(session): Extension<Session>,
+    session: HumanSession,
     Query(query): Query<ReviewQuery>,
 ) -> Response {
     run(state, Some(session.clone()), move |review| {
@@ -207,7 +344,7 @@ async fn queue(
 
 async fn detail(
     State(state): State<ReviewState>,
-    Extension(session): Extension<Session>,
+    session: HumanSession,
     Path(id): Path<String>,
     Query(query): Query<ReviewQuery>,
 ) -> Response {
@@ -218,67 +355,48 @@ async fn detail(
 }
 
 async fn approve(
+    write: HumanWrite,
     State(state): State<ReviewState>,
     Path(id): Path<String>,
-    Form(form): Form<Decision>,
+    Form(form): Form<ApproveForm>,
 ) -> Response {
-    resolve(state, id, form, true).await
+    resolve(write, state, id, form.company, Decision::Approve).await
 }
 
 async fn reject(
+    write: HumanWrite,
     State(state): State<ReviewState>,
     Path(id): Path<String>,
-    Form(form): Form<Decision>,
+    Form(form): Form<RejectForm>,
 ) -> Response {
-    resolve(state, id, form, false).await
+    let reason = form.reason.and_then(NonEmptyReason::new);
+    resolve(write, state, id, form.company, Decision::Reject { reason }).await
 }
 
-async fn resolve(state: ReviewState, id: String, form: Decision, approve: bool) -> Response {
+async fn resolve(
+    write: HumanWrite,
+    state: ReviewState,
+    id: String,
+    company: CompanySlug,
+    decision: Decision,
+) -> Response {
     run(state, None, move |review| {
-        let id: ProposalId = id.parse()?;
-        let actor = review.actor()?;
-        let proposal = proposals::get(review.db.conn(), &form.company, id.as_str())?;
-        if actor.agent_uri() == Some(proposal.proposer_uri.as_str()) {
-            return Err(CliError::Forbidden(
-                "a proposer cannot approve or reject as the local human".into(),
-            ));
-        }
-        // A failed fresh check must not leave an older intact result visible.
-        review.verification = None;
-        // Full verification and resolution share one upstream savepoint.
-        db::audit::atomically(review.db.conn(), || {
-            verify::execute_json(&review.db)?;
-            if approve {
-                db::audit::approve_proposal(review.db.conn(), &actor, &form.company, id.as_str())?;
-            } else {
-                db::audit::reject_proposal(
-                    review.db.conn(),
-                    &actor,
-                    &form.company,
-                    id.as_str(),
-                    form.reason
-                        .as_deref()
-                        .filter(|reason| !reason.trim().is_empty()),
-                )?;
-            }
-            Ok(())
-        })?;
-        review.verification = None;
-        Ok(
-            Redirect::to(&format!("/review/{id}?company={}", encode(&form.company)))
-                .into_response(),
-        )
+        review.decide(&write, &company, &id.parse()?, decision)
     })
     .await
 }
 
-async fn recheck(State(state): State<ReviewState>, Form(query): Form<ReviewQuery>) -> Response {
+async fn recheck(
+    _write: HumanWrite,
+    State(state): State<ReviewState>,
+    Form(query): Form<ReviewQuery>,
+) -> Response {
     run(state, None, move |review| {
-        review.recheck()?;
+        review.verification = Some(Verification::check(&review.db));
         let suffix = query
             .company
-            .as_deref()
-            .map(|company| format!("?company={}", encode(company)))
+            .as_ref()
+            .map(|company| format!("?company={}", encode(company.as_str())))
             .unwrap_or_default();
         Ok(Redirect::to(&format!("/review{suffix}")).into_response())
     })
@@ -289,46 +407,46 @@ fn render(
     review: &mut Review,
     query: &ReviewQuery,
     id: Option<&str>,
-    session: &Session,
+    session: &HumanSession,
 ) -> Result<Response, CliError> {
-    if review.verification.is_none() {
-        review.recheck()?;
-    }
-    let actor = review.actor()?;
+    let verification = review
+        .verification
+        .get_or_insert_with(|| Verification::check(&review.db));
+    let actor = review.authority.actor(&review.db)?;
     let _snapshot = review.db.conn().unchecked_transaction()?;
     let companies = db::list_companies(review.db.conn())?;
     let selected_company = query
         .company
-        .as_deref()
+        .as_ref()
+        .map(CompanySlug::as_str)
         .filter(|value| !value.is_empty())
-        .or(review.company.as_deref())
+        .or_else(|| review.company.as_ref().map(CompanySlug::as_str))
         .or_else(|| companies.first().map(|company| company.slug.as_str()));
     let mut html = Markup::default();
-    if let Some(verification) = &review.verification {
-        write_markup!(
+    write_markup!(
+        html,
+        "<section aria-labelledby=\"verification\"><h2 id=\"verification\">Ledger verification</h2><p>Last checked: <time>{}</time>. This is a snapshot; re-run after changes made outside this browser.</p>",
+        verification
+            .at()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+    );
+    match verification {
+        Verification::Passed { .. } => write_markup!(
             html,
-            "<section aria-labelledby=\"verification\"><h2 id=\"verification\">Ledger verification</h2><p>Last checked: <time>{}</time>. This is a snapshot; re-run after changes made outside this browser.</p>",
-            &verification.checked_at
-        );
-        if let Some(error) = &verification.error {
-            write_markup!(
-                html,
-                "<p role=\"alert\"><strong>Verification failed. Ledger integrity is not confirmed.</strong> {}</p>",
-                error
-            );
-        } else {
-            write_markup!(
-                html,
-                "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>"
-            );
-        }
-        write_markup!(
+            "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>"
+        ),
+        Verification::Failed { error, .. } => write_markup!(
             html,
-            "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
-            session.csrf.expose(),
-            selected_company.unwrap_or_default()
-        );
+            "<p role=\"alert\"><strong>Verification failed. Ledger integrity is not confirmed.</strong> {}</p>",
+            error
+        ),
     }
+    write_markup!(
+        html,
+        "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
+        session.csrf_token(),
+        selected_company.unwrap_or_default()
+    );
     let mut proposal_html = Markup::default();
     let result = (|| -> Result<(), CliError> {
         let html = &mut proposal_html;
@@ -377,7 +495,7 @@ fn render(
                         encode(company),
                         &proposal.payload.description
                     );
-                    summary(review, proposal, html)?;
+                    summary(review, proposal, proposal.status.as_str().try_into()?, html)?;
                     write_markup!(html, "</article>");
                 }
                 write_markup!(html, "</section>");
@@ -412,7 +530,12 @@ fn render(
     .into_response())
 }
 
-fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<(), CliError> {
+fn summary(
+    review: &Review,
+    proposal: &Proposal,
+    status: ProposalStatus,
+    html: &mut Markup,
+) -> Result<(), CliError> {
     write_markup!(
         html,
         "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{}</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
@@ -421,7 +544,7 @@ fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<()
         &proposal.proposer_uri,
         &proposal.proposer_jti,
         &proposal.created_at,
-        &proposal.status,
+        status.as_str(),
         &proposal.payload.description
     );
     let limits = db::spend_limits::list(
@@ -463,16 +586,17 @@ fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<()
 fn proposal_detail(
     review: &Review,
     proposal: &Proposal,
-    session: &Session,
+    session: &HumanSession,
     html: &mut Markup,
 ) -> Result<(), CliError> {
+    let status = ProposalStatus::try_from(proposal.status.as_str())?;
     write_markup!(
         html,
         "<section><h2>{}</h2><p>Proposal <code>{}</code></p>",
         &proposal.payload.description,
         proposal.id
     );
-    summary(review, proposal, html)?;
+    summary(review, proposal, status, html)?;
     let posting = &proposal.payload;
     write_markup!(
         html,
@@ -500,16 +624,16 @@ fn proposal_detail(
         "<details><summary>Full proposed posting, including metadata and retry policy (raw minor units)</summary><pre>{}</pre></details>",
         &payload
     );
-    if proposal.status == "pending" {
+    if matches!(status, ProposalStatus::Pending) {
         write_markup!(
             html,
             "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {}</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
             proposal.id,
-            session.csrf.expose(),
+            session.csrf_token(),
             &proposal.company_slug,
             &money::minor(proposal.debit_total, &proposal.currency),
             proposal.id,
-            session.csrf.expose(),
+            session.csrf_token(),
             &proposal.company_slug
         );
     } else {

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    Extension, Router,
+    Router,
     extract::{Query, State},
     http::{StatusCode, Uri, header},
     middleware,
@@ -12,9 +12,9 @@ use beankeeper_cli::db::Db;
 
 use crate::{
     markup::{Attribute, Markup, markup, write_markup},
-    pairing::{self, PairingState, Session},
+    pairing::{self, HumanSession, PairingState},
     reports::{self, ReportQuery, ReportResponse},
-    views::{self, ViewQuery},
+    views::{self, filters::ViewQuery},
 };
 
 const SHELL: &str = include_str!("../../../ui/index.html");
@@ -45,13 +45,13 @@ pub(crate) fn page(title: &str, description: &str, path: &str, content: Markup) 
     markup!(SHELL, title, navigation, title, description, content).into_html()
 }
 
-pub(crate) fn session_controls(session: &Session) -> Markup {
-    let connection = if session.agent.is_some() {
+pub(crate) fn session_controls(session: &HumanSession) -> Markup {
+    let connection = if session.agent().is_some() {
         "Your agent is connected to this browser."
     } else {
         "Your browser session is active. Open your agent's connection link here to let it navigate this workspace."
     };
-    let csrf = session.csrf.expose();
+    let csrf = session.csrf_token();
     markup!(SESSION_CONTROLS, connection, csrf, csrf)
 }
 
@@ -70,7 +70,7 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
         .route("/", get(view))
         .route(
             "/settings",
-            get(|Extension(session): Extension<Session>| async move {
+            get(|session: HumanSession| async move {
                 let status = tokio::task::spawn_blocking(crate::product::status_text)
                     .await
                     .unwrap_or_else(|_| "Desktop status unavailable.".into());
@@ -120,7 +120,7 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
 
 async fn report(
     State(state): State<ViewState>,
-    Extension(session): Extension<Session>,
+    session: HumanSession,
     uri: Uri,
     query: Result<Query<ReportQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
@@ -143,6 +143,10 @@ async fn report(
         query.filters.company = state.company;
     }
     let result = tokio::task::spawn_blocking(move || {
+        let query = match query.parse(uri.path()) {
+            Ok(query) => query,
+            Err(error) => return Ok(Err(error)),
+        };
         let db = state.db.lock().map_err(|_| ())?;
         let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
         Ok::<_, ()>(reports::render(&db, uri.path(), &query))
@@ -203,7 +207,7 @@ async fn report(
 
 async fn view(
     State(state): State<ViewState>,
-    Extension(session): Extension<Session>,
+    session: HumanSession,
     uri: Uri,
     query: Result<Query<ViewQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
@@ -231,6 +235,10 @@ async fn view(
     let db = state.db;
     let path = uri.path().to_owned();
     let result = tokio::task::spawn_blocking(move || {
+        let query = match query.parse() {
+            Ok(query) => query,
+            Err(error) => return Ok(Err(error)),
+        };
         let db = db.lock().map_err(|_| ())?;
         // Keep all reads for this page in one consistent upstream SQLite snapshot.
         let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
@@ -264,7 +272,7 @@ async fn view(
     }
 }
 
-fn with_session(mut content: Markup, session: &Session) -> Markup {
+fn with_session(mut content: Markup, session: &HumanSession) -> Markup {
     content.append(&session_controls(session));
     content
 }
