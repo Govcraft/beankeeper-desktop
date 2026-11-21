@@ -13,14 +13,16 @@ use std::{
 };
 
 use beankeeper_cli::{
+    capability::Capability,
     cli::Cli,
     db::{self, Actor, Db, audit, spend_limits::SpendLimit},
     error::CliError,
-    identity::{self, IssueRequest},
+    identity::{self, IssueRequest, VerifiedAgent},
     passphrase,
 };
 use clap::{Args, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, de::IgnoredAny};
 
 use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
@@ -37,17 +39,34 @@ pub enum Preset {
 }
 
 impl Preset {
-    fn capabilities(self) -> Vec<String> {
+    fn capabilities(self) -> &'static [Capability] {
         match self {
-            Self::ReadOnly => vec!["ledger/read".into()],
-            Self::Bookkeeper => vec![
-                "ledger/read".into(),
-                "ledger/post".into(),
-                "ledger/propose".into(),
-            ],
+            Self::ReadOnly => &[Capability::Read],
+            Self::Bookkeeper => &[Capability::Read, Capability::Post, Capability::Propose],
         }
     }
+
+    fn matches_grants(self, grants: &[String]) -> bool {
+        let expected = self.capabilities();
+        expected
+            .iter()
+            .all(|capability| grants.iter().any(|grant| grant == capability.path()))
+            && grants
+                .iter()
+                .all(|grant| expected.iter().any(|capability| grant == capability.path()))
+    }
 }
+
+const OWNER_CAPABILITIES: &[Capability] = &[
+    Capability::Read,
+    Capability::Post,
+    Capability::Propose,
+    Capability::Approve,
+    Capability::Reverse,
+    Capability::Reconcile,
+    Capability::Budget,
+    Capability::Admin,
+];
 
 /// One-command setup. All credential inputs are file/descriptor based.
 #[derive(Args, Debug)]
@@ -343,6 +362,51 @@ fn run_with_store(
     Ok(())
 }
 
+enum SetupAuthority {
+    Owner(VerifiedAgent),
+    FirstRun,
+}
+
+impl SetupAuthority {
+    fn resolve(db: &Db, owner_file: &Path) -> Result<Self, SetupError> {
+        let conn = db.conn();
+        let policy = db::policy::get(conn)?;
+        let registered = has_registered_tokens(identity::list(conn)?)?;
+        if !(policy.enforce || registered) {
+            return Ok(Self::FirstRun);
+        }
+        let raw = PrivateFile::open(owner_file)
+            .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
+            .map_err(|_| {
+                SetupError::Invalid(
+                    "existing ledger requires its private owner credential; recover it before resuming setup",
+                )
+            })?;
+        let owner = identity::verify(conn, raw.expose_secret().trim())?;
+        if !owner.allows(Capability::Admin)? {
+            return Err(SetupError::Invalid(
+                "owner credential lacks admin authority",
+            ));
+        }
+        Ok(Self::Owner(owner))
+    }
+
+    fn into_actor(self) -> Actor {
+        match self {
+            Self::Owner(owner) => Actor::new("desktop-owner").with_identity(owner),
+            Self::FirstRun => Actor::new("desktop-setup"),
+        }
+    }
+}
+
+fn has_registered_tokens(wire: serde_json::Value) -> Result<bool, SetupError> {
+    // The pinned CLI exposes JSON rather than a token count. Any registry row
+    // requires the owner regardless of its contents, including revoked tokens.
+    let rows: Vec<IgnoredAny> = serde_json::from_value(wire)
+        .map_err(|_| SetupError::Invalid("upstream returned an invalid agent registry"))?;
+    Ok(!rows.is_empty())
+}
+
 fn provision(
     db: &Db,
     options: &SetupOptions,
@@ -353,7 +417,7 @@ fn provision(
     if token_file.exists() {
         let raw = PrivateFile::open(token_file)?.read_secret(BEARER_FILE_LIMIT)?;
         let agent = identity::verify(conn, raw.expose_secret().trim())?;
-        if agent.capabilities() != options.preset.capabilities() {
+        if !options.preset.matches_grants(agent.capabilities()) {
             return Err(SetupError::Invalid(
                 "existing token has a different preset; use upstream agent issuance for explicit credential changes",
             ));
@@ -365,23 +429,7 @@ fn provision(
         }
         return Ok(());
     }
-    let roots = identity::list(conn)?;
-    let actor = if db::policy::get(conn)?.enforce
-        || roots.as_array().is_some_and(|rows| !rows.is_empty())
-    {
-        let raw = PrivateFile::open(owner_file)?.read_secret(BEARER_FILE_LIMIT).map_err(|_| {
-            SetupError::Invalid(
-                "existing ledger requires its owner credential; recover it before resuming setup",
-            )
-        })?;
-        let owner = identity::verify(conn, raw.expose_secret().trim())?;
-        if !owner.allows(beankeeper_cli::capability::Capability::Admin)? {
-            return Err(SetupError::Invalid("owner credential lacks ledger/admin"));
-        }
-        Actor::new("desktop-owner").with_identity(owner)
-    } else {
-        Actor::new("desktop-setup")
-    };
+    let actor = SetupAuthority::resolve(db, owner_file)?.into_actor();
     // init_root itself refuses replacement; only initialize a ledger with no root.
     let has_root: bool = conn
         .query_row("SELECT EXISTS(SELECT 1 FROM identity_root)", [], |row| {
@@ -392,42 +440,22 @@ fn provision(
         identity::init_root(conn, &actor)?;
     }
     if !owner_file.exists() {
-        let owner_caps = [
-            "ledger/read",
-            "ledger/post",
-            "ledger/propose",
-            "ledger/approve",
-            "ledger/reverse",
-            "ledger/reconcile",
-            "ledger/budget",
-            "ledger/admin",
-        ]
-        .map(String::from);
-        let issued = issue(db, &actor, "desktop_owner", &owner_caps)?;
-        private_create(
-            owner_file,
-            issued["token"]
-                .as_str()
-                .ok_or(SetupError::Invalid("upstream returned no owner token"))?
-                .as_bytes(),
-        )?;
+        let issued = issue(db, &actor, "desktop_owner", OWNER_CAPABILITIES)?;
+        private_create(owner_file, issued.token.expose_secret().as_bytes())?;
     }
     let mut companies = db::list_companies(conn)?;
     if companies.is_empty() {
         db::create_company(conn, "personal", "Personal", None)?;
         companies = db::list_companies(conn)?;
     }
-    let issued = issue(db, &actor, "desktop_agent", &options.preset.capabilities())?;
+    let issued = issue(db, &actor, "desktop_agent", options.preset.capabilities())?;
     if options.preset == Preset::Bookkeeper {
         for company in companies {
             audit::set_spend_limit(
                 conn,
                 &actor,
                 &SpendLimit {
-                    agent_uri: issued["agent_uri"]
-                        .as_str()
-                        .ok_or(SetupError::Invalid("upstream returned no agent URI"))?
-                        .into(),
+                    agent_uri: issued.agent_uri.clone(),
                     company_slug: company.slug,
                     currency: "USD".into(),
                     max_post: Some(options.max_post),
@@ -437,33 +465,43 @@ fn provision(
         }
     }
     audit::set_policy(conn, &actor, true)?;
-    private_create(
-        token_file,
-        issued["token"]
-            .as_str()
-            .ok_or(SetupError::Invalid("upstream returned no agent token"))?
-            .as_bytes(),
-    )?;
+    private_create(token_file, issued.token.expose_secret().as_bytes())?;
     Ok(())
+}
+
+// Adapt the upstream JSON contract at the boundary. Downstream provisioning
+// sees a credential that carries its token and agent URI together.
+#[derive(Deserialize)]
+struct IssuedCredential {
+    token: SecretString,
+    agent_uri: String,
+    #[serde(rename = "private_key")]
+    _private_key: Option<SecretString>,
 }
 
 fn issue(
     db: &Db,
     actor: &Actor,
     name: &str,
-    capabilities: &[String],
-) -> Result<serde_json::Value, CliError> {
-    identity::issue(
+    capabilities: &[Capability],
+) -> Result<IssuedCredential, SetupError> {
+    let capabilities = capabilities
+        .iter()
+        .map(|capability| capability.path().to_owned())
+        .collect::<Vec<_>>();
+    let wire = identity::issue(
         db.conn(),
         actor,
         &IssueRequest {
             name,
-            capabilities,
+            capabilities: &capabilities,
             ttl: Duration::from_secs(365 * 24 * 3600),
             public_key: None,
             generate_key: true,
         },
-    )
+    )?;
+    serde_json::from_value(wire)
+        .map_err(|_| SetupError::Invalid("upstream returned an invalid issued credential"))
 }
 
 fn generate_passphrase() -> Result<SecretString, SetupError> {
@@ -731,10 +769,55 @@ impl Drop for PendingServer {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_registry_is_rejected() -> Result<(), SetupError> {
+        assert!(!has_registered_tokens(serde_json::json!([]))?);
+        assert!(has_registered_tokens(serde_json::json!([{}]))?);
+        assert!(has_registered_tokens(serde_json::json!({"tokens": []})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn preset_requires_the_same_grants_in_any_order() {
+        let read = Capability::Read.path().to_owned();
+        let post = Capability::Post.path().to_owned();
+        let propose = Capability::Propose.path().to_owned();
+        let approve = Capability::Approve.path().to_owned();
+        assert!(Preset::Bookkeeper.matches_grants(&[post.clone(), propose.clone(), read.clone()]));
+        assert!(!Preset::Bookkeeper.matches_grants(&[post.clone(), read.clone()]));
+        assert!(!Preset::Bookkeeper.matches_grants(&[propose, approve, post, read.clone()]));
+        assert!(Preset::ReadOnly.matches_grants(&[read.clone(), read]));
+    }
+
+    #[test]
+    fn issued_credential_requires_a_token_and_agent_uri() -> Result<(), serde_json::Error> {
+        let credential: IssuedCredential = serde_json::from_value(serde_json::json!({
+            "token": "fixture-token",
+            "agent_uri": "fixture-uri",
+            "private_key": "fixture-private-key"
+        }))?;
+        assert_eq!(credential.token.expose_secret(), "fixture-token");
+        assert_eq!(credential.agent_uri, "fixture-uri");
+        assert!(
+            serde_json::from_value::<IssuedCredential>(serde_json::json!({
+                "agent_uri": "fixture-uri"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<IssuedCredential>(serde_json::json!({
+                "token": "fixture-token"
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn failed_startup_reaps_its_background_process() -> Result<(), Box<dyn Error>> {
         use std::process::{Command, Stdio};
