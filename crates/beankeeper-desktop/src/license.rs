@@ -27,7 +27,7 @@ const FORMAT: &str = "beankeeper-license-v1";
 const MAX_PAYLOAD: usize = 16_384;
 const MAX_FILE: usize = 32_768;
 
-/// A validated service-issued license TypeID.
+/// A validated service-issued license `TypeID`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicenseId(MagicTypeId);
 
@@ -466,7 +466,7 @@ mod tests {
             json!({"purchaser_ref":"person@example.com"}),
             json!({"storefront":"POLAR"}),
             json!({"seats":0}),
-            json!({"seats":4294967296_u64}),
+            json!({"seats":4_294_967_296_u64}),
             json!({"issued_at":"1969-12-31T23:59:59Z"}),
             json!({"unexpected":true}),
         ] {

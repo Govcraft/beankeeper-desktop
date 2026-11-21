@@ -27,6 +27,10 @@ use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 
+fn exceeds_message_limit(bytes: usize) -> bool {
+    u64::try_from(bytes).map_or(true, |length| length > MAX_MESSAGE_BYTES)
+}
+
 /// Connect an MCP stdio client to the already-running Desktop HTTP endpoint.
 #[derive(Args, Debug, Clone)]
 pub struct BridgeOptions {
@@ -158,7 +162,7 @@ impl Transport {
             if read == 0 {
                 return Ok(());
             }
-            if read as u64 > MAX_MESSAGE_BYTES {
+            if exceeds_message_limit(read) {
                 return Err(BridgeError::Protocol);
             }
             if line.trim().is_empty() {
@@ -237,7 +241,7 @@ fn relay_response(
         &mut io::Read::take(reader, MAX_MESSAGE_BYTES + 1),
         &mut contents,
     )?;
-    if contents.len() as u64 > MAX_MESSAGE_BYTES {
+    if exceeds_message_limit(contents.len()) {
         return Err(BridgeError::Protocol);
     }
     let message = emit(&contents, output)?;
@@ -265,7 +269,7 @@ fn relay_sse(
     loop {
         let mut line = String::new();
         let read = io::Read::take(&mut *reader, MAX_MESSAGE_BYTES + 1).read_line(&mut line)?;
-        if read as u64 > MAX_MESSAGE_BYTES {
+        if exceeds_message_limit(read) {
             return Err(BridgeError::Protocol);
         }
         let line = line.trim_end_matches(['\r', '\n']);
@@ -287,7 +291,7 @@ fn relay_sse(
                 data.push('\n');
             }
             data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            if data.len() as u64 > MAX_MESSAGE_BYTES {
+            if exceeds_message_limit(data.len()) {
                 return Err(BridgeError::Protocol);
             }
         }

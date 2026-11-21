@@ -27,6 +27,10 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Create an isolated encrypted ledger and authenticated fixtures.
+    ///
+    /// # Errors
+    /// Returns an error when fixture data or credentials cannot be created.
     pub fn new() -> TestResult<Self> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("books.db");
@@ -63,10 +67,15 @@ impl Ledger {
         })
     }
 
+    /// Open the fixture ledger.
+    ///
+    /// # Errors
+    /// Returns an error when the fixture ledger cannot be opened.
     pub fn db(&self) -> TestResult<Db> {
         Ok(Db::open_existing(&self.path, Some(&PASSPHRASE.into()))?)
     }
 
+    #[must_use]
     pub fn command(&self) -> Command {
         let mut command = clean_command();
         command
@@ -78,6 +87,7 @@ impl Ledger {
     }
 }
 
+#[must_use]
 pub fn clean_command() -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("bk"));
     command.env("BEANKEEPER_NO_UPDATE_CHECK", "1");
@@ -98,14 +108,22 @@ pub struct Server {
     pub client: Client,
     pub session: Option<String>,
     pub pairing_url: Option<String>,
-    pub(super) _cwd: TempDir,
+    _cwd: TempDir,
 }
 
 impl Server {
+    /// Start Desktop against the fixture on an ephemeral port.
+    ///
+    /// # Errors
+    /// Returns an error if the process fails to start.
     pub fn start(ledger: &Ledger, args: &[&str], fallback: Option<&str>) -> TestResult<Self> {
         Self::start_at(ledger, args, fallback, "127.0.0.1:0")
     }
 
+    /// Start Desktop against the fixture on a specific local address.
+    ///
+    /// # Errors
+    /// Returns an error if the process fails to start.
     pub fn start_at(
         ledger: &Ledger,
         args: &[&str],
@@ -120,6 +138,10 @@ impl Server {
         Self::launch(command)
     }
 
+    /// Start a prepared command and read the listener details from its output.
+    ///
+    /// # Errors
+    /// Returns an error if the fixture, process, or listener is unavailable.
     pub fn launch(mut command: Command) -> TestResult<Self> {
         let cwd = tempfile::tempdir()?;
         let desktop_state = command
@@ -162,13 +184,12 @@ impl Server {
                 server.pairing_url = Some(url.to_owned());
             }
             if let Some((_, url)) = line.split_once("listening on ") {
-                server.base = url
-                    .split_whitespace()
+                url.split_whitespace()
                     .next()
                     .ok_or("missing URL")?
                     .trim_end_matches("/mcp")
                     .trim_end_matches('/')
-                    .to_owned();
+                    .clone_into(&mut server.base);
                 break;
             }
             if let Some(status) = server.child.try_wait()? {
@@ -178,6 +199,13 @@ impl Server {
         Ok(server)
     }
 
+    /// Pair the test client using the browser confirmation flow.
+    ///
+    /// # Errors
+    /// Returns an error if the link, cookie, or response cannot be read.
+    ///
+    /// # Panics
+    /// Panics if the server omits the expected pairing response.
     pub fn pair(&mut self) -> TestResult {
         let response = self
             .client
@@ -222,18 +250,24 @@ impl Server {
         Ok(())
     }
 
+    /// Send one JSON-RPC request to the fixture server.
+    ///
+    /// # Errors
+    /// Returns an error when the HTTP transport fails.
     pub fn request(
         &self,
         method: &str,
         params: Value,
         token: Option<&str>,
     ) -> TestResult<Response> {
+        let mut body = json!({"jsonrpc":"2.0", "id":1, "method":method});
+        body["params"] = params;
         let mut request = self
             .client
             .post(format!("{}/mcp", self.base))
             .header("Accept", "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2025-11-25")
-            .json(&json!({"jsonrpc":"2.0", "id":1, "method":method, "params":params}));
+            .json(&body);
         if let Some(session) = &self.session {
             request = request.header("Mcp-Session-Id", session);
         }
@@ -243,6 +277,13 @@ impl Server {
         Ok(request.send()?)
     }
 
+    /// Initialize an authenticated MCP session.
+    ///
+    /// # Errors
+    /// Returns an error when the transport or session metadata is unavailable.
+    ///
+    /// # Panics
+    /// Panics if the server rejects initialization.
     pub fn initialize(&mut self, token: Option<&str>) -> TestResult {
         let response = self.request("initialize", json!({"protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"desktop-test", "version":"1.0"}}), token)?;
         assert!(response.status().is_success());
@@ -277,12 +318,23 @@ impl Drop for Server {
     }
 }
 
+/// Extract the bearer token from an issuance fixture.
+///
+/// # Errors
+/// Returns an error when the fixture does not contain a token.
 pub fn token(issued: &Value) -> TestResult<&str> {
     issued["token"]
         .as_str()
         .ok_or_else(|| "missing token".into())
 }
 
+/// Decode a JSON or event-stream response from the MCP transport.
+///
+/// # Errors
+/// Returns an error if there is no decodable JSON-RPC response.
+///
+/// # Panics
+/// Panics if the response has an unsuccessful HTTP status.
 pub fn rpc(response: Response) -> TestResult<Value> {
     assert!(response.status().is_success(), "HTTP {}", response.status());
     let body = response.text()?;

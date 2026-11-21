@@ -4,9 +4,11 @@ use common::{Ledger, Server, TestResult, clean_command, rpc, token};
 use serde_json::{Value, json};
 
 fn link(server: &Server, bearer: &str, view: &str, state: Value) -> TestResult<Value> {
+    let mut arguments = json!({"view_id":view});
+    arguments["state"] = state;
     let response = rpc(server.request(
         "tools/call",
-        json!({"name":"ui_get_link","arguments":{"view_id":view,"state":state}}),
+        json!({"name":"ui_get_link","arguments":arguments}),
         Some(bearer),
     )?)?;
     assert_ne!(response["result"]["isError"], true, "{response}");
@@ -79,157 +81,8 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
         401
     );
     server.pair()?;
-    for (view, state, expected_status) in [
-        ("dashboard", json!({"company":"acme","currency":"USD"}), 200),
-        ("accounts", json!({"company":"acme"}), 200),
-        (
-            "transactions",
-            json!({"company":"acme","from":"2026-10-01","to":"2026-10-31","category":"sched-c:24b","payee":"Café & Tea / 100%"}),
-            200,
-        ),
-        (
-            "transaction",
-            json!({"company":"acme","transaction_id":transaction_id}),
-            200,
-        ),
-        ("reports", json!({"company":"acme"}), 200),
-        (
-            "income-statement",
-            json!({"company":"acme","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30"}),
-            200,
-        ),
-        (
-            "balance-sheet",
-            json!({"company":"acme","to":"2026-10-31"}),
-            200,
-        ),
-        ("cash-flow", json!({"company":"acme"}), 200),
-        ("trend", json!({"company":"acme","period":"month"}), 200),
-        (
-            "budget-variance",
-            json!({"company":"acme","year":"2026"}),
-            200,
-        ),
-        ("schedule-c", json!({"company":"acme"}), 200),
-        ("1099", json!({"company":"acme","threshold":"0"}), 200),
-        ("reconciliation", json!({"company":"acme"}), 200),
-        ("review", json!({"company":"acme"}), 200),
-        (
-            "review_detail",
-            json!({"company":"acme","proposal_id":"proposal_01h455vb4pex5vsknk084sn02q"}),
-            404,
-        ),
-        ("settings", json!({}), 200),
-    ] {
-        let result = link(&server, reader, view, state)?;
-        let url = result["url"].as_str().ok_or("URL")?;
-        assert_eq!(
-            url,
-            format!("{}{}", server.base, result["path"].as_str().ok_or("path")?)
-        );
-        assert!(!url.contains("token="));
-        assert!(!url.contains("invite="));
-        let response = server.client.get(url).send()?;
-        assert_eq!(
-            response.status(),
-            expected_status,
-            "{view}: {}",
-            response.text()?
-        );
-    }
-    let bind = server.base.strip_prefix("http://").ok_or("bind")?;
-    let output = clean_command()
-        .args([
-            "--json",
-            "ui",
-            "link",
-            "--view-id",
-            "transactions",
-            "--bind",
-            bind,
-            "--company",
-            "acme",
-            "--account",
-            "5000",
-            "--category",
-            "sched-c:24b",
-            "--payee",
-            "Café & Tea / 100%",
-            "--from",
-            "2026-10-01",
-            "--to",
-            "2026-10-31",
-        ])
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cli: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(
-        cli,
-        link(
-            &server,
-            reader,
-            "transactions",
-            json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31"})
-        )?
-    );
-    for arguments in [
-        json!({"view_id":"settings","state":{"company":"ignored"}}),
-        json!({"view_id":"transactions","state":{"compare_from":"2026-10-01"}}),
-        json!({"view_id":"transactions","state":{"bad_filter":true}}),
-    ] {
-        let result = rpc(server.request(
-            "tools/call",
-            json!({"name":"ui_get_link","arguments":arguments}),
-            Some(reader),
-        )?)?;
-        assert_eq!(result["result"]["isError"], true);
-        assert_eq!(result["result"]["structuredContent"]["code"], "VALIDATION");
-    }
-    for (view, state, flags) in [
-        (
-            "transactions",
-            json!({"from":"2026-02-30"}),
-            vec!["--from", "2026-02-30"],
-        ),
-        (
-            "transactions",
-            json!({"min_amount":"2","max_amount":"1"}),
-            vec!["--min-amount", "2", "--max-amount", "1"],
-        ),
-        (
-            "balance-sheet",
-            json!({"from":"2026-01-01"}),
-            vec!["--from", "2026-01-01"],
-        ),
-        (
-            "reports",
-            json!({"report_kind":"trend","threshold":"600"}),
-            vec!["--report-kind", "trend", "--threshold", "600"],
-        ),
-        (
-            "review_detail",
-            json!({"proposal_id":"not-a-proposal"}),
-            vec!["--proposal-id", "not-a-proposal"],
-        ),
-    ] {
-        let mcp = rpc(server.request(
-            "tools/call",
-            json!({"name":"ui_get_link","arguments":{"view_id":view,"state":state}}),
-            Some(reader),
-        )?)?;
-        let cli = clean_command()
-            .args(["--json", "ui", "link", "--view-id", view])
-            .args(flags)
-            .output()?;
-        assert!(!cli.status.success());
-        let cli: Value = serde_json::from_slice(&cli.stdout)?;
-        assert_eq!(cli["code"], "VALIDATION");
-        assert_eq!(cli, mcp["result"]["structuredContent"]);
-    }
+    assert_view_links_resolve(&server, reader, transaction_id)?;
+    assert_link_cli_parity(&server, reader)?;
     Ok(())
 }
 
@@ -330,18 +183,7 @@ fn pairing_restores_the_exact_view_without_granting_access_on_get() -> TestResul
             .status(),
         410
     );
-    // An arbitrary redirect query cannot influence the destination.
-    assert_eq!(
-        server
-            .client
-            .get(format!(
-                "{}/transactions?next=https://evil.example",
-                server.base
-            ))
-            .send()?
-            .status(),
-        401
-    );
+    assert_redirect_parameter_is_rejected(&server)?;
     Ok(())
 }
 
@@ -407,5 +249,180 @@ fn cli_links_need_no_server_or_ledger_and_reject_invalid_filters() -> TestResult
     ] {
         assert!(!clean_command().args(args).output()?.status.success());
     }
+    Ok(())
+}
+
+fn assert_link_cli_parity(server: &Server, reader: &str) -> TestResult {
+    let bind = server.base.strip_prefix("http://").ok_or("bind")?;
+    let output = clean_command()
+        .args([
+            "--json",
+            "ui",
+            "link",
+            "--view-id",
+            "transactions",
+            "--bind",
+            bind,
+            "--company",
+            "acme",
+            "--account",
+            "5000",
+            "--category",
+            "sched-c:24b",
+            "--payee",
+            "Café & Tea / 100%",
+            "--from",
+            "2026-10-01",
+            "--to",
+            "2026-10-31",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        cli,
+        link(
+            server,
+            reader,
+            "transactions",
+            json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31"})
+        )?
+    );
+    for arguments in [
+        json!({"view_id":"settings","state":{"company":"ignored"}}),
+        json!({"view_id":"transactions","state":{"compare_from":"2026-10-01"}}),
+        json!({"view_id":"transactions","state":{"bad_filter":true}}),
+    ] {
+        let result = rpc(server.request(
+            "tools/call",
+            json!({"name":"ui_get_link","arguments":arguments}),
+            Some(reader),
+        )?)?;
+        assert_eq!(result["result"]["isError"], true);
+        assert_eq!(result["result"]["structuredContent"]["code"], "VALIDATION");
+    }
+    for (view, state, flags) in [
+        (
+            "transactions",
+            json!({"from":"2026-02-30"}),
+            vec!["--from", "2026-02-30"],
+        ),
+        (
+            "transactions",
+            json!({"min_amount":"2","max_amount":"1"}),
+            vec!["--min-amount", "2", "--max-amount", "1"],
+        ),
+        (
+            "balance-sheet",
+            json!({"from":"2026-01-01"}),
+            vec!["--from", "2026-01-01"],
+        ),
+        (
+            "reports",
+            json!({"report_kind":"trend","threshold":"600"}),
+            vec!["--report-kind", "trend", "--threshold", "600"],
+        ),
+        (
+            "review_detail",
+            json!({"proposal_id":"not-a-proposal"}),
+            vec!["--proposal-id", "not-a-proposal"],
+        ),
+    ] {
+        let mcp = rpc(server.request(
+            "tools/call",
+            json!({"name":"ui_get_link","arguments":{"view_id":view,"state":state}}),
+            Some(reader),
+        )?)?;
+        let cli = clean_command()
+            .args(["--json", "ui", "link", "--view-id", view])
+            .args(flags)
+            .output()?;
+        assert!(!cli.status.success());
+        let cli: Value = serde_json::from_slice(&cli.stdout)?;
+        assert_eq!(cli["code"], "VALIDATION");
+        assert_eq!(cli, mcp["result"]["structuredContent"]);
+    }
+    Ok(())
+}
+
+fn assert_view_links_resolve(server: &Server, reader: &str, transaction_id: i64) -> TestResult {
+    for (view, state, expected_status) in [
+        ("dashboard", json!({"company":"acme","currency":"USD"}), 200),
+        ("accounts", json!({"company":"acme"}), 200),
+        (
+            "transactions",
+            json!({"company":"acme","from":"2026-10-01","to":"2026-10-31","category":"sched-c:24b","payee":"Café & Tea / 100%"}),
+            200,
+        ),
+        (
+            "transaction",
+            json!({"company":"acme","transaction_id":transaction_id}),
+            200,
+        ),
+        ("reports", json!({"company":"acme"}), 200),
+        (
+            "income-statement",
+            json!({"company":"acme","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30"}),
+            200,
+        ),
+        (
+            "balance-sheet",
+            json!({"company":"acme","to":"2026-10-31"}),
+            200,
+        ),
+        ("cash-flow", json!({"company":"acme"}), 200),
+        ("trend", json!({"company":"acme","period":"month"}), 200),
+        (
+            "budget-variance",
+            json!({"company":"acme","year":"2026"}),
+            200,
+        ),
+        ("schedule-c", json!({"company":"acme"}), 200),
+        ("1099", json!({"company":"acme","threshold":"0"}), 200),
+        ("reconciliation", json!({"company":"acme"}), 200),
+        ("review", json!({"company":"acme"}), 200),
+        (
+            "review_detail",
+            json!({"company":"acme","proposal_id":"proposal_01h455vb4pex5vsknk084sn02q"}),
+            404,
+        ),
+        ("settings", json!({}), 200),
+    ] {
+        let result = link(server, reader, view, state)?;
+        let url = result["url"].as_str().ok_or("URL")?;
+        assert_eq!(
+            url,
+            format!("{}{}", server.base, result["path"].as_str().ok_or("path")?)
+        );
+        assert!(!url.contains("token="));
+        assert!(!url.contains("invite="));
+        let response = server.client.get(url).send()?;
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "{view}: {}",
+            response.text()?
+        );
+    }
+    Ok(())
+}
+
+fn assert_redirect_parameter_is_rejected(server: &Server) -> TestResult {
+    // An arbitrary redirect query cannot influence the destination.
+    assert_eq!(
+        server
+            .client
+            .get(format!(
+                "{}/transactions?next=https://evil.example",
+                server.base
+            ))
+            .send()?
+            .status(),
+        401
+    );
     Ok(())
 }

@@ -3,7 +3,10 @@
 mod filters;
 pub(crate) mod values;
 
-use filters::*;
+use filters::{
+    Balance, BookFilter, Budget, CashFlowFilters, Dashboard, Empty, Period, Reconciliation,
+    ReportSelector, ReviewDetail, Transaction, Transactions, Trend, Validated, Vendor,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -86,19 +89,19 @@ macro_rules! desktop_views {
 
 desktop_views! {
     Dashboard as "dashboard" => #[serde(default)] Validated<Dashboard>,
-    Accounts as "accounts" => #[serde(default)] Validated<Company>,
+    Accounts as "accounts" => #[serde(default)] Validated<BookFilter>,
     Transactions as "transactions" => #[serde(default)] Validated<Transactions>,
     Transaction as "transaction" => Validated<Transaction>,
     Reports as "reports" => #[serde(default)] ReportSelector,
     IncomeStatement as "income-statement" => #[serde(default)] Validated<Period>,
     BalanceSheet as "balance-sheet" => #[serde(default)] Validated<Balance>,
-    CashFlow as "cash-flow" => #[serde(default)] Validated<Cash>,
+    CashFlow as "cash-flow" => #[serde(default)] Validated<CashFlowFilters>,
     Trend as "trend" => #[serde(default)] Validated<Trend>,
     BudgetVariance as "budget-variance" => #[serde(default)] Validated<Budget>,
     ScheduleC as "schedule-c" => #[serde(default)] Validated<Period>,
     Vendor1099 as "1099" => #[serde(default)] Validated<Vendor>,
     Reconciliation as "reconciliation" => #[serde(default)] Validated<Reconciliation>,
-    Review as "review" => #[serde(default)] Validated<Company>,
+    Review as "review" => #[serde(default)] Validated<BookFilter>,
     ReviewDetail as "review_detail" => Validated<ReviewDetail>,
     Settings as "settings" => #[serde(default)] Validated<Empty>,
 }
@@ -226,7 +229,7 @@ impl ViewAddress {
             Self::ReviewDetail { state } => (state.route(), fields(state)?),
             Self::Settings { state } => (SETTINGS.into(), fields(state)?),
         };
-        encode_path(route, fields)
+        encode_path(route, &fields)
     }
 
     pub(crate) fn result(&self, base: &str) -> Result<serde_json::Value, LinkError> {
@@ -244,7 +247,7 @@ fn fields(value: &impl Serialize) -> Result<serde_json::Value, &'static str> {
 }
 
 /// Serialization only: all semantic checks have already run during deserialization.
-fn encode_path(mut route: String, fields: serde_json::Value) -> Result<String, &'static str> {
+fn encode_path(mut route: String, fields: &serde_json::Value) -> Result<String, &'static str> {
     const ORDER: &[&str] = &[
         "company",
         "account",
@@ -277,8 +280,7 @@ fn encode_path(mut route: String, fields: serde_json::Value) -> Result<String, &
         }
         let value = value
             .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| value.to_string());
+            .map_or_else(|| value.to_string(), str::to_owned);
         route.push(if route.contains('?') { '&' } else { '?' });
         route.push_str(key);
         route.push('=');
@@ -357,7 +359,7 @@ pub(crate) struct RawLinkFlags {
     payee: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[arg(long)]
-    /// Inclusive comparison start, paired with compare_to.
+    /// Inclusive comparison start, paired with `compare_to`.
     compare_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[arg(long)]
@@ -431,7 +433,7 @@ pub(crate) struct RawLinkFlags {
 /// Options for generating a link without starting or opening Desktop.
 #[derive(clap::Args, Debug)]
 pub struct LinkOptions {
-    /// Stable view ID, as used by ui_get_link and ui_show_view.
+    /// Stable view ID, as used by `ui_get_link` and `ui_show_view`.
     #[arg(long, value_enum)]
     view_id: View,
     #[command(flatten)]
@@ -559,7 +561,7 @@ mod tests {
             json!({"view_id":"transactions","state":{"from":"2026-10-31","to":"2026-10-01"}}),
             json!({"view_id":"transactions","state":{"min_amount":"20","max_amount":"10"}}),
             json!({"view_id":"transactions","state":{"min_amount":"1.00"}}),
-            json!({"view_id":"transactions","state":{"offset":9223372036854775807_i64}}),
+            json!({"view_id":"transactions","state":{"offset":i64::MAX}}),
             json!({"view_id":"balance-sheet","state":{"compare_from":"2026-01-01","compare_to":"2026-01-31"}}),
             json!({"view_id":"reports","state":{"report_kind":"trend","threshold":"600"}}),
             json!({"view_id":"reports","state":{"report_kind":"balance-sheet","from":"2026-01-01"}}),

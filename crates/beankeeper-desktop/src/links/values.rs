@@ -37,7 +37,7 @@ macro_rules! string_wire {
 pub(crate) struct Date(NaiveDate);
 
 impl Date {
-    pub(crate) fn date(&self) -> NaiveDate {
+    pub(crate) fn date(self) -> NaiveDate {
         self.0
     }
 }
@@ -249,7 +249,7 @@ impl fmt::Display for TransactionId {
     }
 }
 
-/// The upstream proposal TypeID with its prefix checked by upstream parsing.
+/// The upstream proposal `TypeID` with its prefix checked by upstream parsing.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct ProposalId(beankeeper_cli::db::proposals::ProposalId);
@@ -389,7 +389,7 @@ impl BudgetWindow {
                 if from > to
                     || from.day() != 1
                     || from.year() != to.year()
-                    || !to.succ_opt().is_some_and(|next| next.day() == 1)
+                    || to.succ_opt().is_none_or(|next| next.day() != 1)
                     || year.is_some_and(|year| year.get() != from.year())
                 {
                     return Err(LinkError(Self::ERROR));

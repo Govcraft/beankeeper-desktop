@@ -1,0 +1,4 @@
+# Test assertions can report fixture failures directly. Shipped code and
+# build scripts handle unexpected inputs without unwrap or expect.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

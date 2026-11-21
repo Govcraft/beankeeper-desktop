@@ -46,9 +46,10 @@ pub(crate) enum ViewError {
 impl ViewError {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Self::Invalid(_) | Self::ReportOptions(_) => StatusCode::BAD_REQUEST,
+            Self::Invalid(_) | Self::ReportOptions(_) | Self::Ledger(CliError::Validation(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::NotFound | Self::Ledger(CliError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Self::Ledger(CliError::Validation(_)) => StatusCode::BAD_REQUEST,
             Self::Ledger(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -58,7 +59,7 @@ impl fmt::Display for ViewError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => f.write_str(message),
-            Self::ReportOptions(message) => f.write_str(message),
+            Self::ReportOptions(message) => f.write_str(message.as_str()),
             Self::NotFound | Self::Ledger(CliError::NotFound(_)) => {
                 f.write_str("The requested company, account or transaction was not found.")
             }
@@ -209,7 +210,11 @@ fn company_form(
                 html,
                 "<option{}>{}</option>",
                 Attribute::Selected(
-                    query.status.as_ref().map(|status| status.status()) == Some(status)
+                    query
+                        .status
+                        .as_ref()
+                        .map(crate::links::values::Clearance::status)
+                        == Some(status)
                 ),
                 status
             );
@@ -265,20 +270,15 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
             "<p class=\"empty\">No companies yet. Ask your agent to initialize your books and create a company.</p>"
         );
         let content = if matches!(route, LedgerRoute::Home) {
-            let mut home = markup!(
-                "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>{}</section>",
-                note
-            );
-            snapshot_links(&mut home, None, None);
-            home
+            empty_snapshot(&note)
         } else {
             note
         };
         return Ok(ViewPage {
             title,
             description,
-            nav,
             content,
+            nav,
         });
     };
     if !companies.iter().any(|item| item.slug == company) {
@@ -333,6 +333,15 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         content,
         nav,
     })
+}
+
+fn empty_snapshot(note: &Markup) -> Markup {
+    let mut home = markup!(
+        "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>{}</section>",
+        note
+    );
+    snapshot_links(&mut home, None, None);
+    home
 }
 
 #[derive(Deserialize)]
@@ -877,7 +886,7 @@ mod tests {
         )?;
         match result {
             db::PostResult::Created(id) => Ok(id),
-            _ => Err("expected created transaction".into()),
+            db::PostResult::Skipped(_) => Err("expected created transaction".into()),
         }
     }
 

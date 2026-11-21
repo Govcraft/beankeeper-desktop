@@ -523,6 +523,9 @@ pub enum UpdateChecks {
 }
 
 /// Last checked state, read without any network request. Opt-out hides stale results.
+///
+/// # Errors
+/// Returns errors when the cached update status cannot be read.
 pub fn status(path: &Path, checks: UpdateChecks) -> Result<String, UpdateError> {
     status_with(path, checks, env!("CARGO_PKG_VERSION"))
 }
@@ -539,6 +542,9 @@ fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<Strin
 /// At most one network attempt per day per Desktop version, including failures
 /// and process restarts. Legacy caches are refreshed on the next check.
 /// Opt-out is evaluated before files or the network are accessed.
+///
+/// # Errors
+/// Returns errors when cached update state cannot be read or written.
 pub fn check(path: &Path, checks: UpdateChecks, now: u64) -> Result<String, UpdateError> {
     check_with(path, checks, now, env!("CARGO_PKG_VERSION"), |current| {
         fetch_manifest(current, download, &Cosign)
@@ -589,7 +595,7 @@ fn check_with(
         if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
             return status_with(path, UpdateChecks::Enabled, current);
         }
-        cache.desktop_version = current.to_owned();
+        current.clone_into(&mut cache.desktop_version);
         cache.last_attempt = now.max(1);
         cache.message = "Update check did not complete.".into();
         write_cache(path, &cache)?;
@@ -620,6 +626,9 @@ fn check_with(
 
 /// Download only the matching archive and mandatory D13 checksum/bundle files.
 /// Re-verifies cached manifest bytes via their signed release asset before install.
+///
+/// # Errors
+/// Returns errors for unsupported targets, unavailable releases, ineligible licenses, or invalid artifacts.
 pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> {
     let cached = read_cache(cache, env!("CARGO_PKG_VERSION"))?
         .manifest
@@ -655,7 +664,7 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
     install(
         &authorized,
         target,
-        ReleaseFiles {
+        &ReleaseFiles {
             archive: &archive,
             bundle: &archive_bundle,
             checksums: &checksums,
@@ -677,7 +686,7 @@ struct ReleaseFiles<'a> {
 fn install(
     release: &AuthorizedRelease,
     target: Target,
-    files: ReleaseFiles<'_>,
+    files: &ReleaseFiles<'_>,
     destination: &Path,
     verifier: &dyn BundleVerifier,
 ) -> Result<(), UpdateError> {
@@ -791,6 +800,7 @@ fn extract_binary(
 }
 
 /// Current Unix time for throttling; never derived from ledger data.
+#[must_use]
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -883,7 +893,7 @@ mod tests {
             flate2::Compression::default(),
         ));
         let mut header = tar::Header::new_gnu();
-        header.set_size(content.len() as u64);
+        header.set_size(u64::try_from(content.len()).expect("fixture payload fits u64"));
         header.set_mode(0o755);
         header.set_cksum();
         archive
@@ -1283,7 +1293,7 @@ mod tests {
             cached_status(&cache),
             "The last update check has not completed. It may still be running or may have been interrupted.\nLast attempt: 2026-11-21 02:06:44 UTC."
         );
-        for seconds in [i64::MAX as u64, u64::MAX] {
+        for seconds in [i64::MAX.unsigned_abs(), u64::MAX] {
             cache.last_attempt = seconds;
             let status = cached_status(&cache);
             assert!(status.ends_with("Last attempt: unavailable (invalid cached time)."));
@@ -1322,10 +1332,10 @@ mod tests {
             ),
         ];
         for (day, (result, expected)) in cases.into_iter().enumerate() {
-            let now = 1_795_226_804 + day as u64 * DAY;
+            let now = 1_795_226_804 + u64::try_from(day)? * DAY;
             let expected = format!(
                 "{expected}\nLast attempt: {} UTC.",
-                DateTime::<Utc>::from_timestamp(now as i64, 0)
+                DateTime::<Utc>::from_timestamp(i64::try_from(now)?, 0)
                     .ok_or("fixture timestamp")?
                     .format("%Y-%m-%d %H:%M:%S")
             );
@@ -1468,7 +1478,7 @@ mod tests {
                 install(
                     &manifest,
                     target,
-                    ReleaseFiles {
+                    &ReleaseFiles {
                         archive: &archive,
                         bundle: artifact_signature,
                         checksums: list,
@@ -1495,7 +1505,7 @@ mod tests {
                 install(
                     &manifest,
                     target,
-                    ReleaseFiles {
+                    &ReleaseFiles {
                         archive: &archive,
                         bundle: &bundle,
                         checksums: list.as_bytes(),
@@ -1514,7 +1524,7 @@ mod tests {
             checksums: checksums.as_bytes(),
             checksums_bundle: &checksums_bundle,
         };
-        install(&manifest, target, files, &destination, &OfflineVerifier)?;
+        install(&manifest, target, &files, &destination, &OfflineVerifier)?;
         assert_eq!(fs::read(&destination)?, b"fixture executable");
         #[cfg(unix)]
         {
@@ -1545,7 +1555,7 @@ mod tests {
         install(
             &release,
             target,
-            ReleaseFiles {
+            &ReleaseFiles {
                 archive: &archive,
                 bundle: &sign(&archive),
                 checksums: checksums.as_bytes(),
@@ -1588,7 +1598,7 @@ mod tests {
             let result = install(
                 &manifest,
                 target,
-                ReleaseFiles {
+                &ReleaseFiles {
                     archive: &archive,
                     bundle: &bundle,
                     checksums: checksums.as_bytes(),
@@ -1627,7 +1637,7 @@ mod tests {
                 install(
                     &manifest,
                     target,
-                    ReleaseFiles {
+                    &ReleaseFiles {
                         archive: &bytes,
                         bundle: &sign(&bytes),
                         checksums: list.as_bytes(),

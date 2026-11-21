@@ -92,12 +92,9 @@ pub struct SetupOptions {
     /// Explicit file-backed secret store for headless/test use; bypasses OS keychain.
     #[arg(long)]
     pub secret_store_file: Option<PathBuf>,
-    /// Do not start a background Desktop server.
-    #[arg(long)]
-    pub no_start: bool,
-    /// Do not launch the default browser.
-    #[arg(long)]
-    pub no_open: bool,
+    /// Desktop launch options.
+    #[command(flatten)]
+    pub launch: SetupLaunchOptions,
     /// Local Desktop address; requires a nonzero port.
     #[arg(long, default_value = "127.0.0.1:8750")]
     pub bind: SocketAddr,
@@ -107,6 +104,17 @@ pub struct SetupOptions {
     /// Bookkeeper's daily spend in USD cents, per initial company.
     #[arg(long, default_value = "50000", value_parser = clap::value_parser!(i64).range(0..))]
     pub daily_limit: i64,
+}
+
+/// Options controlling how setup opens the local Desktop workspace.
+#[derive(Args, Debug, Default)]
+pub struct SetupLaunchOptions {
+    /// Do not start a background Desktop server.
+    #[arg(long)]
+    pub no_start: bool,
+    /// Do not launch the default browser.
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 /// Setup failures; credential content is never included in diagnostics.
@@ -230,29 +238,18 @@ fn run_with_store(
             "setup output already exists; choose a fresh ledger/recovery path",
         ));
     }
-    let mut outputs = vec![
-        cli.db.clone(),
-        token_file.clone(),
-        owner_file.clone(),
-        kit.clone(),
-        cli.db.with_extension("desktop.json"),
-        cli.db.with_extension("desktop.log"),
-    ];
-    outputs.extend(plan.paths().map(Path::to_path_buf));
-    if let Some(path) = &options.secret_store_file {
-        outputs.push(path.clone());
-    }
-    if let Some(path) = &cli.passphrase.passphrase_file {
-        outputs.push(path.clone());
-    }
-    let mut seen = std::collections::HashSet::new();
-    for path in outputs {
-        if !seen.insert(future_path(&path)?) {
-            return Err(SetupError::Invalid(
-                "ledger, credential, recovery, source and client config paths must be distinct",
-            ));
-        }
-    }
+    let paths = SetupPaths {
+        token_file: &token_file,
+        owner_file: &owner_file,
+        kit: &kit,
+    };
+    validate_distinct_outputs(
+        &cli.db,
+        &paths,
+        plan.paths(),
+        options.secret_store_file.as_deref(),
+        cli.passphrase.passphrase_file.as_deref(),
+    )?;
     if kit.exists() {
         PrivateFile::open(&kit)?;
     }
@@ -282,35 +279,127 @@ fn run_with_store(
     cli.passphrase.passphrase_fd = None;
     cli.passphrase.passphrase_file = Some(temporary.path().into());
     if !existed {
-        // SQLCipher and demo writes stay inside an owner-only staging directory.
-        let parent = cli
-            .db
-            .parent()
-            .ok_or(SetupError::Invalid("ledger needs a parent directory"))?;
-        let mut staging_builder = tempfile::Builder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            staging_builder.permissions(fs::Permissions::from_mode(0o700));
-        }
-        let staging = staging_builder.tempdir_in(parent)?;
-        keychain::restrict_directory(staging.path())?;
-        let staged = staging.path().join("books.db");
-        beankeeper_cli::commands::init::run(cli, true, Some(&staged), false, options.demo)?;
-        set_private(&staged)?;
-        // An atomic no-clobber link also protects against a concurrent setup.
-        fs::hard_link(&staged, &cli.db)?;
-        set_private(&cli.db)?;
+        initialize_ledger(cli, options.demo)?;
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
     provision(&db, options, &token_file, &owner_file)?;
-    let marker = cli.db.with_extension("desktop.json");
-    if !marker.exists() || options.secret_store_file.is_some() {
-        let file_store = options
-            .secret_store_file
-            .as_ref()
-            .map(std::path::absolute)
-            .transpose()?;
+    write_store_marker(&cli.db, options.secret_store_file.as_deref())?;
+    finish_setup(
+        cli,
+        options,
+        &paths,
+        plan.write()?,
+        &secret,
+        &temporary,
+        existed,
+    )
+}
+
+fn finish_setup(
+    cli: &Cli,
+    options: &SetupOptions,
+    paths: &SetupPaths<'_>,
+    configs: Vec<PathBuf>,
+    secret: &SecretString,
+    temporary: &tempfile::NamedTempFile,
+    existed: bool,
+) -> Result<(), SetupError> {
+    println!(
+        "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
+        cli.db.display(),
+        paths.kit.display()
+    );
+    eprintln!(
+        "Agent token is a secret: {}. Owner credential stays separate: {}.",
+        paths.token_file.display(),
+        paths.owner_file.display()
+    );
+    for path in configs {
+        eprintln!("MCP config: {}", path.display());
+    }
+    if !options.non_interactive && !existed {
+        show_once(secret)?;
+    }
+    if !options.launch.no_start {
+        super_start(cli, options, temporary)?;
+    }
+    if !options.launch.no_open {
+        if options.launch.no_start {
+            let token = PrivateFile::open(paths.token_file)?.read_secret(BEARER_FILE_LIMIT)?;
+            if !running_for_ledger(options.bind, &token)? {
+                return Err(crate::DesktopError::NotRunning(crate::server::local_url(
+                    options.bind,
+                ))
+                .into());
+            }
+        }
+        crate::browser::open(options.bind)?;
+    }
+    Ok(())
+}
+
+struct SetupPaths<'a> {
+    token_file: &'a Path,
+    owner_file: &'a Path,
+    kit: &'a Path,
+}
+
+fn validate_distinct_outputs<'a>(
+    ledger: &Path,
+    paths: &SetupPaths<'_>,
+    config_paths: impl Iterator<Item = &'a Path>,
+    store_file: Option<&Path>,
+    passphrase_file: Option<&Path>,
+) -> Result<(), SetupError> {
+    let mut outputs = vec![
+        ledger.to_owned(),
+        paths.token_file.to_owned(),
+        paths.owner_file.to_owned(),
+        paths.kit.to_owned(),
+        ledger.with_extension("desktop.json"),
+        ledger.with_extension("desktop.log"),
+    ];
+    outputs.extend(config_paths.map(Path::to_path_buf));
+    outputs.extend(store_file.map(Path::to_path_buf));
+    outputs.extend(passphrase_file.map(Path::to_path_buf));
+    let mut seen = std::collections::HashSet::new();
+    for path in outputs {
+        if !seen.insert(future_path(&path)?) {
+            return Err(SetupError::Invalid(
+                "ledger, credential, recovery, source and client config paths must be distinct",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn initialize_ledger(cli: &Cli, demo: bool) -> Result<(), SetupError> {
+    // SQLCipher and demo writes stay inside an owner-only staging directory.
+    let parent = cli
+        .db
+        .parent()
+        .ok_or(SetupError::Invalid("ledger needs a parent directory"))?;
+    let mut staging_builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staging_builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let staging = staging_builder.tempdir_in(parent)?;
+    keychain::restrict_directory(staging.path())?;
+    let staged = staging.path().join("books.db");
+    beankeeper_cli::commands::init::run(cli, true, Some(&staged), false, demo)?;
+    set_private(&staged)?;
+    // An atomic no-clobber link also protects against a concurrent setup.
+    fs::hard_link(&staged, &cli.db)?;
+    set_private(&cli.db)?;
+    Ok(())
+}
+
+fn write_store_marker(ledger: &Path, file_store: Option<&Path>) -> Result<(), SetupError> {
+    let marker = ledger.with_extension("desktop.json");
+    if !marker.exists() || file_store.is_some() {
+        let file_store = file_store.map(std::path::absolute).transpose()?;
         let metadata = serde_json::json!({"secret_store_file": file_store});
         if marker.exists() {
             PrivateFile::open(&marker)?;
@@ -326,38 +415,6 @@ fn run_with_store(
         } else {
             private_create(&marker, metadata.to_string().as_bytes())?;
         }
-    }
-    let configs = plan.write()?;
-    println!(
-        "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
-        cli.db.display(),
-        kit.display()
-    );
-    eprintln!(
-        "Agent token is a secret: {}. Owner credential stays separate: {}.",
-        token_file.display(),
-        owner_file.display()
-    );
-    for path in configs {
-        eprintln!("MCP config: {}", path.display());
-    }
-    if !options.non_interactive && !existed {
-        show_once(&secret)?;
-    }
-    if !options.no_start {
-        super_start(cli, options, &temporary)?;
-    }
-    if !options.no_open {
-        if options.no_start {
-            let token = PrivateFile::open(&token_file)?.read_secret(BEARER_FILE_LIMIT)?;
-            if !running_for_ledger(options.bind, &token)? {
-                return Err(crate::DesktopError::NotRunning(crate::server::local_url(
-                    options.bind,
-                ))
-                .into());
-            }
-        }
-        crate::browser::open(options.bind)?;
     }
     Ok(())
 }
@@ -495,7 +552,7 @@ fn issue(
         &IssueRequest {
             name,
             capabilities: &capabilities,
-            ttl: Duration::from_secs(365 * 24 * 3600),
+            ttl: Duration::from_hours(8760),
             public_key: None,
             generate_key: true,
         },
