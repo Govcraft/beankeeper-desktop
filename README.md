@@ -162,8 +162,12 @@ The `ui_show_view`, `ui_highlight` and `ui_status` MCP tools require a separate
 `ui/navigate` token. Current setup presets supply ledger credentials only;
 upstream rejects mixed ledger/UI grants. Connect a second client entry to the
 same `/mcp` endpoint using the UI token, call `ui_status`, and open its association
-link in a paired browser. With no tab open, tools return useful text and a
-connection link. With multiple connected tabs, choose the `tab_id` from status.
+link in a paired browser and confirm the connection. Browser pairing alone
+does not link an agent; the live notice says navigation is ready only after
+association. When no matching tab can receive navigation or highlights, those
+tools return `isError: true` with code `NO_CONNECTED_TAB`, `queued: false`,
+a message and a `pairing_url`. `ui_status` still succeeds and reports the current
+pairing state and tabs. With multiple connected tabs, choose the `tab_id` from status.
 Navigation/highlight are disabled by `--read-only`; status remains available.
 
 Real dashboard, account, register, transaction, review, financial report, tax

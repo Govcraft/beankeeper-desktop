@@ -60,9 +60,13 @@ DOM IDs listed by status and never clicks or submits a control. Missing rows are
 a no-op. Reports and reconciliation accept the stable view IDs and filters in
 [docs/reports.md](docs/reports.md), either directly or via `view_id: "reports"`
 and `state.report_kind`. Use `report-filters` or `report-results` from status to
-highlight those regions. No tab is required:
-read the textual fallback and say clearly when nothing was displayed. A queued
-result is not browser confirmation; use `ui_status` to inspect the loaded view.
+highlight those regions. When no matching live tab is available,
+`ui_show_view` and `ui_highlight` return `isError: true`, code `NO_CONNECTED_TAB`,
+`queued: false`, a message and a `pairing_url`. Tell the human nothing was displayed,
+provide the connection link, and retry after association and tab connection.
+`ui_status` succeeds even without tabs, so use it to check readiness. Browser
+pairing alone does not associate your UI credential. A queued result is not
+browser confirmation; use `ui_status` to inspect the loaded view.
 `--read-only` removes navigation/highlight mutations. See the
 [navigation catalog](docs/navigation.md) for arguments and examples.
 Desktop's supported workflow is agent proposes, human approves in the browser.

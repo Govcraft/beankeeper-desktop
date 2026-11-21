@@ -43,6 +43,17 @@ fn text(result: &Value) -> &str {
         .unwrap_or_default()
 }
 
+fn assert_no_connected_tab(result: &Value) {
+    assert_eq!(result["result"]["isError"], true);
+    assert_eq!(content(result)["code"], "NO_CONNECTED_TAB");
+    assert_eq!(content(result)["queued"], false);
+    assert_eq!(content(result)["message"], text(result));
+    assert!(text(result).contains("Nothing was displayed"));
+    let url = content(result)["pairing_url"].as_str().unwrap_or_default();
+    assert!(url.contains("/pair?invite="));
+    assert!(text(result).contains(url));
+}
+
 fn csrf(server: &Server) -> TestResult<String> {
     let html = server
         .client
@@ -174,7 +185,13 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
                 if bearer != nav {
                     assert_eq!(content(&result)["code"], "FORBIDDEN");
                 } else {
-                    assert_ne!(result["result"]["isError"], true);
+                    if name == "ui_status" {
+                        assert_ne!(result["result"]["isError"], true);
+                        assert_eq!(content(&result)["paired"], false);
+                        assert_eq!(content(&result)["tabs"], json!([]));
+                    } else {
+                        assert_no_connected_tab(&result);
+                    }
                     assert!(text(&result).contains("nothing") || text(&result).contains("Nothing"));
                     assert!(text(&result).contains("/pair?invite="));
                     assert!(content(&result)["pairing_url"].as_str().is_some());
@@ -188,7 +205,7 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
         "ui_show_view",
         json!({"view_id":"reports","state":{"report_kind":"balance-sheet","to":"2026-12-31"}}),
     )?;
-    assert_ne!(report["result"]["isError"], true);
+    assert_no_connected_tab(&report);
     assert!(text(&report).contains("/reports/balance-sheet?to=2026-12-31"));
     assert!(content(&report)["pairing_url"].as_str().is_some());
     for arguments in [
@@ -264,6 +281,53 @@ fn read_only_removes_navigation_mutations_but_keeps_status() -> TestResult {
 }
 
 #[test]
+fn browser_stream_requires_agent_association_and_reports_confirmation_live() -> TestResult {
+    let ledger = Ledger::new()?;
+    let navigator = issue(&ledger, "navigator")?;
+    let nav = token(&navigator)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(nav))?;
+    server.pair()?;
+    let csrf = csrf(&server)?;
+    let tab = update(&server, &csrf, None, "/", "")?;
+    let mut events = stream(&server, &tab)?;
+    assert_eq!(event(&mut events, "heartbeat")?["agent_associated"], false);
+    let status = call(&server, nav, "ui_status", json!({}))?;
+    assert_ne!(status["result"]["isError"], true);
+    assert_eq!(content(&status)["paired"], false);
+    assert_eq!(content(&status)["tabs"], json!([]));
+    for (name, arguments) in [
+        ("ui_show_view", json!({"view_id":"accounts"})),
+        ("ui_highlight", json!({"target":"main","tab_id":tab})),
+    ] {
+        assert_no_connected_tab(&call(&server, nav, name, arguments)?);
+    }
+    associate(&server, nav, &csrf)?;
+    let mut associated = false;
+    for _ in 0..20 {
+        if event(&mut events, "heartbeat")?["agent_associated"] == true {
+            associated = true;
+            break;
+        }
+    }
+    assert!(
+        associated,
+        "Existing stream did not observe agent confirmation"
+    );
+    let status = call(&server, nav, "ui_status", json!({}))?;
+    assert_eq!(content(&status)["paired"], true);
+    assert_eq!(content(&status)["tabs"][0]["tab_id"], tab);
+    assert_eq!(content(&status)["tabs"][0]["pending"], 0);
+    let result = call(&server, nav, "ui_show_view", json!({"view_id":"accounts"}))?;
+    assert_ne!(result["result"]["isError"], true);
+    assert_eq!(content(&result)["queued"], true);
+    let navigation = event(&mut events, "navigate")?;
+    assert_eq!(navigation["url"], "/accounts");
+    assert_eq!(navigation["agent_associated"], true);
+    Ok(())
+}
+
+#[test]
 fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> TestResult {
     let ledger = Ledger::new()?;
     let navigator = issue(&ledger, "navigator")?;
@@ -275,8 +339,17 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
     let csrf = csrf(&server)?;
     associate(&server, nav, &csrf)?;
     let tab = update(&server, &csrf, None, "/?company=acme", "")?;
+    let status = call(&server, nav, "ui_status", json!({}))?;
+    assert_eq!(content(&status)["paired"], true);
+    assert_eq!(content(&status)["tabs"], json!([]));
+    for (name, arguments) in [
+        ("ui_show_view", json!({"view_id":"accounts"})),
+        ("ui_highlight", json!({"target":"main"})),
+    ] {
+        assert_no_connected_tab(&call(&server, nav, name, arguments)?);
+    }
     let mut events = stream(&server, &tab)?;
-    event(&mut events, "heartbeat")?;
+    assert_eq!(event(&mut events, "heartbeat")?["agent_associated"], true);
     let result = call(
         &server,
         nav,
@@ -306,6 +379,7 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
         json!({"target":"missing-row"}),
     )?;
     assert_eq!(content(&missing)["queued"], false);
+    assert_ne!(missing["result"]["isError"], true);
     assert!(text(&missing).contains("No such row"));
     let highlight = call(
         &server,
@@ -314,7 +388,9 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
         json!({"target":"transaction-1"}),
     )?;
     assert_eq!(content(&highlight)["queued"], true);
-    assert_eq!(event(&mut events, "highlight")?["target"], "transaction-1");
+    let highlight_event = event(&mut events, "highlight")?;
+    assert_eq!(highlight_event["target"], "transaction-1");
+    assert_eq!(highlight_event["agent_associated"], true);
     update(&server, &csrf, Some(&tab), url, "transaction-1")?;
     assert_eq!(
         content(&call(&server, nav, "ui_status", json!({}))?)["tabs"][0]["highlight"],
@@ -329,7 +405,7 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
         "ui_show_view",
         json!({"view_id":"review","tab_id":tab}),
     )?;
-    assert_eq!(content(&targeted)["queued"], false);
+    assert_no_connected_tab(&targeted);
     let second = update(&server, &csrf, None, "/review?company=acme", "")?;
     let mut second_events = stream(&server, &second)?;
     event(&mut second_events, "heartbeat")?;
@@ -711,8 +787,7 @@ fn closed_tabs_are_removed_and_another_browser_cannot_claim_their_stream() -> Te
         std::thread::sleep(Duration::from_millis(20));
     }
     let result = call(&server, nav, "ui_show_view", json!({"view_id":"accounts"}))?;
-    assert_eq!(content(&result)["queued"], false);
-    assert!(text(&result).contains("nothing was displayed"));
+    assert_no_connected_tab(&result);
     for path in [
         "/transactions/999999?company=acme",
         "/review/not_a_proposal?company=acme",

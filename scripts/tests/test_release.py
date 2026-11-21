@@ -43,9 +43,9 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(release.is_prerelease("0.1.0"))
         self.assertEqual(release.debian_upstream_version("0.1.0-rc.1"), "0.1.0~rc.1")
         self.assertEqual(release.debian_upstream_version("0.1.0"), "0.1.0")
-        with self.assertRaises(ValueError):
-            release.version("beankeeper-desktop-v0.1.0")
         value = release.version()
+        with self.assertRaises(ValueError):
+            release.version(f"beankeeper-desktop-v{value}-mismatch")
         self.assertEqual(release.version(f"beankeeper-desktop-v{value}"), value)
         directory = release.stage(self.binary, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", self.root / "work")
         deb = self.output / "bk-0.1.0-rc.1-x86_64-unknown-linux-gnu.deb"

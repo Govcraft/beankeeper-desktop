@@ -47,8 +47,13 @@ Explicit invalid credentials override fallback credentials and fail authenticati
 First pair a browser using the one-time terminal URL from `bk serve`. Call
 `ui_status` with the UI token, open its association URL in that paired browser,
 and confirm **Connect agent to this browser**. The association URL alone cannot
-log a browser in. A UI token and a ledger token have separate associations even
-when used through the same MCP transport session.
+log a browser in. Pairing a browser opens its navigation channel but does not
+associate an agent. The live notice asks for the agent connection link until
+association, then says **Agent linked. Browser navigation ready.** This reflects
+the browser's association and channel, not whether an agent process is running.
+Already-open tabs update their notice when the association changes. A UI token
+and a ledger token have separate associations even when used through the same
+MCP transport session.
 
 Each browser tab registers a public TypeID, its current URL/title and the IDs of
 highlightable elements. It then opens a cookie-authenticated SSE connection.
@@ -117,12 +122,18 @@ Example calls:
 {"name":"ui_highlight","arguments":{"target":"main","tab_id":"TAB_ID_FROM_STATUS"}}
 ```
 
-Every successful call includes readable text as well as structured content.
-With no connected matching tab, navigation/highlight still succeed, say that
-nothing was displayed and return an association link. Requests are not saved for
-a browser that opens later. Error results explain invalid filters or unknown
-views and include a connection link. No ledger counts or totals are fetched with
-a navigation grant; the text describes the requested view and its exact filters.
+Navigation tool results include readable text as well as structured content.
+With no connected matching tab, `ui_show_view` and `ui_highlight` return
+`isError: true` with structured `code: "NO_CONNECTED_TAB"`, `message`,
+`queued: false` and `pairing_url`. This applies before association, when an
+associated browser has no live tab, and when an explicit `tab_id` cannot be
+reached by that credential. Open the association link in a paired browser,
+confirm the connection, keep a tab open and retry. Requests are not saved for
+a browser that opens later. `ui_status` remains successful without tabs and
+reports `paired`, an empty `tabs` list and an association link. A missing
+highlight target in a connected tab remains a successful no-op. Other error
+results explain invalid filters or unknown views and include a connection link.
+No ledger counts or totals are fetched with a navigation grant; the text describes the requested view and its exact filters.
 Use the separate ledger connection for financial queries.
 
 A queued event is not a claim that the browser displayed it. The browser
@@ -143,7 +154,9 @@ frontend build dependency. Without JavaScript, links, filters, pairing and revie
 forms continue to work, but the tab is not a live navigation target. CSP permits
 same-origin scripts and connections while continuing to forbid inline scripts,
 external scripts, objects and framing. The server sends an SSE tick every 250 ms.
-Events are transient and are not replayed as human actions on reconnect.
+Each event includes an `agent_associated` boolean from the revalidated browser
+session, so opening the stream alone never claims an agent is linked. Events
+are transient and are not replayed as human actions on reconnect.
 
 Tests use a real listener and temporary encrypted ledger. They cover discovery,
 policy-on/off grants, credential switching and revocation, fallback and read-only
@@ -155,8 +168,9 @@ No schema migration is introduced.
 
 An optional real Chromium regression check exercises the embedded receiver,
 filters, stable tab IDs across full page loads, acknowledgement, highlights,
-two-tab isolation and error-page reconnection. It requires Python with
-`requests` and `playwright`, plus Chromium on PATH or a Playwright browser.
+two-tab isolation, accurate pre-association notices, explicit no-tab errors,
+live association updates in already-open tabs and error-page reconnection.
+It requires Python with `requests` and `playwright`, plus Chromium on PATH or a Playwright browser.
 After building the Desktop binary, run:
 
 ```sh

@@ -35,11 +35,28 @@
   try {
     await update();
     const events = new EventSource(`/api/ui/events?tab_id=${encodeURIComponent(tabId)}`);
-    events.addEventListener("open", () => { notice.textContent = "Agent navigation connected."; });
-    events.addEventListener("error", () => { notice.textContent = "Agent navigation disconnected. Reload to reconnect if your session expired."; });
+    let associated = null;
+    events.addEventListener("open", () => {
+      associated = null;
+      notice.textContent = "Browser navigation channel connected.";
+    });
+    events.addEventListener("error", () => {
+      associated = null;
+      notice.textContent = "Browser navigation disconnected. Reload to reconnect if your session expired.";
+    });
     events.addEventListener("ui", async ({ data }) => {
       try {
         const event = JSON.parse(data);
+        if (typeof event.agent_associated === "boolean" && event.agent_associated !== associated) {
+          associated = event.agent_associated;
+          const connection = document.querySelector("[data-agent-connection]");
+          if (connection) connection.textContent = associated
+            ? "Your agent is connected to this browser."
+            : "Your browser session is active. Open your agent's connection link here to let it navigate this workspace.";
+          notice.textContent = associated
+            ? "Agent linked. Browser navigation ready."
+            : "Browser paired. Open your agent's connection link to enable navigation.";
+        }
         if (event.kind === "navigate") {
           const url = new URL(event.url, location.origin);
           if (url.origin !== location.origin || !event.url.startsWith("/") || event.url.startsWith("//")) return;
