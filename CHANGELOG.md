@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.2] - 2026-11-20
+
+### Fixed
+
+- Show readable UTC update-check times in the CLI and Settings, distinguish
+  incomplete checks from successful results, and explain HTTP failures without
+  assuming a connectivity problem. Existing update caches remain readable.
+
 ## [0.1.0-rc.1] - 2026-11-20
 
 Prerelease of 0.1.0. The git tag `beankeeper-desktop-v0.1.0-rc.1` is published

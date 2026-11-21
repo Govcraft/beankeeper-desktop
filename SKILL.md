@@ -65,8 +65,10 @@ credential paths, headless test options, lifecycle and recovery instructions.
 Ledger, library and schema work belongs in Govcraft/beankeeper.
 
 Desktop license and update state is available to the human at `/settings` in a
-paired browser. The human can activate a downloaded file with `bk license
-activate FILE`, inspect it with `bk license`, check the signed release feed with
+paired browser. Cached update results show readable UTC attempt times and
+explain failed or incomplete checks; reading Settings does not contact the feed.
+The human can activate a downloaded file with `bk license activate FILE`,
+inspect it with `bk license`, check the signed release feed with
 `bk update-check`, and explicitly install an eligible release with
 `bk self-update`. License files, claim codes and recovery tokens are human-owned;
 never ask for them or perform activation on the human's behalf. Normal ledger

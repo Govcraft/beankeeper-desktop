@@ -14,6 +14,44 @@ use common::{Ledger, Server, TestResult, clean_command, rpc, token};
 use serde_json::{Value, json};
 
 #[test]
+fn settings_displays_cached_update_outcome_and_readable_utc_attempt() -> TestResult {
+    let ledger = Ledger::new()?;
+    let state = tempfile::tempdir()?;
+    let now = beankeeper_desktop::updates::now();
+    let cache = serde_json::to_vec(&json!({
+        "last_attempt": now,
+        "manifest": null,
+        "message": "update download failed; check connectivity and retry after the daily interval"
+    }))?;
+    std::fs::write(state.path().join("updates.json"), &cache)?;
+    let mut command = ledger.command();
+    command
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("BEANKEEPER_NO_UPDATE_CHECK", "0")
+        .env("BEANKEEPER_DESKTOP_STATE_DIR", state.path());
+    let mut server = Server::launch(command)?;
+    server.pair()?;
+    let response = server
+        .client
+        .get(format!("{}/settings", server.base))
+        .send()?;
+    assert_eq!(response.status(), 200);
+    let html = response.text()?;
+    let attempted_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now.try_into()?, 0)
+        .ok_or("fixture timestamp")?;
+    assert!(html.contains("<h1>License and updates</h1>"));
+    assert!(html.contains("Could not check for updates:"));
+    assert!(html.contains(&format!(
+        "Last attempt: {} UTC.",
+        attempted_at.format("%Y-%m-%d %H:%M:%S")
+    )));
+    assert!(!html.contains("Unix seconds"));
+    assert!(!html.contains(&now.to_string()));
+    assert_eq!(std::fs::read(state.path().join("updates.json"))?, cache);
+    Ok(())
+}
+
+#[test]
 fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], None)?;

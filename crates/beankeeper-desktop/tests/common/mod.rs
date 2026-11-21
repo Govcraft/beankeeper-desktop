@@ -122,12 +122,14 @@ impl Server {
 
     pub fn launch(mut command: Command) -> TestResult<Self> {
         let cwd = tempfile::tempdir()?;
+        let desktop_state = command
+            .get_envs()
+            .find(|(name, _)| *name == "BEANKEEPER_DESKTOP_STATE_DIR")
+            .and_then(|(_, value)| value)
+            .map_or_else(|| cwd.path().join("desktop-state"), PathBuf::from);
         let child = command
             .current_dir(cwd.path())
-            .env(
-                "BEANKEEPER_DESKTOP_STATE_DIR",
-                cwd.path().join("desktop-state"),
-            )
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", desktop_state)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

@@ -285,6 +285,8 @@ remain Roland's decision; this preview adds no runtime lockout.
 `bk update-check` checks the signed GitHub release manifest at most once daily,
 including failed attempts. `bk serve` checks in the background, and paired
 browsers can read the cached result at **License and updates** (`/settings`).
+Both show a readable UTC last-attempt time and explain incomplete checks,
+including HTTP failures, separately from up-to-date or update-available results.
 Set `BEANKEEPER_NO_UPDATE_CHECK=1` to disable checks before any network access.
 Requests contain only the Desktop version and OS, with no ledger information.
 `bk self-update` installs an eligible release only after mandatory checksum and
