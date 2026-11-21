@@ -185,6 +185,8 @@ def main():
             try:
                 with client.open(restarted["desktop_url"] + "health", timeout=2):
                     raise AssertionError("stopped host is still accepting requests")
+            except urllib.error.HTTPError as error:
+                raise AssertionError("stopped host is still accepting requests") from error
             except (urllib.error.URLError, ConnectionError, TimeoutError):
                 pass
             # Replace the installed executable as an installer does. Reinstallation
