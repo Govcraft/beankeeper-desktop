@@ -63,26 +63,55 @@ impl<'de> Deserialize<'de> for LicenseId {
     }
 }
 
-/// Authenticated entitlement fields from D10's license-file v1 contract.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+// Private wire input. Only the verified wrapper crosses the license boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LicenseClaims {
-    /// Supported claims schema, exactly one.
-    pub schema_version: u8,
-    /// Canonical service-issued `lic_` TypeID.
-    pub license_id: LicenseId,
-    /// Consuming product, always `beankeeper-desktop` after verification.
-    pub product: String,
-    /// Opaque customer reference, never an email address.
-    pub purchaser_ref: String,
-    /// Storefront adapter slug.
-    pub storefront: String,
-    /// Issuance time, which may follow the original update deadline on reissue.
-    pub issued_at: DateTime<Utc>,
-    /// Last eligible release timestamp, inclusive. This does not expire use.
-    pub updates_until: DateTime<Utc>,
-    /// Contractual seats; no machine binding or activation counter is implied.
-    pub seats: Option<NonZeroU32>,
+struct LicenseClaims {
+    schema_version: u8,
+    license_id: LicenseId,
+    product: String,
+    purchaser_ref: PurchaserRef,
+    storefront: String,
+    issued_at: DateTime<Utc>,
+    updates_until: DateTime<Utc>,
+    seats: Option<NonZeroU32>,
+}
+
+/// A perpetual Desktop license authenticated by a configured issuer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedLicense(LicenseClaims);
+
+impl VerifiedLicense {
+    /// Canonical service-issued identifier.
+    #[must_use]
+    pub fn id(&self) -> &LicenseId {
+        &self.0.license_id
+    }
+
+    /// Last eligible release timestamp, inclusive.
+    #[must_use]
+    pub fn updates_until(&self) -> DateTime<Utc> {
+        self.0.updates_until
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+struct PurchaserRef(String);
+
+impl TryFrom<String> for PurchaserRef {
+    type Error = LicenseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 256
+            || value.chars().any(char::is_control)
+            || value.contains('@')
+        {
+            return Err(LicenseError::InvalidClaims);
+        }
+        Ok(Self(value))
+    }
 }
 
 #[derive(Deserialize)]
@@ -133,21 +162,35 @@ impl TrustedKeys {
     }
 }
 
-/// A perpetual license's eligibility for one authenticated release timestamp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Entitlement {
-    /// An update deadline never disables an installed eligible release.
-    pub perpetual_use: bool,
-    /// Whether this release falls within the original update window.
-    pub update_eligible: bool,
+/// An entitlement to install a release with this authenticated timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateGrant {
+    released_at: DateTime<Utc>,
 }
 
-/// Evaluate authenticated claims against a trusted release date, never a clock.
+impl UpdateGrant {
+    /// The exact release timestamp covered by the grant.
+    #[must_use]
+    pub fn released_at(&self) -> DateTime<Utc> {
+        self.released_at
+    }
+}
+
+/// An authenticated perpetual license's decision for a specific release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateEligibility {
+    Eligible(UpdateGrant),
+    OutsideWindow { updates_until: DateTime<Utc> },
+}
+
+/// Evaluate a verified license against the authenticated release date.
 #[must_use]
-pub fn entitlement(claims: &LicenseClaims, released_at: DateTime<Utc>) -> Entitlement {
-    Entitlement {
-        perpetual_use: true,
-        update_eligible: released_at <= claims.updates_until,
+pub fn entitlement(license: &VerifiedLicense, released_at: DateTime<Utc>) -> UpdateEligibility {
+    let updates_until = license.updates_until();
+    if released_at <= updates_until {
+        UpdateEligibility::Eligible(UpdateGrant { released_at })
+    } else {
+        UpdateEligibility::OutsideWindow { updates_until }
     }
 }
 
@@ -155,7 +198,7 @@ pub fn entitlement(claims: &LicenseClaims, released_at: DateTime<Utc>) -> Entitl
 ///
 /// # Errors
 /// Rejects unsupported contracts, unauthenticated content, and invalid claims.
-pub fn verify_offline(bytes: &[u8], keys: &TrustedKeys) -> Result<LicenseClaims, LicenseError> {
+pub fn verify_offline(bytes: &[u8], keys: &TrustedKeys) -> Result<VerifiedLicense, LicenseError> {
     if keys.0.is_empty() {
         return Err(LicenseError::Unconfigured);
     }
@@ -183,7 +226,7 @@ pub fn verify_offline(bytes: &[u8], keys: &TrustedKeys) -> Result<LicenseClaims,
     let claims: LicenseClaims = serde_json::from_slice(&decode(&envelope.payload)?)
         .map_err(|_| LicenseError::InvalidClaims)?;
     validate_claims(&claims)?;
-    Ok(claims)
+    Ok(VerifiedLicense(claims))
 }
 
 /// Verify before atomically replacing a private activated license file.
@@ -195,7 +238,7 @@ pub fn activate(
     bytes: &[u8],
     keys: &TrustedKeys,
     path: &Path,
-) -> Result<LicenseClaims, LicenseError> {
+) -> Result<VerifiedLicense, LicenseError> {
     let claims = verify_offline(bytes, keys)?;
     let parent = path
         .parent()
@@ -231,7 +274,7 @@ pub fn activate(
 ///
 /// # Errors
 /// Refuses insecure files, malformed content, and licenses no longer trusted.
-pub fn load(path: &Path, keys: &TrustedKeys) -> Result<Option<LicenseClaims>, LicenseError> {
+pub fn load(path: &Path, keys: &TrustedKeys) -> Result<Option<VerifiedLicense>, LicenseError> {
     let file = match PrivateFile::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -267,10 +310,6 @@ fn validate_claims(claims: &LicenseClaims) -> Result<(), LicenseError> {
     if claims.schema_version != 1
         || claims.product != "beankeeper-desktop"
         || !valid_slug(&claims.storefront, 32)
-        || claims.purchaser_ref.is_empty()
-        || claims.purchaser_ref.len() > 256
-        || claims.purchaser_ref.chars().any(char::is_control)
-        || claims.purchaser_ref.contains('@')
         || !(1970..=9999).contains(&claims.issued_at.year())
         || !(1970..=9999).contains(&claims.updates_until.year())
     {
@@ -377,14 +416,18 @@ mod tests {
         assert!(load(&path, &keys())?.is_none());
         let claims = activate(FIXTURE.as_bytes(), &keys(), &path)?;
         assert_eq!(load(&path, &keys())?, Some(claims.clone()));
+        assert_eq!(claims.id().to_string(), "lic_01h455vb4pex5vsknk084sn02q");
+        let deadline = claims.updates_until();
+        assert!(matches!(
+            entitlement(&claims, deadline),
+            UpdateEligibility::Eligible(grant) if grant.released_at() == deadline
+        ));
         assert_eq!(
-            claims.license_id.to_string(),
-            "lic_01h455vb4pex5vsknk084sn02q"
+            entitlement(&claims, "2030-01-01T00:00:00Z".parse()?),
+            UpdateEligibility::OutsideWindow {
+                updates_until: deadline
+            }
         );
-        assert!(entitlement(&claims, claims.updates_until).update_eligible);
-        let expired = entitlement(&claims, "2030-01-01T00:00:00Z".parse()?);
-        assert!(expired.perpetual_use);
-        assert!(!expired.update_eligible);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
