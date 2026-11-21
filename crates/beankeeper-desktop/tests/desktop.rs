@@ -19,6 +19,7 @@ fn settings_displays_cached_update_outcome_and_readable_utc_attempt() -> TestRes
     let state = tempfile::tempdir()?;
     let now = beankeeper_desktop::updates::now();
     let cache = serde_json::to_vec(&json!({
+        "desktop_version": env!("CARGO_PKG_VERSION"),
         "last_attempt": now,
         "manifest": null,
         "message": "update download failed; check connectivity and retry after the daily interval"
@@ -48,6 +49,46 @@ fn settings_displays_cached_update_outcome_and_readable_utc_attempt() -> TestRes
     assert!(!html.contains("Unix seconds"));
     assert!(!html.contains(&now.to_string()));
     assert_eq!(std::fs::read(state.path().join("updates.json"))?, cache);
+    Ok(())
+}
+
+#[test]
+fn settings_ignores_other_version_and_legacy_update_results_without_rewriting_cache() -> TestResult
+{
+    let ledger = Ledger::new()?;
+    for previous in [None, Some("0.1.0-rc.1")] {
+        let state = tempfile::tempdir()?;
+        let mut cache = json!({
+            "last_attempt": beankeeper_desktop::updates::now(),
+            "manifest": null,
+            "message": "the release server could not be reached",
+        });
+        if let Some(previous) = previous {
+            cache["desktop_version"] = previous.into();
+        }
+        let bytes = serde_json::to_vec(&cache)?;
+        std::fs::write(state.path().join("updates.json"), &bytes)?;
+        // Block the startup checker at its process lock so the page can be
+        // tested offline before any fresh check finishes.
+        std::fs::write(state.path().join("updates.lock"), b"")?;
+        let mut command = ledger.command();
+        command
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .env("BEANKEEPER_NO_UPDATE_CHECK", "0")
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", state.path());
+        let mut server = Server::launch(command)?;
+        server.pair()?;
+        let response = server
+            .client
+            .get(format!("{}/settings", server.base))
+            .send()?;
+        assert_eq!(response.status(), 200);
+        let html = response.text()?;
+        assert!(html.contains("Updates have not been checked. Run `bk update-check`."));
+        assert!(!html.contains("the release server could not be reached"));
+        assert!(!html.contains("Last attempt:"));
+        assert_eq!(std::fs::read(state.path().join("updates.json"))?, bytes);
+    }
     Ok(())
 }
 

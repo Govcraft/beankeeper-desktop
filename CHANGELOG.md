@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.8] - 2026-11-21
+
+### Fixed
+
+- Refresh update results after the running Desktop version changes, including
+  caches from older releases without a recorded version. Settings ignores stale
+  results without contacting the feed. Daily retry limits still apply within
+  each version, including failed checks.
+
 ## [0.1.0-rc.7] - 2026-11-21
 
 ### Fixed

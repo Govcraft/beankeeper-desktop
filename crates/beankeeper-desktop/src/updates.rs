@@ -319,13 +319,24 @@ fn asset_url(version: &str, name: &str) -> String {
 
 #[derive(Default, Deserialize, Serialize)]
 struct Cache {
+    #[serde(default)]
+    desktop_version: String,
     last_attempt: u64,
     manifest: Option<Manifest>,
     message: String,
 }
-fn read_cache(path: &Path) -> Result<Cache, UpdateError> {
+fn read_cache(path: &Path, current: &str) -> Result<Cache, UpdateError> {
     match fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Ok(bytes) => {
+            let cache: Cache = serde_json::from_slice(&bytes)?;
+            // Legacy caches have no version. Neither they nor results from a
+            // different executable describe this version's update state.
+            Ok(if cache.desktop_version == current {
+                cache
+            } else {
+                Cache::default()
+            })
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Cache::default()),
         Err(e) => Err(e.into()),
     }
@@ -372,19 +383,23 @@ fn cached_status(cache: &Cache) -> String {
 
 /// Last checked state, read without any network request. Opt-out hides stale results.
 pub fn status(path: &Path, disabled: bool) -> Result<String, UpdateError> {
+    status_with(path, disabled, env!("CARGO_PKG_VERSION"))
+}
+fn status_with(path: &Path, disabled: bool, current: &str) -> Result<String, UpdateError> {
     if disabled {
         return Ok("Automatic update checks are disabled.".into());
     }
-    let cache = read_cache(path)?;
+    let cache = read_cache(path, current)?;
     if cache.last_attempt == 0 {
         return Ok("Updates have not been checked. Run `bk update-check`.".into());
     }
     Ok(cached_status(&cache))
 }
-/// At most one network attempt per day, including failures and process restarts.
+/// At most one network attempt per day per Desktop version, including failures
+/// and process restarts. Legacy caches are refreshed on the next check.
 /// Opt-out is evaluated before files or the network are accessed.
 pub fn check(path: &Path, disabled: bool, now: u64) -> Result<String, UpdateError> {
-    check_with(path, disabled, now, || {
+    check_with(path, disabled, now, env!("CARGO_PKG_VERSION"), || {
         fetch_manifest(env!("CARGO_PKG_VERSION"), download, &Cosign)
     })
 }
@@ -392,14 +407,15 @@ fn check_with(
     path: &Path,
     disabled: bool,
     now: u64,
+    current: &str,
     fetch: impl FnOnce() -> Result<Manifest, UpdateError>,
 ) -> Result<String, UpdateError> {
     if disabled {
-        return status(path, true);
+        return status_with(path, true, current);
     }
-    let mut cache = read_cache(path)?;
+    let mut cache = read_cache(path, current)?;
     if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-        return status(path, false);
+        return status_with(path, false, current);
     }
     let parent = path
         .parent()
@@ -428,16 +444,17 @@ fn check_with(
     }
     let result = (|| {
         // Re-read under lock to handle a concurrent completed checker.
-        cache = read_cache(path)?;
+        cache = read_cache(path, current)?;
         if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-            return status(path, false);
+            return status_with(path, false, current);
         }
+        cache.desktop_version = current.to_owned();
         cache.last_attempt = now.max(1);
         cache.message = "Update check did not complete.".into();
         write_cache(path, &cache)?;
         match fetch() {
             Ok(manifest) => {
-                cache.message = if manifest.newer_than(env!("CARGO_PKG_VERSION"))? {
+                cache.message = if manifest.newer_than(current)? {
                     format!(
                         "Desktop {} is available. Run `bk self-update`.",
                         manifest.version
@@ -453,7 +470,7 @@ fn check_with(
             }
         }
         write_cache(path, &cache)?;
-        status(path, false)
+        status_with(path, false, current)
     })();
     let _ = fs::remove_file(lock);
     result
@@ -462,9 +479,11 @@ fn check_with(
 /// Download only the matching archive and mandatory D13 checksum/bundle files.
 /// Re-verifies cached manifest bytes via their signed release asset before install.
 pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> {
-    let cached = read_cache(cache)?.manifest.ok_or(UpdateError::Invalid(
-        "run bk update-check successfully first",
-    ))?;
+    let cached = read_cache(cache, env!("CARGO_PKG_VERSION"))?
+        .manifest
+        .ok_or(UpdateError::Invalid(
+            "run bk update-check successfully first",
+        ))?;
     let bytes = download(
         &asset_url(&cached.version, "update-manifest.json"),
         MAX_METADATA,
@@ -890,18 +909,24 @@ mod tests {
                 ]
             );
             let checked_at = now();
-            let result = check_with(&path, false, checked_at, || Ok(fetched))?;
+            let result = check_with(&path, false, checked_at, env!("CARGO_PKG_VERSION"), || {
+                Ok(fetched)
+            })?;
             assert_eq!(
-                read_cache(&path)?
+                read_cache(&path, env!("CARGO_PKG_VERSION"))?
                     .manifest
                     .ok_or("missing cached manifest")?
                     .version,
                 version
             );
             assert_eq!(
-                check_with(&path, false, checked_at + 1, || panic!(
-                    "daily cache ignored"
-                ))?,
+                check_with(
+                    &path,
+                    false,
+                    checked_at + 1,
+                    env!("CARGO_PKG_VERSION"),
+                    || panic!("daily cache ignored")
+                )?,
                 result
             );
             fs::remove_file(&path)?;
@@ -939,7 +964,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn cached_status_formats_legacy_attempt_in_utc_without_changing_cache() -> TestResult {
+    fn legacy_status_is_unchecked_without_changing_cache() -> TestResult {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("updates.json");
         // Exact cache shape and failure message written by Desktop 0.1.0-rc.1.
@@ -947,9 +972,92 @@ mod tests {
         fs::write(&path, bytes)?;
         assert_eq!(
             status(&path, false)?,
-            "Could not check for updates: the release server could not be reached or returned an unsuccessful response. Checks run at most once per day.\nLast attempt: 2026-11-21 02:06:44 UTC."
+            "Updates have not been checked. Run `bk update-check`."
         );
         assert_eq!(fs::read(&path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_and_other_version_caches_refresh_once_without_waiting_a_day() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        let current = "0.1.0-rc.7";
+        let attempted_at = 1_795_226_804;
+        for previous in [None, Some("0.1.0-rc.1"), Some("0.1.0-rc.10"), Some("0.1.0")] {
+            // Exercise stale failures and successful update recommendations,
+            // including a downgrade and a switch between stable/RC channels.
+            for message in [
+                "the release server could not be reached",
+                "Desktop 0.1.0-rc.7 is available. Run `bk self-update`.",
+            ] {
+                let mut cached_manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+                cached_manifest.version = current.into();
+                let mut cache = serde_json::json!({
+                    "last_attempt": attempted_at,
+                    "manifest": message.starts_with("Desktop").then_some(&cached_manifest),
+                    "message": message,
+                });
+                if let Some(previous) = previous {
+                    cache["desktop_version"] = previous.into();
+                }
+                let bytes = serde_json::to_vec(&cache)?;
+                fs::write(&path, &bytes)?;
+                assert_eq!(
+                    status_with(&path, false, current)?,
+                    "Updates have not been checked. Run `bk update-check`."
+                );
+                assert_eq!(fs::read(&path)?, bytes);
+
+                let result = check_with(&path, false, attempted_at + 1, current, || {
+                    let pending = read_cache(&path, current)?;
+                    assert_eq!(pending.desktop_version, current);
+                    assert_eq!(pending.message, "Update check did not complete.");
+                    Ok(cached_manifest)
+                })?;
+                assert!(result.starts_with("Desktop is up to date."));
+                assert_eq!(status_with(&path, false, current)?, result);
+                let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+                assert_eq!(persisted["desktop_version"], current);
+                assert_eq!(persisted["last_attempt"], attempted_at + 1);
+                for time in [attempted_at, attempted_at + 2, attempted_at + DAY] {
+                    assert_eq!(
+                        check_with(&path, false, time, current, || panic!(
+                            "same version retried within a day"
+                        ))?,
+                        result
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn version_changes_refresh_failed_checks_but_same_version_remains_rate_limited() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        let attempted_at = 1_795_226_804;
+        for current in ["0.1.0-rc.1", "0.1.0-rc.7", "0.1.0", "0.2.0-rc.1"] {
+            let result = check_with(&path, false, attempted_at, current, || {
+                Err(UpdateError::Network)
+            })?;
+            assert!(result.starts_with("Could not check for updates:"));
+            assert_eq!(read_cache(&path, current)?.desktop_version, current);
+            assert!(read_cache(&path, current)?.manifest.is_none());
+            assert_eq!(
+                check_with(&path, false, attempted_at + 1, current, || panic!(
+                    "failed check retried within a day"
+                ))?,
+                result
+            );
+            assert!(
+                check_with(&path, false, attempted_at + DAY, current, || {
+                    Err(UpdateError::Signature)
+                })?
+                .contains("Sigstore verification failed")
+            );
+        }
         Ok(())
     }
 
@@ -974,6 +1082,7 @@ mod tests {
     #[test]
     fn incomplete_attempt_and_invalid_timestamp_do_not_claim_success() {
         let mut cache = Cache {
+            desktop_version: env!("CARGO_PKG_VERSION").into(),
             last_attempt: 1_795_226_804,
             // A previous successful manifest may remain during a new attempt.
             manifest: Some(manifest(b"fixture", "x86_64-unknown-linux-gnu")),
@@ -1029,10 +1138,13 @@ mod tests {
                     .ok_or("fixture timestamp")?
                     .format("%Y-%m-%d %H:%M:%S")
             );
-            assert_eq!(check_with(&path, false, now, || result)?, expected);
+            assert_eq!(
+                check_with(&path, false, now, env!("CARGO_PKG_VERSION"), || result)?,
+                expected
+            );
             assert_eq!(status(&path, false)?, expected);
             assert_eq!(
-                check_with(&path, false, now + 1, || panic!(
+                check_with(&path, false, now + 1, env!("CARGO_PKG_VERSION"), || panic!(
                     "cached status fetched again"
                 ))?,
                 expected
@@ -1046,30 +1158,43 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("state/updates.json");
         assert!(
-            check_with(&path, true, DAY, || panic!("opt-out contacted network"))?
-                .contains("disabled")
+            check_with(&path, true, DAY, env!("CARGO_PKG_VERSION"), || panic!(
+                "opt-out contacted network"
+            ))?
+            .contains("disabled")
         );
         assert!(!path.exists());
-        let result = check_with(&path, false, DAY, || {
+        let result = check_with(&path, false, DAY, env!("CARGO_PKG_VERSION"), || {
             Ok(manifest(b"fixture", "x86_64-unknown-linux-gnu"))
         })?;
         assert!(result.contains("9.10.0 is available"));
         for now in [DAY, DAY + 1, 1, 2 * DAY - 1] {
             assert!(
-                check_with(&path, false, now, || panic!("cache contacted network"))?
-                    .contains("9.10.0 is available")
+                check_with(&path, false, now, env!("CARGO_PKG_VERSION"), || panic!(
+                    "cache contacted network"
+                ))?
+                .contains("9.10.0 is available")
             );
         }
         assert!(
-            check_with(&path, false, 2 * DAY, || Err(UpdateError::Network))?
-                .contains("Could not check for updates: the release server could not be reached")
+            check_with(&path, false, 2 * DAY, env!("CARGO_PKG_VERSION"), || Err(
+                UpdateError::Network
+            ))?
+            .contains("Could not check for updates: the release server could not be reached")
         );
-        assert!(read_cache(&path)?.manifest.is_none());
-        check_with(&path, false, 2 * DAY + 1, || {
+        assert!(
+            read_cache(&path, env!("CARGO_PKG_VERSION"))?
+                .manifest
+                .is_none()
+        );
+        check_with(&path, false, 2 * DAY + 1, env!("CARGO_PKG_VERSION"), || {
             panic!("failed check was retried early")
         })?;
         assert!(
-            check_with(&path, true, 3 * DAY, || panic!("opt-out ignored"))?.contains("disabled")
+            check_with(&path, true, 3 * DAY, env!("CARGO_PKG_VERSION"), || panic!(
+                "opt-out ignored"
+            ))?
+            .contains("disabled")
         );
         Ok(())
     }
@@ -1079,7 +1204,7 @@ mod tests {
         let path = directory.path().join("updates.json");
         fs::write(path.with_extension("lock"), b"")?;
         assert!(
-            check_with(&path, false, DAY, || panic!(
+            check_with(&path, false, DAY, env!("CARGO_PKG_VERSION"), || panic!(
                 "concurrent check contacted network"
             ))?
             .contains("in progress")
