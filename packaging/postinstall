@@ -1,0 +1,15 @@
+#!/bin/sh
+# macOS Installer runs as root; launch the service in the console user's domain.
+set -eu
+[ "${BK_NO_SERVICE:-0}" != 1 ] || exit 0
+owner="$(stat -f '%Su' /dev/console)"
+case "$owner" in root|loginwindow|_mbsetupuser|'')
+    echo 'Beankeeper installed. After login, run: bk service install' >&2
+    exit 0 ;;
+esac
+uid="$(id -u "$owner")"
+user_home="$(dscl . -read "/Users/$owner" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
+launchctl asuser "$uid" sudo -u "$owner" env HOME="$user_home" \
+    /usr/local/bin/bk service install || {
+    echo 'Background setup needs attention. As the desktop user, run: bk service install' >&2
+}
