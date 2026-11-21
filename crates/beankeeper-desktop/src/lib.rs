@@ -17,6 +17,7 @@ pub mod product;
 pub mod reports;
 mod review;
 pub mod server;
+pub mod service;
 pub mod setup;
 mod ui;
 pub mod updates;
@@ -29,6 +30,8 @@ use std::{error::Error, fmt, io, net::SocketAddr};
 pub enum DesktopError {
     /// A requested view cannot apply these filters.
     Link(links::LinkError),
+    /// Per-user service management failed.
+    Service(Box<service::ServiceError>),
     /// License or update command failed.
     Product(product::ProductError),
     /// Onboarding could not finish safely.
@@ -55,6 +58,7 @@ impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Link(error) => write!(f, "VALIDATION: {error}"),
+            Self::Service(error) => write!(f, "{}: {error}", error.code()),
             Self::Product(error) => write!(f, "{error}"),
             Self::Pairing(error) => write!(f, "{error}"),
             Self::Setup(error) => write!(f, "{error}"),
@@ -85,6 +89,7 @@ impl Error for DesktopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Link(error) => Some(error),
+            Self::Service(error) => Some(error),
             Self::Product(error) => Some(error),
             Self::Pairing(error) => Some(error),
             Self::Setup(error) => Some(error),

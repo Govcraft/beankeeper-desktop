@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 
 use crate::private_file::PrivateFile;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PASSPHRASE_FILE_LIMIT: usize = 64 * 1024;
 
 /// Native credential service name, shared across supported operating systems.
@@ -110,7 +110,7 @@ pub enum KeychainError {
     EmptyPassphrase,
     /// A file store or its parent has unsafe access or is a symbolic link.
     InsecureFile,
-    /// Explicit file storage is supported only where Unix modes can be enforced.
+    /// Private file storage requires Unix permissions or Windows protected DACLs.
     UnsupportedFileStore,
 }
 
@@ -124,7 +124,7 @@ impl fmt::Display for KeychainError {
             Self::InvalidLedgerPath => formatter.write_str("ledger path is not valid for OS credential storage"),
             Self::EmptyPassphrase => formatter.write_str("stored passphrase cannot be empty"),
             Self::InsecureFile => formatter.write_str("credential file must be a regular, private file in a private directory (Unix modes 0600 and 0700)"),
-            Self::UnsupportedFileStore => formatter.write_str("file credential storage requires Unix permissions; use the native OS keychain on this platform"),
+            Self::UnsupportedFileStore => formatter.write_str("file credential storage requires Unix permissions or Windows protected DACLs"),
         }
     }
 }
@@ -227,10 +227,11 @@ fn decode_native_password(
     }
 }
 
-/// Explicit passphrase file for headless Unix setups and isolated CI environments.
+/// Private passphrase file for headless setups and isolated CI environments.
 ///
 /// The caller associates this file with a ledger in Desktop's setup metadata.
-/// This is opt-in; unavailable native keychains never silently fall back to files.
+/// Setup uses this only when explicitly requested. Service installation may select
+/// it for a new ledger if the native store is unavailable.
 #[derive(Debug, Clone)]
 pub struct FileSecretStore {
     path: PathBuf,
@@ -250,20 +251,23 @@ impl FileSecretStore {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn check_private_parent(path: &Path) -> Result<(), KeychainError> {
-    use std::os::unix::fs::PermissionsExt;
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.permissions().mode() & 0o077 != 0
-    {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(KeychainError::InsecureFile);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(KeychainError::InsecureFile);
+        }
     }
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn file_store_error(error: io::Error) -> KeychainError {
     if error.kind() == io::ErrorKind::PermissionDenied {
         KeychainError::InsecureFile
@@ -272,10 +276,9 @@ fn file_store_error(error: io::Error) -> KeychainError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl SecretStore for FileSecretStore {
     fn store(&self, _ledger: &Path, passphrase: &SecretString) -> Result<(), KeychainError> {
-        use std::os::unix::fs::PermissionsExt;
         validate_passphrase(passphrase)?;
         let parent = self
             .path
@@ -283,9 +286,8 @@ impl SecretStore for FileSecretStore {
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         if !parent.exists() {
-            let mut builder = fs::DirBuilder::new();
-            use std::os::unix::fs::DirBuilderExt;
-            builder.recursive(true).mode(0o700).create(parent)?;
+            fs::create_dir_all(parent)?;
+            restrict_directory(parent)?;
         }
         check_private_parent(parent)?;
         match PrivateFile::open(&self.path) {
@@ -294,9 +296,7 @@ impl SecretStore for FileSecretStore {
             Err(error) => return Err(file_store_error(error)),
         }
         let mut pending = NamedTempFile::new_in(parent)?;
-        pending
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        restrict_file(pending.path())?;
         pending.write_all(passphrase.expose_secret().as_bytes())?;
         pending.as_file().sync_all()?;
         pending
@@ -323,7 +323,7 @@ impl SecretStore for FileSecretStore {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl SecretStore for FileSecretStore {
     fn store(&self, _ledger: &Path, _passphrase: &SecretString) -> Result<(), KeychainError> {
         Err(KeychainError::UnsupportedFileStore)
