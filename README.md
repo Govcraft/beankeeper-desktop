@@ -289,8 +289,11 @@ not expire perpetual use; update eligibility uses the signed release date.
 Missing activations and verification failures show their specific reason.
 
 `bk update-check` checks the signed GitHub release manifest at most once daily,
-including failed attempts. `bk serve` checks in the background, and paired
-browsers can read the cached result at **License and updates** (`/settings`).
+including failed attempts. Stable builds check the latest stable release. RC
+builds select the highest stable or `-rc.N` version among the 100 most recent
+GitHub release records, so checks also work before the first stable release.
+Both manifest and signature are fetched from the selected tag. `bk serve`
+checks in the background, and paired browsers can read the cached result at **License and updates** (`/settings`).
 Both show a readable UTC last-attempt time and explain incomplete checks,
 including HTTP failures, separately from up-to-date or update-available results.
 Set `BEANKEEPER_NO_UPDATE_CHECK=1` to disable checks before any network access.
