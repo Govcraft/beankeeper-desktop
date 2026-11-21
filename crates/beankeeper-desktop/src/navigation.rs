@@ -37,17 +37,31 @@ use crate::{
     },
 };
 
+const TAB_PREFIX: &str = "tab";
 const TAB_LIFETIME: Duration = Duration::from_secs(3);
 const MAX_TABS: usize = 128;
 const MAX_PENDING: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
 struct TabId(#[schemars(with = "String")] MagicTypeId);
 
 impl TabId {
     fn new() -> Self {
-        Self("tab".create_type_id::<V7>())
+        Self(TAB_PREFIX.create_type_id::<V7>())
+    }
+}
+
+impl<'de> Deserialize<'de> for TabId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        let id = value
+            .parse::<MagicTypeId>()
+            .map_err(serde::de::Error::custom)?;
+        if id.prefix().as_str() != TAB_PREFIX || id != value.as_str() {
+            return Err(serde::de::Error::custom("invalid tab identifier"));
+        }
+        Ok(Self(id))
     }
 }
 
@@ -221,27 +235,12 @@ impl Navigation {
         &self,
         tool: NavigationTool,
         arguments: Value,
-        identity: VerifiedAgent,
+        identity: &VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
         if let NavigationTool::GetLink = tool {
-            return Ok(match serde_json::from_value::<ViewAddress>(arguments) {
-                Ok(address) => match address.result(self.pairing.base_url()) {
-                    Ok(payload) => reply(
-                        format!(
-                            "Optional Desktop detail: {}. No browser was opened or changed.",
-                            payload["url"].as_str().unwrap_or_default()
-                        ),
-                        payload,
-                    ),
-                    Err(error) => failure(NavigationFailure::Validation, &error.to_string()),
-                },
-                Err(_) => failure(
-                    NavigationFailure::Validation,
-                    "Invalid view or filters. Check the tool schema.",
-                ),
-            });
+            return Ok(self.link_result(arguments));
         }
-        let agent = AgentKey::from_verified_identity(&identity);
+        let agent = AgentKey::from_verified_identity(identity);
         let sessions = self
             .pairing
             .paired_sessions(&agent, Instant::now())
@@ -255,7 +254,6 @@ impl Navigation {
             .iter_mut()
             .filter(|(_, tab)| tab.connected && sessions.contains(&tab.session))
             .collect();
-        available.sort_by(|a, b| a.0.0.cmp(&b.0.0));
         let parsed = match tool {
             NavigationTool::ShowView => serde_json::from_value::<Show>(arguments).map(|input| {
                 input.url().map(|url| {
@@ -282,34 +280,7 @@ impl Navigation {
                 })
             }
             NavigationTool::Status => {
-                let input: Status = match serde_json::from_value(arguments) {
-                    Ok(input) => input,
-                    Err(_) => {
-                        return self.failure_with_link(
-                            &agent,
-                            NavigationFailure::Validation,
-                            "Invalid ui_status arguments.",
-                        );
-                    }
-                };
-                let states: Vec<_> = available.iter().filter(|(id, _)| input.tab_id.as_ref().is_none_or(|wanted| wanted == *id)).map(|(id, tab)| json!({"tab_id":id, "url":tab.url, "title":tab.title, "highlight":tab.highlight, "targets":tab.targets, "pending":tab.pending.len()})).collect();
-                let text = if states.is_empty() {
-                    "No connected matching tab. Nothing is displayed.".to_owned()
-                } else {
-                    format!(
-                        "{} connected tab(s): {}",
-                        states.len(),
-                        Value::Array(states.clone())
-                    )
-                };
-                let url = self
-                    .pairing
-                    .agent_pairing_url(agent, Instant::now())
-                    .map_err(|_| ErrorData::internal_error("Pairing link unavailable", None))?;
-                return Ok(reply(
-                    format!("{text} Pair or connect another browser: {url}"),
-                    json!({"paired":!sessions.is_empty(), "tabs":states, "pairing_url":url}),
-                ));
+                return self.status_result(arguments, agent, &sessions, available);
             }
             NavigationTool::GetLink => unreachable!("link handled before paired-tab access"),
         };
@@ -350,31 +321,95 @@ impl Navigation {
             }
             return Ok(result);
         };
-        if let UiEvent::Highlight { target } = &event
-            && !tab.targets.contains(target)
-        {
-            return Ok(reply(
-                format!(
-                    "{description} No such row or region in the current view; nothing changed."
+        Ok(enqueue_event(agent, event, id, tab, &description))
+    }
+    fn link_result(&self, arguments: Value) -> CallToolResult {
+        match serde_json::from_value::<ViewAddress>(arguments) {
+            Ok(address) => match address.result(self.pairing.base_url()) {
+                Ok(payload) => reply(
+                    format!(
+                        "Optional Desktop detail: {}. No browser was opened or changed.",
+                        payload["url"].as_str().unwrap_or_default()
+                    ),
+                    payload,
                 ),
-                json!({"queued":false,"tab_id":id}),
-            ));
-        }
-        if tab.pending.len() >= MAX_PENDING {
-            return Ok(failure(
-                NavigationFailure::TabBusy,
-                "Tab event queue is full. Wait for the browser to catch up.",
-            ));
-        }
-        tab.pending.push_back((agent, event));
-        Ok(reply(
-            format!(
-                "{description} Queued for tab {}. Call ui_status to check the browser's confirmed view.",
-                id.0
+                Err(error) => failure(NavigationFailure::Validation, &error.to_string()),
+            },
+            Err(_) => failure(
+                NavigationFailure::Validation,
+                "Invalid view or filters. Check the tool schema.",
             ),
-            json!({"queued":true,"tab_id":id}),
+        }
+    }
+
+    fn status_result(
+        &self,
+        arguments: Value,
+        agent: AgentKey,
+        sessions: &[BrowserSessionId],
+        mut available: Vec<(&TabId, &mut Tab)>,
+    ) -> Result<CallToolResult, ErrorData> {
+        available.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        let input: Status = match serde_json::from_value(arguments) {
+            Ok(input) => input,
+            Err(_) => {
+                return self.failure_with_link(
+                    &agent,
+                    NavigationFailure::Validation,
+                    "Invalid ui_status arguments.",
+                );
+            }
+        };
+        let states: Vec<_> = available.iter().filter(|(id, _)| input.tab_id.as_ref().is_none_or(|wanted| wanted == *id)).map(|(id, tab)| json!({"tab_id":id, "url":tab.url, "title":tab.title, "highlight":tab.highlight, "targets":tab.targets, "pending":tab.pending.len()})).collect();
+        let text = if states.is_empty() {
+            "No connected matching tab. Nothing is displayed.".to_owned()
+        } else {
+            format!(
+                "{} connected tab(s): {}",
+                states.len(),
+                Value::Array(states.clone())
+            )
+        };
+        let url = self
+            .pairing
+            .agent_pairing_url(agent, Instant::now())
+            .map_err(|_| ErrorData::internal_error("Pairing link unavailable", None))?;
+        Ok(reply(
+            format!("{text} Pair or connect another browser: {url}"),
+            json!({"paired":!sessions.is_empty(), "tabs":states, "pairing_url":url}),
         ))
     }
+}
+
+fn enqueue_event(
+    agent: AgentKey,
+    event: UiEvent,
+    id: &TabId,
+    tab: &mut Tab,
+    description: &str,
+) -> CallToolResult {
+    if let UiEvent::Highlight { target } = &event
+        && !tab.targets.contains(target)
+    {
+        return reply(
+            format!("{description} No such row or region in the current view; nothing changed."),
+            json!({"queued":false,"tab_id":id}),
+        );
+    }
+    if tab.pending.len() >= MAX_PENDING {
+        return failure(
+            NavigationFailure::TabBusy,
+            "Tab event queue is full. Wait for the browser to catch up.",
+        );
+    }
+    tab.pending.push_back((agent, event));
+    reply(
+        format!(
+            "{description} Queued for tab {}. Call ui_status to check the browser's confirmed view.",
+            id.0
+        ),
+        json!({"queued":true,"tab_id":id}),
+    )
 }
 
 fn reply(text: String, payload: Value) -> CallToolResult {
@@ -406,7 +441,7 @@ impl HostToolHandler for Navigation {
             Some(tool) => self.call(
                 tool,
                 Value::Object(request.arguments.unwrap_or_default()),
-                identity,
+                &identity,
             ),
             None => Err(ErrorData::invalid_params("Unknown Desktop tool", None)),
         })
@@ -568,8 +603,7 @@ async fn events(
 fn next_event(pending: &mut VecDeque<(AgentKey, UiEvent)>, agent: Option<&AgentKey>) -> UiEvent {
     std::iter::from_fn(|| pending.pop_front())
         .find(|(owner, _)| agent == Some(owner))
-        .map(|(_, event)| event)
-        .unwrap_or(UiEvent::Heartbeat)
+        .map_or(UiEvent::Heartbeat, |(_, event)| event)
 }
 
 #[cfg(test)]
@@ -610,6 +644,19 @@ mod tests {
         ));
         assert_eq!(next_event(&mut pending, None), UiEvent::Heartbeat);
         assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn tab_identifiers_round_trip_and_require_the_tab_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tab = TabId::new();
+        let encoded = serde_json::to_string(&tab)?;
+        assert_eq!(serde_json::from_str::<TabId>(&encoded)?, tab);
+
+        let browser = "browser".create_type_id::<V7>();
+        let encoded = serde_json::to_string(&browser)?;
+        assert!(serde_json::from_str::<TabId>(&encoded).is_err());
         Ok(())
     }
 

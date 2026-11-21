@@ -12,24 +12,74 @@ use beankeeper_desktop::{
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
+enum DesktopCommand {
+    Link(Box<links::LinkOptions>),
+    Agents(agents::AgentOptions),
+    Service(service::ServiceOptions),
+    License(product::LicenseOptions),
+    CheckForUpdate,
+    InstallUpdate,
+    Serve(ServeOptions),
+    Open(OpenOptions),
+    SetupStatus,
+    Setup(setup::SetupOptions),
+    Bridge(bridge::BridgeOptions),
+    Extension,
+    Ledger,
+}
+
+impl DesktopCommand {
+    fn from_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        match matches.subcommand() {
+            Some(("ui", ui)) => match ui.subcommand() {
+                Some(("link", options)) => links::LinkOptions::from_arg_matches(options)
+                    .map(Box::new)
+                    .map(Self::Link),
+                _ => Ok(Self::Ledger),
+            },
+            Some(("agents", options)) => {
+                agents::AgentOptions::from_arg_matches(options).map(Self::Agents)
+            }
+            Some(("service", options)) => {
+                service::ServiceOptions::from_arg_matches(options).map(Self::Service)
+            }
+            Some(("license", options)) => {
+                product::LicenseOptions::from_arg_matches(options).map(Self::License)
+            }
+            Some(("update-check", _)) => Ok(Self::CheckForUpdate),
+            Some(("self-update", _)) => Ok(Self::InstallUpdate),
+            Some(("serve", options)) => ServeOptions::from_arg_matches(options).map(Self::Serve),
+            Some(("open", options)) => OpenOptions::from_arg_matches(options).map(Self::Open),
+            Some(("setup", options)) if matches!(options.subcommand(), Some(("status", _))) => {
+                Ok(Self::SetupStatus)
+            }
+            Some(("setup", options)) => {
+                setup::SetupOptions::from_arg_matches(options).map(Self::Setup)
+            }
+            Some(("mcp", mcp)) => match mcp.subcommand() {
+                Some(("extension", _)) => Ok(Self::Extension),
+                Some(("bridge", options)) => {
+                    bridge::BridgeOptions::from_arg_matches(options).map(Self::Bridge)
+                }
+                _ => Ok(Self::Ledger),
+            },
+            _ => Ok(Self::Ledger),
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let matches = cli::command().get_matches();
-    let result = match matches.subcommand() {
-        Some(("ui", ui)) => {
-            let options = links::LinkOptions::from_arg_matches(
-                ui.subcommand_matches("link")
-                    .unwrap_or_else(|| unreachable!()),
-            )
-            .unwrap_or_else(|error| error.exit());
+    let command = DesktopCommand::from_matches(&matches).unwrap_or_else(|error| error.exit());
+    let result = match command {
+        DesktopCommand::Link(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
                 .unwrap_or_else(|error| error.exit());
             let json = ledger.is_json();
-            links::run(options, ledger.company, json).map_err(DesktopError::Link)
+            links::run(*options, ledger.company, json).map_err(DesktopError::Link)
         }
-        Some(("agents", options)) => {
-            let options = agents::AgentOptions::from_arg_matches(options)
-                .unwrap_or_else(|error| error.exit());
+        DesktopCommand::Agents(options) => {
             let json = matches.get_flag("json")
                 || matches!(
                     matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
@@ -37,53 +87,21 @@ fn main() -> ExitCode {
                 );
             return agents::run(options, json, matches.get_flag("quiet"));
         }
-        Some(("service", options)) => {
-            let options = service::ServiceOptions::from_arg_matches(options)
-                .unwrap_or_else(|error| error.exit());
+        DesktopCommand::Service(options) => {
             let ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             service::run(
-                options,
+                &options,
                 ledger,
                 matches.value_source("db") == Some(ValueSource::CommandLine),
             )
             .map_err(|error| DesktopError::Service(Box::new(error)))
         }
-        Some(("license", options)) => {
-            let options =
-                product::LicenseOptions::from_arg_matches(options).unwrap_or_else(|e| e.exit());
+        DesktopCommand::License(options) => {
             product::run_license(options).map_err(DesktopError::Product)
         }
-        Some(("update-check", _)) => product::state_dir()
-            .and_then(|dir| {
-                let status = updates::check(
-                    &dir.join("updates.json"),
-                    product::update_checks(),
-                    updates::now(),
-                )?;
-                println!("{status}");
-                Ok(())
-            })
-            .map_err(DesktopError::Product),
-        Some(("self-update", _)) => product::state_dir()
-            .and_then(|dir| {
-                if product::update_checks() == updates::UpdateChecks::Disabled {
-                    return Err(product::ProductError::Configuration(
-                        "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
-                    ));
-                }
-                updates::check(
-                    &dir.join("updates.json"),
-                    updates::UpdateChecks::Enabled,
-                    updates::now(),
-                )?;
-                updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
-                println!("Desktop updated. Restart bk serve to use the installed version.");
-                Ok(())
-            })
-            .map_err(DesktopError::Product),
-        Some(("serve", options)) => {
-            let options =
-                ServeOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
+        DesktopCommand::CheckForUpdate => check_updates(),
+        DesktopCommand::InstallUpdate => install_update(),
+        DesktopCommand::Serve(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             server::validate_bind(options.bind, options.allow_remote).and_then(|bind| {
                 let _guard = setup::stored_passphrase(&mut ledger)
@@ -91,35 +109,20 @@ fn main() -> ExitCode {
                 server::serve(&ledger, bind, options.read_only)
             })
         }
-        Some(("open", options)) => {
-            let options =
-                OpenOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
-            browser::open(options.bind)
-        }
-        Some(("setup", options)) if options.subcommand_name() == Some("status") => {
+        DesktopCommand::Open(options) => browser::open(options.bind),
+        DesktopCommand::SetupStatus => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
                 .unwrap_or_else(|error| error.exit());
             return onboarding::run_status(ledger);
         }
-        Some(("setup", options)) => {
-            let options =
-                setup::SetupOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
+        DesktopCommand::Setup(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             setup::run(&mut ledger, &options).map_err(|error| DesktopError::Setup(Box::new(error)))
         }
-        Some(("mcp", mcp)) if mcp.subcommand_name() == Some("extension") => {
-            bridge::run_extension().map_err(DesktopError::Bridge)
-        }
-        Some(("mcp", mcp)) if mcp.subcommand_name() == Some("bridge") => {
-            let options = bridge::BridgeOptions::from_arg_matches(
-                mcp.subcommand_matches("bridge")
-                    .unwrap_or_else(|| unreachable!()),
-            )
-            .unwrap_or_else(|error| error.exit());
-            bridge::run(&options).map_err(DesktopError::Bridge)
-        }
-        _ => return upstream(&matches),
+        DesktopCommand::Bridge(options) => bridge::run(&options).map_err(DesktopError::Bridge),
+        DesktopCommand::Extension => bridge::run_extension().map_err(DesktopError::Bridge),
+        DesktopCommand::Ledger => return upstream(&matches),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -132,6 +135,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn check_updates() -> Result<(), DesktopError> {
+    product::state_dir()
+        .and_then(|dir| {
+            let status = updates::check(
+                &dir.join("updates.json"),
+                product::update_checks(),
+                updates::now(),
+            )?;
+            println!("{status}");
+            Ok(())
+        })
+        .map_err(DesktopError::Product)
+}
+
+fn install_update() -> Result<(), DesktopError> {
+    product::state_dir()
+        .and_then(|dir| {
+            if product::update_checks() == updates::UpdateChecks::Disabled {
+                return Err(product::ProductError::Configuration(
+                    "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
+                ));
+            }
+            updates::check(
+                &dir.join("updates.json"),
+                updates::UpdateChecks::Enabled,
+                updates::now(),
+            )?;
+            updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
+            println!("Desktop updated. Restart bk serve to use the installed version.");
+            Ok(())
+        })
+        .map_err(DesktopError::Product)
 }
 
 fn upstream(matches: &clap::ArgMatches) -> ExitCode {

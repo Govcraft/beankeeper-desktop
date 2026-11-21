@@ -1,4 +1,7 @@
-use std::{fmt, io};
+use std::{
+    fmt::{self, Write},
+    io,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -10,7 +13,10 @@ impl Secret {
     pub(super) fn generate() -> io::Result<Self> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-        let value = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut value = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(value, "{byte:02x}");
+        }
         Ok(Self(value))
     }
 

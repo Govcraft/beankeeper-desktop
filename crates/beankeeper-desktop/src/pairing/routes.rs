@@ -1,4 +1,7 @@
-use std::time::Instant;
+use std::{
+    future::{Future, ready},
+    time::Instant,
+};
 
 use axum::{
     Form, Router,
@@ -33,33 +36,48 @@ impl IntoResponse for PairingError {
 impl<S: Sync> FromRequestParts<S> for HumanSession {
     type Rejection = PairingError;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .remove::<Self>()
-            .ok_or(PairingError::Unauthorized)
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            parts
+                .extensions
+                .remove::<Self>()
+                .ok_or(PairingError::Unauthorized),
+        )
     }
 }
 
 impl<S: Sync> FromRequestParts<S> for HumanWrite {
     type Rejection = PairingError;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .remove::<Self>()
-            .ok_or(PairingError::Unauthorized)
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            parts
+                .extensions
+                .remove::<Self>()
+                .ok_or(PairingError::Unauthorized),
+        )
     }
 }
 
 impl<S: Sync> FromRequestParts<S> for SameOrigin {
     type Rejection = PairingError;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .remove::<Self>()
-            .ok_or(PairingError::Unauthorized)
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            parts
+                .extensions
+                .remove::<Self>()
+                .ok_or(PairingError::Unauthorized),
+        )
     }
 }
 
@@ -130,7 +148,7 @@ async fn pair(
                 .ok_or(PairingError::InvalidLink)?;
             // Displaying a link must never consume it: browsers and link handlers
             // may issue speculative or duplicate GETs before the human sees it.
-            Ok(crate::ui::message("Pair this browser", markup!("<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>", link.secret.expose())).into_response())
+            Ok(crate::ui::message("Pair this browser", &markup!("<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>", link.secret.expose())).into_response())
         }
         (None, Some(invite)) => {
             let now = Instant::now();
@@ -149,12 +167,12 @@ async fn pair(
                     // to continue, without weakening its cookie policy.
                     return Ok((StatusCode::UNAUTHORIZED, crate::ui::message(
                         "Connect your agent",
-                        markup!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise open the terminal's one-time pairing URL first, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
+                        &markup!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise open the terminal's one-time pairing URL first, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
                     )).into_response());
                 }
                 Err(error) => return Err(error),
             };
-            Ok(crate::ui::message("Connect your agent", markup!("<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>", session.csrf_token(), link.secret.expose())).into_response())
+            Ok(crate::ui::message("Connect your agent", &markup!("<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>", session.csrf_token(), link.secret.expose())).into_response())
         }
         _ => Err(PairingError::InvalidLink),
     }
@@ -203,10 +221,12 @@ pub(crate) async fn human_guard(
     let result = async {
         let now = Instant::now();
         let session = state.session(request.headers(), now)?;
-        if !matches!(
+        if matches!(
             *request.method(),
             Method::GET | Method::HEAD | Method::OPTIONS
         ) {
+            request.extensions_mut().insert(session);
+        } else {
             let origin = request
                 .extensions()
                 .get::<SameOrigin>()
@@ -237,8 +257,6 @@ pub(crate) async fn human_guard(
             };
             let write = state.authorize_write(session, &origin, &csrf, Instant::now())?;
             request.extensions_mut().insert(write);
-        } else {
-            request.extensions_mut().insert(session);
         }
         Ok::<_, PairingError>(request)
     }
@@ -252,7 +270,7 @@ pub(crate) async fn human_guard(
             );
             let mut response = (
                 StatusCode::UNAUTHORIZED,
-                crate::ui::message("Pair this browser", content),
+                crate::ui::message("Pair this browser", &content),
             )
                 .into_response();
             if let Some(path) = destination {
@@ -300,7 +318,7 @@ async fn new_link(
     let url = state.browser_link(Instant::now())?;
     Ok(crate::ui::message(
         "Pair another browser",
-        markup!(
+        &markup!(
             "<p>This one-time link expires in five minutes. Open it in the browser you want to pair. Keep it private.</p><p><a href=\"{}\">{}</a></p><p><a href=\"/\">Return to workspace</a></p>",
             url,
             url
@@ -467,7 +485,10 @@ mod destination_tests {
             let cookie = state.remember_destination(
                 &HeaderMap::new(),
                 "/settings".into(),
-                now - std::time::Duration::from_secs((super::super::MAX_ENTRIES - index) as u64),
+                now.checked_sub(std::time::Duration::from_secs(u64::try_from(
+                    super::super::MAX_ENTRIES - index,
+                )?))
+                .ok_or("fixture timestamp")?,
             )?;
             if oldest_cookie.is_none() {
                 oldest_cookie = Some(cookie);

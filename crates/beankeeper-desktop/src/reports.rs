@@ -371,33 +371,10 @@ pub(crate) fn render(
     let mut html = Markup::default();
     let Some(kind) = kind else {
         html = form(db, &companies, company, path, None, query)?;
-        write_markup!(html, "<section><h2>Choose a report</h2><ul>");
-        for report in Kind::ALL {
-            let path = report.path();
-            let title = report.title();
-            write_markup!(
-                html,
-                "<li><a href=\"{}?company={}\">{}</a></li>",
-                path,
-                encode(company),
-                title
-            );
-        }
-        write_markup!(html, "</ul></section>");
+        report_catalog(company, &mut html);
         return Ok(page(html));
     };
-    if kind.tax() {
-        write_markup!(
-            html,
-            "<p class=\"note\">Bookkeeping summary only. Not tax advice; not a filed form.</p>"
-        );
-    }
-    if kind == Kind::Reconciliation {
-        write_markup!(
-            html,
-            "<p>Read-only clearance and settlement state. No clear, reconcile or approval actions are available here. Statement balance is in major units.</p>"
-        );
-    }
+    append_report_notices(&mut html, kind);
     let format = query.format;
     if format == Format::Html
         && ((kind == Kind::Reconciliation && query.filters.account.is_none())
@@ -412,42 +389,10 @@ pub(crate) fn render(
         );
         return Ok(page(html));
     }
-    let command = query.command()?;
-    // This context supplies JSON metadata only. execute_json uses the supplied
-    // read-only Db and never opens the CLI's default database or writes stdout.
-    let cli = Cli::try_parse_from(["bk", "--quiet", "report", "income-statement"])
-        .map_err(|_| ViewError::Invalid("The report context could not be initialized."))?;
-    let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
-    let comparison = query
-        .comparison()
-        .map(|query| {
-            let command = query.command()?;
-            let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
-            Ok::<_, ViewError>((query, data))
-        })
-        .transpose()?;
+    let ReportData { data, comparison } = read_report(db, company, query)?;
 
     if format != Format::Html {
-        if format == Format::Csv && comparison.is_some() {
-            return Err(ViewError::Invalid(
-                "CSV covers one period. Remove comparison bounds or download JSON for both periods.",
-            ));
-        }
-        let (body, content_type) = if format == Format::Csv {
-            (tax_csv(kind, &data), "text/csv; charset=utf-8")
-        } else {
-            (comparison.as_ref().map_or_else(|| data.to_string(), |(q, comparison)| serde_json::json!({"current":data, "comparison":comparison, "compare_from":q.filters.dates.from(), "compare_to":q.filters.dates.to()}).to_string()), "application/json")
-        };
-        let id = if kind == Kind::Reconciliation {
-            "reconciliation"
-        } else {
-            path.trim_start_matches("/reports/")
-        };
-        return Ok(ReportResponse::Download {
-            body,
-            content_type,
-            filename: format!("{id}.{}", format.name()),
-        });
+        return report_download(kind, path, format, &data, comparison.as_ref());
     }
     // Use upstream's resolved dates in the income form and download link rather
     // than resolving the local clock a second time or leaving defaults hidden.
@@ -487,11 +432,105 @@ pub(crate) fn render(
             query.url(path, company, Format::Csv)
         );
     }
+    render_results(kind, &data, comparison.as_ref(), currency.code(), &mut html);
+    Ok(page(html))
+}
+
+fn append_report_notices(html: &mut Markup, kind: Kind) {
+    if kind.tax() {
+        write_markup!(
+            html,
+            "<p class=\"note\">Bookkeeping summary only. Not tax advice; not a filed form.</p>"
+        );
+    }
+    if kind == Kind::Reconciliation {
+        write_markup!(
+            html,
+            "<p>Read-only clearance and settlement state. No clear, reconcile or approval actions are available here. Statement balance is in major units.</p>"
+        );
+    }
+}
+
+fn report_catalog(company: &str, html: &mut Markup) {
+    write_markup!(html, "<section><h2>Choose a report</h2><ul>");
+    for report in Kind::ALL {
+        let path = report.path();
+        let title = report.title();
+        write_markup!(
+            html,
+            "<li><a href=\"{}?company={}\">{}</a></li>",
+            path,
+            encode(company),
+            title
+        );
+    }
+    write_markup!(html, "</ul></section>");
+}
+
+struct ReportData {
+    data: Value,
+    comparison: Option<(ReportFilters, Value)>,
+}
+
+fn read_report(db: &Db, company: &str, query: &ReportFilters) -> Result<ReportData, ViewError> {
+    let command = query.command()?;
+    // This context supplies JSON metadata only. execute_json uses the supplied
+    // read-only Db and never opens the CLI's default database or writes stdout.
+    let cli = Cli::try_parse_from(["bk", "--quiet", "report", "income-statement"])
+        .map_err(|_| ViewError::Invalid("The report context could not be initialized."))?;
+    let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
+    let comparison = query
+        .comparison()
+        .map(|query| {
+            let command = query.command()?;
+            let data = execute_json(&cli, db, company, &command).map_err(report_error)?;
+            Ok::<_, ViewError>((query, data))
+        })
+        .transpose()?;
+    Ok(ReportData { data, comparison })
+}
+
+fn report_download(
+    kind: Kind,
+    path: &str,
+    format: Format,
+    data: &Value,
+    comparison: Option<&(ReportFilters, Value)>,
+) -> Result<ReportResponse, ViewError> {
+    if format == Format::Csv && comparison.is_some() {
+        return Err(ViewError::Invalid(
+            "CSV covers one period. Remove comparison bounds or download JSON for both periods.",
+        ));
+    }
+    let (body, content_type) = if format == Format::Csv {
+        (tax_csv(kind, data), "text/csv; charset=utf-8")
+    } else {
+        (comparison.map_or_else(|| data.to_string(), |(q, comparison)| serde_json::json!({"current":data, "comparison":comparison, "compare_from":q.filters.dates.from(), "compare_to":q.filters.dates.to()}).to_string()), "application/json")
+    };
+    let id = if kind == Kind::Reconciliation {
+        "reconciliation"
+    } else {
+        path.trim_start_matches("/reports/")
+    };
+    Ok(ReportResponse::Download {
+        body,
+        content_type,
+        filename: format!("{id}.{}", format.name()),
+    })
+}
+
+fn render_results(
+    kind: Kind,
+    data: &Value,
+    comparison: Option<&(ReportFilters, Value)>,
+    currency: &str,
+    html: &mut Markup,
+) {
     write_markup!(
         html,
         "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>"
     );
-    value_html(&data, Some(currency.code()), &mut html);
+    value_html(data, Some(currency), html);
     write_markup!(html, "</section>");
     if let Some((q, data)) = comparison {
         write_markup!(
@@ -522,10 +561,9 @@ pub(crate) fn render(
                 )
             }
         );
-        value_html(&data, Some(currency.code()), &mut html);
+        value_html(data, Some(currency), html);
         write_markup!(html, "</section>");
     }
-    Ok(page(html))
 }
 
 fn report_date(data: &Value, key: &str) -> Result<Date, ViewError> {
@@ -597,7 +635,7 @@ fn report_error(error: CliError) -> ViewError {
     }
 }
 
-fn select<T: ValueEnum>(html: &mut Markup, name: &str, label: &str, value: T) {
+fn select<T: ValueEnum>(html: &mut Markup, name: &str, label: &str, value: &T) {
     write_markup!(html, "<label>{}<select name=\"{}\">", label, name);
     let selected = value.to_possible_value();
     for choice in T::value_variants()
@@ -672,13 +710,13 @@ fn form(
                     &mut html,
                     "metric",
                     "Metric",
-                    q.metric.unwrap_or(TrendMetric::Spending),
+                    &q.metric.unwrap_or(TrendMetric::Spending),
                 );
                 select(
                     &mut html,
                     "period",
                     "Calendar period",
-                    q.period.unwrap_or(PeriodArg::Month),
+                    &q.period.unwrap_or(PeriodArg::Month),
                 );
             }
             Kind::Budget => {
@@ -701,51 +739,7 @@ fn form(
                 "text",
                 q.filters.cash_account.as_ref(),
             )),
-            Kind::Reconciliation => {
-                write_markup!(
-                    html,
-                    "<label>Account<select name=\"account\"><option value=\"\">Choose account</option>"
-                );
-                for account in db::list_accounts(
-                    db.conn(),
-                    &db::ListAccountParams {
-                        company_slug: company,
-                        type_filter: None,
-                        name_filter: None,
-                    },
-                )? {
-                    write_markup!(
-                        html,
-                        "<option value=\"{}\"{}>{} · {}</option>",
-                        &account.code,
-                        Attribute::Selected(
-                            q.filters.account.as_deref() == Some(account.code.as_str())
-                        ),
-                        &account.code,
-                        &account.name
-                    );
-                }
-                write_markup!(html, "</select></label>");
-                select(&mut html, "mode", "Mode", q.mode.unwrap_or_default());
-                html.append(&input(
-                    "statement",
-                    "Statement ID (required for settlement)",
-                    "text",
-                    q.statement.as_deref(),
-                ));
-                html.append(&input(
-                    "statement_balance",
-                    "Statement balance (major units)",
-                    "text",
-                    q.statement_balance.as_ref(),
-                ));
-                html.append(&input(
-                    "link_key",
-                    "Settlement link key (default applies_to)",
-                    "text",
-                    q.link_key.as_deref(),
-                ));
-            }
+            Kind::Reconciliation => reconciliation_fields(db, company, q, &mut html)?,
             _ => {}
         }
     }
@@ -757,6 +751,56 @@ fn form(
         );
     }
     Ok(html)
+}
+
+fn reconciliation_fields(
+    db: &Db,
+    company: &str,
+    q: &ReportFilters,
+    html: &mut Markup,
+) -> Result<(), ViewError> {
+    write_markup!(
+        html,
+        "<label>Account<select name=\"account\"><option value=\"\">Choose account</option>"
+    );
+    for account in db::list_accounts(
+        db.conn(),
+        &db::ListAccountParams {
+            company_slug: company,
+            type_filter: None,
+            name_filter: None,
+        },
+    )? {
+        write_markup!(
+            html,
+            "<option value=\"{}\"{}>{} · {}</option>",
+            &account.code,
+            Attribute::Selected(q.filters.account.as_deref() == Some(account.code.as_str())),
+            &account.code,
+            &account.name
+        );
+    }
+    write_markup!(html, "</select></label>");
+    select(html, "mode", "Mode", &q.mode.unwrap_or_default());
+    html.append(&input(
+        "statement",
+        "Statement ID (required for settlement)",
+        "text",
+        q.statement.as_deref(),
+    ));
+    html.append(&input(
+        "statement_balance",
+        "Statement balance (major units)",
+        "text",
+        q.statement_balance.as_ref(),
+    ));
+    html.append(&input(
+        "link_key",
+        "Settlement link key (default applies_to)",
+        "text",
+        q.link_key.as_deref(),
+    ));
+    Ok(())
 }
 
 fn text(value: &Value) -> String {
@@ -832,7 +876,7 @@ fn value_html(value: &Value, inherited: Option<&str>, html: &mut Markup) {
             write_markup!(html, "</dl>");
         }
         Value::Array(rows) if rows.is_empty() => {
-            write_markup!(html, "<p class=\"empty\">No matching rows.</p>")
+            write_markup!(html, "<p class=\"empty\">No matching rows.</p>");
         }
         Value::Array(rows) => {
             if rows.iter().all(|row| {
@@ -1058,7 +1102,7 @@ mod tests {
             "currency": "USD", "total": 999, "total_display": "55620.00",
             "payment_count": 12, "change_percent": 2.5,
             "statement_balance": null, "statement_balance_display": null,
-            "accounts": [{"amounts": [4032470, -5, 0],
+            "accounts": [{"amounts": [4_032_470, -5, 0],
                 "amounts_display": ["40324.70", "-0.05", "0.00"]}],
             "metadata": {"amount": 777}
         });

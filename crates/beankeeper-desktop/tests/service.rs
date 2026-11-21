@@ -87,69 +87,7 @@ fn local_lifecycle_mcp_lists_all_commands_and_reports_named_errors_when_stopped(
             json!({"jsonrpc":"2.0","method":"notifications/initialized"})
         )?;
         input.flush()?;
-        for (id, method, params) in [
-            (2, "tools/list", json!({})),
-            (
-                3,
-                "tools/call",
-                json!({"name":"service_status","arguments":{}}),
-            ),
-            (
-                4,
-                "tools/call",
-                json!({"name":"service_start","arguments":{}}),
-            ),
-            (
-                5,
-                "tools/call",
-                json!({"name":"service_status","arguments":{"unexpected":true}}),
-            ),
-        ] {
-            writeln!(
-                input,
-                "{}",
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-            )?;
-            input.flush()?;
-            let reply: Value =
-                serde_json::from_str(&receive.recv_timeout(Duration::from_secs(15))??)?;
-            assert_eq!(reply["id"], id);
-            match id {
-                2 => {
-                    let names: Vec<_> = reply["result"]["tools"]
-                        .as_array()
-                        .ok_or("missing tools")?
-                        .iter()
-                        .map(|t| t["name"].as_str().unwrap_or_default())
-                        .collect();
-                    for name in [
-                        "service_install",
-                        "service_uninstall",
-                        "service_start",
-                        "service_stop",
-                        "service_status",
-                    ] {
-                        assert!(names.contains(&name));
-                    }
-                }
-                3 => assert_eq!(reply["result"]["structuredContent"]["running"], false),
-                4 => {
-                    assert_eq!(reply["result"]["isError"], true);
-                    assert_eq!(
-                        reply["result"]["structuredContent"]["code"],
-                        "SERVICE_MANAGER"
-                    );
-                }
-                5 => {
-                    assert_eq!(reply["result"]["isError"], true);
-                    assert_eq!(
-                        reply["result"]["structuredContent"]["code"],
-                        "SERVICE_ARGUMENTS"
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
+        check_lifecycle_tools(&mut input, &receive)?;
         drop(input);
         Ok(())
     })();
@@ -157,6 +95,75 @@ fn local_lifecycle_mcp_lists_all_commands_and_reports_named_errors_when_stopped(
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+fn check_lifecycle_tools(
+    input: &mut impl Write,
+    receive: &mpsc::Receiver<std::io::Result<String>>,
+) -> TestResult {
+    for (id, method, params) in [
+        (2, "tools/list", json!({})),
+        (
+            3,
+            "tools/call",
+            json!({"name":"service_status","arguments":{}}),
+        ),
+        (
+            4,
+            "tools/call",
+            json!({"name":"service_start","arguments":{}}),
+        ),
+        (
+            5,
+            "tools/call",
+            json!({"name":"service_status","arguments":{"unexpected":true}}),
+        ),
+    ] {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )?;
+        input.flush()?;
+        let reply: Value = serde_json::from_str(&receive.recv_timeout(Duration::from_secs(15))??)?;
+        assert_eq!(reply["id"], id);
+        match id {
+            2 => {
+                let names: Vec<_> = reply["result"]["tools"]
+                    .as_array()
+                    .ok_or("missing tools")?
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap_or_default())
+                    .collect();
+                for name in [
+                    "service_install",
+                    "service_uninstall",
+                    "service_start",
+                    "service_stop",
+                    "service_status",
+                ] {
+                    assert!(names.contains(&name));
+                }
+            }
+            3 => assert_eq!(reply["result"]["structuredContent"]["running"], false),
+            4 => {
+                assert_eq!(reply["result"]["isError"], true);
+                assert_eq!(
+                    reply["result"]["structuredContent"]["code"],
+                    "SERVICE_MANAGER"
+                );
+            }
+            5 => {
+                assert_eq!(reply["result"]["isError"], true);
+                assert_eq!(
+                    reply["result"]["structuredContent"]["code"],
+                    "SERVICE_ARGUMENTS"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -178,7 +185,6 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     use std::{
         fs,
         net::{Ipv4Addr, TcpListener},
-        os::unix::fs::PermissionsExt,
     };
     let root = tempfile::tempdir()?;
     let data = root.path().join("data");
@@ -219,17 +225,7 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         }))?,
     )?;
     restrict_file(&state.join("service.json"))?;
-    fs::write(
-        config.join("systemd/user/beankeeper-desktop.service"),
-        "test registration",
-    )?;
-    // Only the manager liveness query is replaced. The actual encrypted server,
-    // port fallback, authenticated MCP handshake and bridge run unchanged.
-    fs::write(
-        bin.join("systemctl"),
-        "#!/bin/sh\n[ \"$*\" = '--user is-active --quiet beankeeper-desktop.service' ]\n",
-    )?;
-    fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755))?;
+    write_stub_registration(&config, &bin)?;
     let configured = || {
         let mut command = isolated(root.path());
         command.env("XDG_CONFIG_HOME", &config).env(
@@ -242,11 +238,9 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         );
         command
     };
-    let server = Server::launch({
-        let mut command = configured();
-        command.args(["service", "run"]);
-        command
-    })?;
+    let mut host = configured();
+    host.args(["service", "run"]);
+    let server = Server::launch(host)?;
     assert!(
         !server
             .base
@@ -271,6 +265,28 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
             .env("CODEX_HOME", home.join("managed-codex"));
         command
     };
+    assert_agent_reaches_service(&agent_command, &status["mcp_endpoint"])?;
+    let duplicate = configured().args(["service", "run"]).output()?;
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
+    assert_stale_runtime_fails(&configured, &agent_command, &state)?;
+    assert_managed_stdio_launchers(&configured, &state)?;
+    drop(server);
+    let output = configured()
+        .args(["service", "status", "--json"])
+        .output()?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["running"],
+        false
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_agent_reaches_service(
+    agent_command: &impl Fn() -> std::process::Command,
+    endpoint: &Value,
+) -> TestResult {
     let output = agent_command()
         .args(["agents", "connect", "codex", "--json"])
         .output()?;
@@ -290,18 +306,22 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     );
     assert_eq!(diagnostic["data"]["agents"][0]["state"], "configured");
     assert_eq!(diagnostic["data"]["service"]["state"], "ready");
-    assert_eq!(
-        diagnostic["data"]["service"]["endpoint"],
-        status["mcp_endpoint"]
-    );
-    let duplicate = configured().args(["service", "run"]).output()?;
-    assert!(!duplicate.status.success());
-    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
+    assert_eq!(&diagnostic["data"]["service"]["endpoint"], endpoint);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_stale_runtime_fails(
+    configured: &impl Fn() -> std::process::Command,
+    agent_command: &impl Fn() -> std::process::Command,
+    state: &std::path::Path,
+) -> TestResult {
+    use std::fs;
     let runtime_path = state.join("service-runtime.json");
     let runtime = fs::read(&runtime_path)?;
-    let mut stale: Value = serde_json::from_slice(&runtime)?;
-    stale["pid"] = json!(std::process::id());
-    fs::write(&runtime_path, serde_json::to_vec(&stale)?)?;
+    let mut wrong_process: Value = serde_json::from_slice(&runtime)?;
+    wrong_process["pid"] = json!(std::process::id());
+    fs::write(&runtime_path, serde_json::to_vec(&wrong_process)?)?;
     let output = configured()
         .args(["service", "status", "--json"])
         .output()?;
@@ -319,25 +339,33 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         "SERVICE_NOT_READY"
     );
     fs::write(&runtime_path, &runtime)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_managed_stdio_launchers(
+    configured: &impl Fn() -> std::process::Command,
+    state: &std::path::Path,
+) -> TestResult {
     // Both stdio launchers discover the same running service. The extension
     // leaves its installation alone and adds its MCP onboarding instructions.
     for args in [
         &["mcp", "bridge", "--service"][..],
         &["mcp", "extension"][..],
     ] {
-        let mut bridge = configured()
+        let mut transport = configured()
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut input = bridge.stdin.take().ok_or("stdin")?;
+        let mut input = transport.stdin.take().ok_or("stdin")?;
         writeln!(
             input,
             "{}",
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-test","version":"1"}}})
         )?;
         drop(input);
-        let output = bridge.wait_with_output()?;
+        let output = transport.wait_with_output()?;
         assert!(output.status.success());
         let initialized: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
@@ -351,13 +379,22 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         );
         assert!(!state.join("claude-extension").exists());
     }
-    drop(server);
-    let output = configured()
-        .args(["service", "status", "--json"])
-        .output()?;
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout)?["running"],
-        false
-    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_stub_registration(config: &std::path::Path, bin: &std::path::Path) -> TestResult {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    fs::write(
+        config.join("systemd/user/beankeeper-desktop.service"),
+        "test registration",
+    )?;
+    // Only the manager liveness query is replaced. The actual encrypted server,
+    // port fallback, authenticated MCP handshake and bridge run unchanged.
+    fs::write(
+        bin.join("systemctl"),
+        "#!/bin/sh\n[ \"$*\" = '--user is-active --quiet beankeeper-desktop.service' ]\n",
+    )?;
+    fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755))?;
     Ok(())
 }

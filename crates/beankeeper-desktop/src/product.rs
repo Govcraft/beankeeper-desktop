@@ -86,7 +86,7 @@ pub enum LicenseCommand {
     },
     /// Show the license service URL and issuer keys compiled into this binary.
     Trust {
-        /// Print a JSON object with service_url and public_keys.
+        /// Print a JSON object with `service_url` and `public_keys`.
         #[arg(long)]
         json: bool,
     },
@@ -297,6 +297,9 @@ fn write_embedded_trust(as_json: bool) -> Result<(), ProductError> {
 }
 
 /// Per-user Desktop state, independent of any ledger, with an explicit test override.
+///
+/// # Errors
+/// Returns an error when the platform state directory is unknown.
 pub fn state_dir() -> Result<PathBuf, ProductError> {
     if let Some(path) = std::env::var_os("BEANKEEPER_DESKTOP_STATE_DIR") {
         return Ok(PathBuf::from(path));
@@ -316,6 +319,9 @@ pub fn state_dir() -> Result<PathBuf, ProductError> {
         ))
 }
 /// Issuer keys come from a provisioned build trust map or an explicit local trust file.
+///
+/// # Errors
+/// Returns errors for unreadable, incomplete, or invalid trust maps.
 pub fn trusted_keys() -> Result<TrustedKeys, ProductError> {
     let bytes = if let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE") {
         bounded_file(&PathBuf::from(path), 32_768)?
@@ -340,6 +346,9 @@ fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
     Ok(bytes)
 }
 /// A missing activation is a normal status; verification still happens offline.
+///
+/// # Errors
+/// Returns storage or verification errors for existing activations.
 pub fn license_status() -> Result<String, ProductError> {
     let path = state_dir()?.join("license.json");
     if !path.try_exists()? {
@@ -440,6 +449,9 @@ fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> 
     Ok(bytes)
 }
 /// Execute the explicitly selected license command without touching a ledger.
+///
+/// # Errors
+/// Returns input, trust, redemption, or activation errors.
 pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
     match options.command {
         None => println!("{}", license_status()?),
@@ -460,6 +472,7 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
     Ok(())
 }
 /// Opt-out applies before update disk/network activity. Set to `1` or `true`.
+#[must_use]
 pub fn update_checks() -> updates::UpdateChecks {
     if std::env::var("BEANKEEPER_NO_UPDATE_CHECK")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -470,6 +483,7 @@ pub fn update_checks() -> updates::UpdateChecks {
     }
 }
 /// Safe cached status for a paired browser page, without triggering a request.
+#[must_use]
 pub fn status_text() -> String {
     let license = license_status().unwrap_or_else(|e| format!("License status: unavailable. {e}."));
     let updates = state_dir()

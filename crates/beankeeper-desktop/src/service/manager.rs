@@ -1,6 +1,7 @@
 //! Native manager adapters. Definitions are pure functions; commands never use a shell.
 
 use std::{
+    fmt::Write as _,
     path::Path,
     process::{Command, Stdio},
 };
@@ -23,10 +24,11 @@ pub(super) fn check_user() -> Result<(), ServiceError> {
 }
 
 pub(super) fn install(paths: &Paths, config: &Config) -> Result<(), ServiceError> {
-    if !paths.log().try_exists()? {
-        private_write(&paths.log(), b"")?;
+    let log = paths.log();
+    if log.try_exists()? {
+        PrivateFile::open(&log)?;
     } else {
-        PrivateFile::open(&paths.log())?;
+        private_write(&log, b"")?;
     }
     if cfg!(target_os = "linux") {
         private_write(&linux_artifact(paths), systemd(paths, config)?.as_bytes())?;
@@ -274,13 +276,14 @@ pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceE
         // Environment= does not expand dollar signs; only specifiers need escaping.
         let value = format!("{key}={}", text(path)?);
         clean(&value)?;
-        env.push_str(&format!(
-            "Environment=\"{}\"\n",
+        let _ = writeln!(
+            env,
+            "Environment=\"{}\"",
             value
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
                 .replace('%', "%%")
-        ));
+        );
     }
     let log = systemd_word(&format!("append:{}", paths.log().display()))?.replace("$$", "$");
     Ok(format!(
@@ -293,10 +296,11 @@ pub(super) fn launch_agent(paths: &Paths, config: &Config) -> Result<String, Ser
     let log = xml(text(&paths.log())?)?;
     let mut env = String::new();
     for (key, path) in environment(paths) {
-        env.push_str(&format!(
+        let _ = write!(
+            env,
             "<key>{key}</key><string>{}</string>",
             xml(text(path)?)?
-        ));
+        );
     }
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{executable}</string><string>service</string><string>run</string></array>\n<key>EnvironmentVariables</key><dict>{env}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>2</integer>\n<key>Umask</key><integer>63</integer>\n<key>StandardOutPath</key><string>{log}</string>\n<key>StandardErrorPath</key><string>{log}</string>\n</dict></plist>\n"
@@ -306,14 +310,15 @@ fn windows_runner(paths: &Paths, config: &Config) -> Result<String, ServiceError
     // Windows PowerShell 5.1 needs a BOM for non-ASCII owner paths.
     let mut script = "\u{feff}$ErrorActionPreference = 'Stop'\n".to_owned();
     for (key, path) in environment(paths) {
-        script.push_str(&format!("$env:{key} = {}\n", ps(text(path)?)?));
+        let _ = writeln!(script, "$env:{key} = {}", ps(text(path)?)?);
     }
     let executable = ps(text(&config.executable)?)?;
     let stdout = ps(text(&paths.logs.join("service-stdout.log"))?)?;
     let stderr = ps(text(&paths.log())?)?;
     let stop = ps(text(&paths.state.join(WINDOWS_STOP_SIGNAL))?)?;
-    script.push_str(&format!(
-        r#"$stop = {stop}
+    let _ = write!(
+        script,
+        r"$stop = {stop}
 # Keep the scheduled action alive while the host restarts. Task Scheduler
 # still supplies the logon trigger and retries an unexpected launcher exit.
 while (-not (Test-Path -LiteralPath $stop)) {{
@@ -333,8 +338,8 @@ while (-not (Test-Path -LiteralPath $stop)) {{
 }}
 Set-Content -LiteralPath $stop -Value 'stopped' -Encoding ascii
 exit 0
-"#
-    ));
+"
+    );
     Ok(script)
 }
 fn windows_task(paths: &Paths) -> Result<String, ServiceError> {

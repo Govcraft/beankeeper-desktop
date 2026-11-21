@@ -27,7 +27,7 @@ use secret::Secret;
 use crate::boundary::SameOrigin;
 
 const LINK_LIFETIME: Duration = Duration::from_secs(300);
-const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 3600);
+const SESSION_LIFETIME: Duration = Duration::from_hours(12);
 const MAX_ENTRIES: usize = 64;
 
 /// Pairing and human-session failures, without credentials in diagnostics.
@@ -631,7 +631,10 @@ mod tests {
         let now = Instant::now();
         let agent = AgentKey::for_test("verified-agent-one");
         let other = AgentKey::for_test("verified-agent-two");
-        assert!(state.paired_sessions(&agent, now)?.is_empty());
+        assert_eq!(
+            state.paired_sessions(&agent, now)?,
+            Vec::<BrowserSessionId>::new()
+        );
         let invite = state.agent_pairing_url(agent.clone(), now)?;
         assert_eq!(
             invite,
@@ -645,7 +648,10 @@ mod tests {
         let first = write_proof(&state, &first_headers, first_csrf, now)?;
         state.associate(&first, capability(&invite)?, now)?;
         assert_eq!(state.paired_sessions(&agent, now)?.len(), 1);
-        assert!(state.paired_sessions(&other, now)?.is_empty());
+        assert_eq!(
+            state.paired_sessions(&other, now)?,
+            Vec::<BrowserSessionId>::new()
+        );
         assert!(state.associate(&first, capability(&invite)?, now).is_err());
         let second = state.browser_link(now)?;
         let cookie2 = state.redeem(capability(&second)?, &origin, now)?;
@@ -658,10 +664,9 @@ mod tests {
         let targets = state.paired_sessions(&agent, now)?;
         assert_eq!(targets.len(), 2);
         assert_ne!(targets[0], targets[1]);
-        assert!(
-            state
-                .paired_sessions(&agent, now + SESSION_LIFETIME)?
-                .is_empty()
+        assert_eq!(
+            state.paired_sessions(&agent, now + SESSION_LIFETIME)?,
+            Vec::<BrowserSessionId>::new()
         );
         Ok(())
     }
@@ -686,9 +691,12 @@ mod tests {
         let now = Instant::now();
         let agent = AgentKey::for_test("verified-token");
         let invite = state.agent_pairing_url(agent.clone(), now)?;
+        let remaining = LINK_LIFETIME
+            .checked_sub(Duration::from_secs(1))
+            .ok_or("fixture lifetime")?;
         assert_eq!(
             invite,
-            state.agent_pairing_url(agent.clone(), now + LINK_LIFETIME - Duration::from_secs(1))?
+            state.agent_pairing_url(agent.clone(), now + remaining)?
         );
         assert_ne!(invite, state.agent_pairing_url(agent, now + LINK_LIFETIME)?);
         Ok(())
