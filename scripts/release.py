@@ -23,7 +23,7 @@ TARGETS = {
     "aarch64-apple-darwin": None,
     "x86_64-pc-windows-msvc": None,
 }
-TAG_PREFIX = "beankeeper-cli-v"
+TAG_PREFIX = "beankeeper-desktop-v"
 
 
 def version(tag=None):

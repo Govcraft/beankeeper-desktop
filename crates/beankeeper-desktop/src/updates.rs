@@ -139,8 +139,9 @@ impl BundleVerifier for Cosign {
 
 fn cosign_command(artifact: &Path, bundle: &Path, version: &str) -> Result<Command, UpdateError> {
     release_version(version)?;
-    let identity =
-        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-cli-v{version}");
+    let identity = format!(
+        "{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v{version}"
+    );
     let mut command = Command::new("cosign");
     command
         .args([
@@ -223,7 +224,7 @@ fn download(url: &str, limit: u64) -> Result<Vec<u8>, UpdateError> {
     Ok(bytes)
 }
 fn asset_url(version: &str, name: &str) -> String {
-    format!("{REPOSITORY}/releases/download/beankeeper-cli-v{version}/{name}")
+    format!("{REPOSITORY}/releases/download/beankeeper-desktop-v{version}/{name}")
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -641,7 +642,7 @@ mod tests {
                 "--timeout",
                 "30s",
                 "--certificate-identity",
-                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-cli-v9.10.0",
+                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v9.10.0",
                 "--certificate-oidc-issuer",
                 "https://token.actions.githubusercontent.com",
                 "--bundle",

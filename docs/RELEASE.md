@@ -10,7 +10,7 @@ required to build or merge this work.
 ## Artifacts and versions
 
 Desktop uses its own workspace version, currently `0.1.0`, rather than upstream's
-CLI version. Keep the upstream tag convention `beankeeper-cli-vVERSION` and
+CLI version. Keep the upstream tag convention `beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
 A tag must exactly match `[workspace.package].version` in `Cargo.toml`.
@@ -87,7 +87,7 @@ incompatible Perl when compiling vendored OpenSSL. See
 No Node toolchain is used.
 
 Actual release publication is reserved for an authorized push of a matching
-`beankeeper-cli-vVERSION` tag. This implementation PR does not create such a tag.
+`beankeeper-desktop-vVERSION` tag. This implementation PR does not create such a tag.
 The tag job uses GitHub OIDC for Sigstore and provenance, without stored signing
 keys. Invalid tags fail preflight before any package builds or publication.
 
@@ -173,7 +173,7 @@ If `cosign` is on PATH, they also verify the archive and manifest bundles with
 this exact certificate identity:
 
 ```text
-https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-cli-vVERSION
+https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION
 ```
 
 The OIDC issuer must be `https://token.actions.githubusercontent.com`. A bundle
@@ -213,7 +213,7 @@ this feature adds only an Unreleased changelog entry.
 The client parses bounded metadata only to select the expected tag identity,
 then runs `cosign verify-blob --bundle ... --certificate-identity ...
 --certificate-oidc-issuer https://token.actions.githubusercontent.com`. The exact
-identity is this repository's `release.yml@refs/tags/beankeeper-cli-vVERSION`,
+identity is this repository's `release.yml@refs/tags/beankeeper-desktop-vVERSION`,
 as shown above. It uses the [official cosign verification contract](https://docs.sigstore.dev/cosign/verifying/verify/).
 
 `bk self-update` verifies the signed JSON, the archive bundle, the checksum-list

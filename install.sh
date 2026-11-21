@@ -57,13 +57,13 @@ resolve_version() {
         fatal "could not determine latest release"
     fi
 
-    VERSION="${TAG#beankeeper-cli-v}"
+    VERSION="${TAG#beankeeper-desktop-v}"
 }
 
 download_and_install() {
     ARCHIVE="bk-${VERSION}-${TARGET}.tar.gz"
-    URL="https://github.com/${REPO}/releases/download/beankeeper-cli-v${VERSION}/${ARCHIVE}"
-    CHECKSUM_URL="https://github.com/${REPO}/releases/download/beankeeper-cli-v${VERSION}/checksums-sha256.txt"
+    URL="https://github.com/${REPO}/releases/download/beankeeper-desktop-v${VERSION}/${ARCHIVE}"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/download/beankeeper-desktop-v${VERSION}/checksums-sha256.txt"
 
     BK_TEMP_DIR="$(mktemp -d)"
     trap 'rm -rf "$BK_TEMP_DIR"' EXIT
@@ -102,7 +102,7 @@ verify_signatures() {
         return
     fi
 
-    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/beankeeper-cli-v${VERSION}"
+    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v${VERSION}"
     for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
         info "verifying Sigstore bundle for ${ARTIFACT}..."
         if BUNDLE_STATUS="$(curl -fsSL "${URL%/*}/${ARTIFACT}.sigstore" \

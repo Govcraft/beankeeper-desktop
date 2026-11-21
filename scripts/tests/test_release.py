@@ -29,7 +29,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_tag_must_match_desktop_version(self):
         value = release.version()
-        self.assertEqual(release.version(f"beankeeper-cli-v{value}"), value)
+        self.assertEqual(release.version(f"beankeeper-desktop-v{value}"), value)
         for tag in ("v0.1.0", "beankeeper-cli-v99.0.0", "main"):
             with self.assertRaises(ValueError):
                 release.version(tag)

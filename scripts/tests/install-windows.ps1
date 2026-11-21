@@ -18,7 +18,7 @@ $script:signatureFails = $false
 $script:verified = @()
 
 function Get-ReleaseFile([string]$Url, [string]$Destination) {
-    if ($Url -notlike "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-cli-v$releaseVersion/*") {
+    if ($Url -notlike "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$releaseVersion/*") {
         throw "Unexpected URL $Url"
     }
     if ($Url.EndsWith('.sigstore')) {
@@ -34,7 +34,7 @@ function Get-ReleaseFile([string]$Url, [string]$Destination) {
     }
 }
 function cosign {
-    if ($args -notcontains "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-cli-v$releaseVersion") {
+    if ($args -notcontains "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$releaseVersion") {
         throw 'Wrong certificate identity'
     }
     if ($args -notcontains 'https://token.actions.githubusercontent.com') { throw 'Wrong OIDC issuer' }

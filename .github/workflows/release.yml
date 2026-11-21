@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["beankeeper-cli-v*"]
+    tags: ["beankeeper-desktop-v*"]
   workflow_dispatch:
   pull_request:
     paths:

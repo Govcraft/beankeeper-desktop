@@ -28,7 +28,7 @@ function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Dir
         }
         throw
     }
-    $identity = "https://github.com/$Repository/.github/workflows/release.yml@refs/tags/beankeeper-cli-v$ReleaseVersion"
+    $identity = "https://github.com/$Repository/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$ReleaseVersion"
     & cosign verify-blob --bundle $bundle --certificate-identity $identity `
         --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' (Join-Path $Directory $Artifact)
     if ($LASTEXITCODE -ne 0) { throw "Sigstore verification failed for $Artifact" }
@@ -43,12 +43,12 @@ function Install-Beankeeper {
     $releaseVersion = $Version
     if (-not $releaseVersion) {
         $release = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest"
-        $releaseVersion = $release.tag_name -replace '^beankeeper-cli-v', ''
+        $releaseVersion = $release.tag_name -replace '^beankeeper-desktop-v', ''
     }
     if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $releaseVersion" }
     $stem = "bk-$releaseVersion-x86_64-pc-windows-msvc"
     $artifact = "$stem.zip"
-    $url = "https://github.com/$Repository/releases/download/beankeeper-cli-v$releaseVersion"
+    $url = "https://github.com/$Repository/releases/download/beankeeper-desktop-v$releaseVersion"
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $temporary | Out-Null
     try {

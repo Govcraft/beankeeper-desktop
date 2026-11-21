@@ -21,6 +21,38 @@ PowerShell installers verify checksums and use Sigstore when cosign is available
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
+
+## Unsigned builds
+
+There is no paid Apple or Windows signing until revenue is proven. Release
+binaries are still checksummed, signed with Sigstore (keyless cosign), and
+attested with GitHub build provenance. Browser-downloaded installers will show
+OS warnings.
+
+**macOS:** a browser-downloaded `.pkg` is blocked as an unidentified developer.
+On macOS 15 or later, open **System Settings → Privacy & Security** and choose
+**Open Anyway**. The older right-click → Open bypass no longer works. A
+`curl | sh` tarball install is not quarantined and does not show that prompt.
+
+**Windows:** the setup `.exe` shows SmartScreen **Windows protected your PC**.
+Choose **More info → Run anyway**. A ZIP extracted in Explorer may also warn
+because of the Mark of the Web.
+
+Verify a downloaded asset before installing (replace `VERSION` and the
+filename):
+
+```sh
+cosign verify-blob --bundle bk-desktop-VERSION-ASSET.sigstore \
+  --certificate-identity https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  bk-desktop-VERSION-ASSET
+gh attestation verify bk-desktop-VERSION-ASSET -R Govcraft/beankeeper-desktop
+```
+
+Exact archive names are in [docs/RELEASE.md](docs/RELEASE.md). `install.sh` and
+`install.ps1` already verify checksums and, when `cosign` is on `PATH`, the
+Sigstore bundles.
+
 ## Build and run
 
 Requires Rust 1.91 or newer and the C build tools needed by upstream's bundled
@@ -238,9 +270,9 @@ cargo +1.91.0 check --workspace --all-targets --locked
 ```
 
 CI runs fmt, clippy with warnings denied, tests (including the embedded UI build)
-on stable, and a separate Rust 1.91 check. `Cargo.lock` pins the development git
-dependency on `Govcraft/beankeeper`'s `main` branch. Update it deliberately with
-`cargo update -p beankeeper-cli` when adopting upstream changes.
+on stable, and a separate Rust 1.91 check. `Cargo.lock` pins `beankeeper-cli` to
+the `beankeeper-cli-v0.27.0` git tag. Update it deliberately with
+`cargo update -p beankeeper-cli` when adopting a newer CLI tag.
 
 ## License and updates
 
@@ -258,6 +290,26 @@ Requests contain only the Desktop version and OS, with no ledger information.
 `bk self-update` installs an eligible release only after mandatory checksum and
 Sigstore verification; it requires `cosign` on PATH. It never falls back to an
 unsigned installation. Restart the server after installing.
+
+
+To activate a locally issued license (no storefront), build with the issuer
+public key and then activate the license file. Runtime
+`BEANKEEPER_LICENSE_KEYS_FILE` and `BEANKEEPER_LICENSE_SERVICE_URL` override the
+built-in values. HTTP is allowed only for a loopback license service.
+
+```sh
+# KEY_ID and PUBLIC_KEY come from beankeeper-license keygen / public-key
+export BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON="{\"$KEY_ID\":\"$PUBLIC_KEY\"}"
+# optional, if you will redeem a claim code against a local server:
+# export BEANKEEPER_LICENSE_SERVICE_URL="http://127.0.0.1:8080"
+cargo build -p beankeeper-desktop
+./target/debug/bk license activate "$HOME/beankeeper-desktop-license.json"
+./target/debug/bk license
+```
+
+The license service issues that file with `beankeeper-license issue --email --plan --expires`
+or `POST /api/v1/admin/licenses`. See the license service README for the full
+local test flow.
 
 See the [license/update command reference](docs/license-updates.md),
 [offline license contract](docs/license-format.md), and

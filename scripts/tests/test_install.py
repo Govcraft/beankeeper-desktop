@@ -36,7 +36,7 @@ import shutil
 from urllib.parse import urlparse
 args = sys.argv[1:]
 url = next(arg for arg in args if arg.startswith("https://"))
-assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-cli-v0.1.0/"), url
+assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v0.1.0/"), url
 path = Path(os.environ["FIXTURES"]) / Path(urlparse(url).path).name
 if not path.exists():
     if "-w" in args: print(os.environ.get("BUNDLE_STATUS", "404"), end="")
@@ -61,7 +61,7 @@ if "-w" in args: print("200", end="")
         self.script("cosign", f'''
 args = sys.argv[1:]
 assert args[0] == "verify-blob"
-assert args[args.index("--certificate-identity") + 1] == "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-cli-v0.1.0"
+assert args[args.index("--certificate-identity") + 1] == "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0"
 assert args[args.index("--certificate-oidc-issuer") + 1] == "https://token.actions.githubusercontent.com"
 with open(os.environ["FIXTURES"] + "/verified", "a") as log: log.write(Path(args[-1]).name + "\\n")
 sys.exit({1 if fail else 0})
