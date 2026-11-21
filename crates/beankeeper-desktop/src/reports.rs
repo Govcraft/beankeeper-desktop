@@ -66,7 +66,6 @@ pub(crate) struct ReportQuery {
     statement: Option<String>,
     statement_balance: Option<String>,
     link_key: Option<String>,
-    cash_account: Option<String>,
     format: Option<String>,
 }
 
@@ -113,7 +112,6 @@ pub(crate) struct ReportFilters {
     statement: Option<String>,
     statement_balance: Option<DecimalAmount>,
     link_key: Option<String>,
-    cash_account: Option<String>,
     format: Format,
 }
 
@@ -204,7 +202,6 @@ impl ReportQuery {
             statement: nonempty(self.statement),
             statement_balance: parse_optional(self.statement_balance)?,
             link_key: nonempty(self.link_key),
-            cash_account: nonempty(self.cash_account),
             format,
         })
     }
@@ -249,10 +246,10 @@ impl ReportFilters {
                 to,
                 currency,
                 cash_account: self
+                    .filters
                     .cash_account
-                    .clone()
-                    .map(|account| vec![account])
-                    .unwrap_or_default(),
+                    .as_ref()
+                    .map_or_else(Vec::new, crate::links::values::AccountSelection::codes),
             }),
             Kind::Trend => ReportCommand::Trend(TrendArgs {
                 from,
@@ -331,7 +328,7 @@ impl ReportFilters {
             self.statement_balance.as_ref(),
         );
         append_url_param(&mut url, "link_key", self.link_key.as_deref());
-        append_url_param(&mut url, "cash_account", self.cash_account.as_deref());
+        append_url_param(&mut url, "cash_account", self.filters.cash_account.as_ref());
         append_url_param(&mut url, "format", Some(format.name()));
         url
     }
@@ -700,9 +697,9 @@ fn form(
             )),
             Kind::Cash => html.append(&input(
                 "cash_account",
-                "Cash account (optional; inferred by name)",
+                "Cash accounts (optional comma-separated codes; inferred by name)",
                 "text",
-                q.cash_account.as_deref(),
+                q.filters.cash_account.as_ref(),
             )),
             Kind::Reconciliation => {
                 write_markup!(

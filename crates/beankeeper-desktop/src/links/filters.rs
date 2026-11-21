@@ -44,6 +44,17 @@ filter_set!(Dashboard {
     company: String,
     currency: Currency
 });
+filter_set!(Summary {
+    company: String,
+    currency: Currency,
+    from: Date,
+    to: Date,
+    compare_from: Date,
+    compare_to: Date,
+    cash_account: AccountSelection,
+    receivable_account: AccountSelection,
+    payable_account: AccountSelection,
+});
 filter_set!(Transactions {
     company: String,
     account: AccountCode,
@@ -85,7 +96,7 @@ filter_set!(Cash {
     to: Date,
     compare_from: Date,
     compare_to: Date,
-    cash_account: AccountCode,
+    cash_account: AccountSelection,
 });
 filter_set!(Trend {
     company: String,
@@ -207,7 +218,7 @@ macro_rules! period_relations {
         }
     } )* };
 }
-period_relations!(Period, Cash, Trend);
+period_relations!(Period, Cash, Trend, Summary);
 impl Validate for Transactions {
     fn validate(&self) -> Result<(), LinkError> {
         chronological(&self.from, &self.to)?;
