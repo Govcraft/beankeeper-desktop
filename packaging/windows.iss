@@ -23,9 +23,7 @@ Source: "{#SourceDir}\LICENSE.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Tasks]
 Name: "background"; Description: "Run Beankeeper quietly at login"; Flags: checkedonce
-
-[Run]
-Filename: "{app}\bk.exe"; Parameters: "service install"; Tasks: background; Check: InstallService; Flags: runhidden waituntilterminated
+Name: "background\agents"; Description: "Connect installed agent applications"; Flags: checkedonce
 
 [UninstallRun]
 Filename: "{app}\bk.exe"; Parameters: "service uninstall"; Flags: runhidden waituntilterminated skipifdoesntexist
@@ -35,6 +33,29 @@ function InstallService: Boolean;
 begin
   Result := (ExpandConstant('{param:NOSERVICE|0}') <> '1') and
     (GetEnv('BK_NO_SERVICE') <> '1');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Code: Integer;
+  Binary: String;
+begin
+  if (CurStep <> ssPostInstall) or not WizardIsTaskSelected('background') or not InstallService then
+    Exit;
+  Binary := ExpandConstant('{app}\bk.exe');
+  if not Exec(Binary, 'service install --no-agents', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+  begin
+    Log('Background setup failed. Run bk service install --no-agents in your desktop session.');
+    SuppressibleMsgBox('Background setup needs attention. Run bk service install --no-agents in your desktop session.', mbError, MB_OK, IDOK);
+    Exit;
+  end;
+  if WizardIsTaskSelected('background\agents') and
+    (ExpandConstant('{param:NOAGENTS|0}') <> '1') and (GetEnv('BK_NO_AGENTS') <> '1') then
+    if not Exec(Binary, 'agents connect --all', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+    begin
+      Log('Agent registration needs attention. Run bk agents doctor and retry bk agents connect --all.');
+      SuppressibleMsgBox('Agent registration needs attention. Run bk agents doctor and retry bk agents connect --all.', mbError, MB_OK, IDOK);
+    end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

@@ -43,6 +43,9 @@ pub fn command() -> Command {
     Cli::command()
         .version(env!("CARGO_PKG_VERSION"))
         .about("Beankeeper Desktop: local UI and agent-driven accounting")
+        .subcommand(crate::agents::AgentOptions::augment_args(
+            Command::new("agents").about("Connect local agents to Beankeeper"),
+        ))
         .subcommand(crate::service::ServiceOptions::augment_args(
             Command::new("service")
                 .about("Manage per-user background hosting and lifecycle MCP tools"),

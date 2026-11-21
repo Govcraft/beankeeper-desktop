@@ -1,0 +1,492 @@
+//! User-level registration for supported agents and managed-service diagnostics.
+
+mod adapters;
+mod config;
+
+use std::{
+    env,
+    error::Error,
+    fmt, fs,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
+
+use beankeeper_cli::output::json::{Meta, meta};
+use clap::{Args, Subcommand};
+use serde::Serialize;
+
+use crate::{
+    bridge::{self, BridgeError},
+    service,
+};
+use adapters::{Agent, Locations};
+use config::{Change, Registration};
+
+/// Detect, register or verify a user's local agent connections.
+#[derive(Args, Debug)]
+pub struct AgentOptions {
+    #[command(subcommand)]
+    command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentCommand {
+    /// List all supported clients and their local configuration state.
+    Detect,
+    /// Add Beankeeper to installed agents and install the skill where supported.
+    Connect(Selection),
+    /// Remove Beankeeper's managed entries and skill, retaining other settings.
+    Disconnect(Selection),
+    /// Verify client configuration and make an authenticated read-only MCP call.
+    Doctor(Selection),
+}
+
+#[derive(Args, Debug)]
+struct Selection {
+    /// Apply to all detected clients, instead of selecting a single client.
+    #[arg(long, conflicts_with = "agent")]
+    all: bool,
+    /// Select one client. Without a selection, checks all detected clients.
+    #[arg(value_enum)]
+    agent: Option<Agent>,
+}
+
+#[derive(Clone, Copy)]
+enum Operation {
+    Detect,
+    Connect,
+    Disconnect,
+    Doctor,
+}
+
+impl Operation {
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Detect => "agents.detect",
+            Self::Connect => "agents.connect",
+            Self::Disconnect => "agents.disconnect",
+            Self::Doctor => "agents.doctor",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AgentError {
+    Home,
+    Binary(io::Error),
+    InvalidBinary(PathBuf),
+    Invalid(PathBuf),
+    Conflict(PathBuf),
+    Io(PathBuf, io::Error),
+}
+
+impl AgentError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Home => "AGENT_HOME_UNAVAILABLE",
+            Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
+            Self::Invalid(_) => "AGENT_INVALID_CONFIG",
+            Self::Conflict(_) => "AGENT_CONFIG_CONFLICT",
+            Self::Io(..) => "AGENT_CONFIG_IO",
+        }
+    }
+}
+
+impl fmt::Display for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Home => {
+                f.write_str("Beankeeper needs the desktop user's absolute home directory.")
+            }
+            Self::Binary(error) => write!(f, "cannot locate the installed bk executable: {error}"),
+            Self::InvalidBinary(path) => write!(
+                f,
+                "MCP clients need an absolute Unicode executable path: {}",
+                path.display()
+            ),
+            Self::Invalid(path) => write!(
+                f,
+                "invalid or unsupported agent config file {}; repair it before retrying",
+                path.display()
+            ),
+            Self::Conflict(path) => write!(
+                f,
+                "a different Beankeeper entry or skill already exists in {}; inspect it before retrying",
+                path.display()
+            ),
+            Self::Io(path, error) => write!(f, "cannot update or read {}: {error}", path.display()),
+        }
+    }
+}
+
+impl Error for AgentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Binary(error) | Self::Io(_, error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Failure {
+    code: &'static str,
+    message: String,
+}
+
+impl Failure {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<AgentError> for Failure {
+    fn from(error: AgentError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum State {
+    Unsupported,
+    NotInstalled,
+    Available,
+    PartiallyConfigured,
+    Configured,
+    Disconnected,
+    ExtensionManaged,
+    Error,
+}
+
+#[derive(Serialize)]
+struct ClientStatus {
+    agent: Agent,
+    name: &'static str,
+    state: State,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_installed: Option<bool>,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<Failure>,
+}
+
+impl ClientStatus {
+    fn new(agent: Agent, state: State, message: impl Into<String>) -> Self {
+        Self {
+            agent,
+            name: agent.label(),
+            state,
+            config: None,
+            skill_installed: None,
+            message: message.into(),
+            error: None,
+        }
+    }
+
+    fn failure(mut self, error: Failure) -> Self {
+        self.message.clone_from(&error.message);
+        self.error = Some(error);
+        self
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ServiceCheck {
+    Ready { endpoint: String },
+    Unavailable { error: Failure },
+}
+
+impl ServiceCheck {
+    fn unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Unavailable {
+            error: Failure::new(code, message),
+        }
+    }
+
+    fn probe() -> Self {
+        let status = match service::status() {
+            Ok(status) => status,
+            Err(error) => return Self::unavailable(error.code(), error.to_string()),
+        };
+        if !status.installed {
+            return Self::unavailable("SERVICE_NOT_INSTALLED", status.message);
+        }
+        let Some(endpoint) = status.mcp_endpoint else {
+            return Self::unavailable("SERVICE_NOT_READY", status.message);
+        };
+        let token_file = status.books.with_extension("agent-token");
+        if let Err(error) = bridge::probe_service_tool(&endpoint, &token_file) {
+            let code = match error {
+                BridgeError::InvalidToken => "AGENT_CREDENTIAL_INVALID",
+                BridgeError::Rejected(_) => "AGENT_MCP_REJECTED",
+                BridgeError::ToolFailed => "AGENT_TOOL_FAILED",
+                BridgeError::Http(_) => "AGENT_MCP_UNREACHABLE",
+                _ => "AGENT_MCP_PROTOCOL",
+            };
+            return Self::unavailable(code, error.to_string());
+        }
+        Self::Ready { endpoint }
+    }
+}
+
+#[derive(Serialize)]
+struct Report {
+    agents: Vec<ClientStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<ServiceCheck>,
+}
+
+#[derive(Serialize)]
+struct Output {
+    ok: bool,
+    meta: Meta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Report>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<Failure>,
+}
+
+/// Run the requested local agent operation and print its result.
+pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
+    let (operation, selected) = match options.command {
+        AgentCommand::Detect => (Operation::Detect, None),
+        AgentCommand::Connect(selection) => (Operation::Connect, selected_agent(&selection)),
+        AgentCommand::Disconnect(selection) => (Operation::Disconnect, selected_agent(&selection)),
+        AgentCommand::Doctor(selection) => (Operation::Doctor, selected_agent(&selection)),
+    };
+    let output_meta = meta(operation.command(), None);
+    let output = match perform(operation, selected) {
+        Ok(data) => {
+            let ok = data.agents.iter().all(|item| item.error.is_none())
+                && !matches!(data.service, Some(ServiceCheck::Unavailable { .. }));
+            let error = (!ok).then(|| Failure::new(
+                "AGENT_CHECKS_FAILED",
+                "One or more agent operations need attention. See the per-client or service result.",
+            ));
+            Output {
+                ok,
+                meta: output_meta,
+                data: Some(data),
+                error,
+            }
+        }
+        Err(error) => Output {
+            ok: false,
+            meta: output_meta,
+            data: None,
+            error: Some(error.into()),
+        },
+    };
+    let result = if json {
+        write_json(&output, &mut io::stdout().lock())
+    } else if !quiet || !output.ok {
+        write_text(&output, &mut io::stdout().lock(), &mut io::stderr().lock())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
+        eprintln!("AGENT_OUTPUT: {error}");
+        return ExitCode::FAILURE;
+    }
+    if output.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn selected_agent(selection: &Selection) -> Option<Agent> {
+    if selection.all { None } else { selection.agent }
+}
+
+fn write_json(output: &Output, writer: &mut impl Write) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, output).map_err(io::Error::other)?;
+    writeln!(writer)
+}
+
+fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write) -> io::Result<()> {
+    if let Some(data) = &output.data {
+        for item in &data.agents {
+            if let Some(error) = &item.error {
+                writeln!(errors, "{}: {}: {}", item.name, error.code, error.message)?;
+            } else {
+                writeln!(writer, "{}: {}", item.name, item.message)?;
+            }
+        }
+        match &data.service {
+            Some(ServiceCheck::Ready { endpoint }) => writeln!(
+                writer,
+                "Beankeeper: read-only MCP call succeeded at {endpoint}."
+            )?,
+            Some(ServiceCheck::Unavailable { error }) => {
+                writeln!(errors, "Beankeeper: {}: {}", error.code, error.message)?;
+            }
+            None => {}
+        }
+    } else if let Some(error) = &output.error {
+        writeln!(errors, "{}: {}", error.code, error.message)?;
+    }
+    Ok(())
+}
+
+fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, AgentError> {
+    let locations = Locations::discover()
+        .filter(|locations| locations.home.is_absolute())
+        .ok_or(AgentError::Home)?;
+    let binary = env::current_exe().map_err(AgentError::Binary)?;
+    let binary = binary
+        .to_str()
+        .filter(|_| binary.is_absolute())
+        .ok_or_else(|| AgentError::InvalidBinary(binary.clone()))?;
+    let _lock = matches!(operation, Operation::Connect | Operation::Disconnect)
+        .then(mutation_lock)
+        .transpose()?;
+    let agents = Agent::ALL
+        .into_iter()
+        .filter(|agent| selected.is_none_or(|selected| selected == *agent))
+        .map(|agent| check_agent(agent, &locations, binary, operation, selected.is_some()))
+        .collect();
+    let service = matches!(operation, Operation::Doctor).then(ServiceCheck::probe);
+    Ok(Report { agents, service })
+}
+
+fn mutation_lock() -> Result<fs::File, AgentError> {
+    let state = crate::product::state_dir().map_err(|_| AgentError::Home)?;
+    let path = state.join("agent-registration.lock");
+    let error_at = |error| AgentError::Io(path.clone(), error);
+    fs::create_dir_all(&state).map_err(error_at)?;
+    crate::setup::keychain::restrict_directory(&state).map_err(error_at)?;
+    if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
+        return Err(AgentError::Invalid(path));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(error_at)?;
+    crate::setup::keychain::restrict_file(&path).map_err(error_at)?;
+    file.lock().map_err(error_at)?;
+    Ok(file)
+}
+
+fn check_agent(
+    agent: Agent,
+    locations: &Locations,
+    binary: &str,
+    operation: Operation,
+    explicit: bool,
+) -> ClientStatus {
+    let Some(adapter) = agent.adapter(locations) else {
+        let message = "No supported local MCP configuration is available. Use an agent that can connect to the local Beankeeper service.";
+        let status = ClientStatus::new(agent, State::Unsupported, message);
+        return if explicit {
+            status.failure(Failure::new("AGENT_UNSUPPORTED", message))
+        } else {
+            status
+        };
+    };
+    if !(adapter.installed() || explicit && matches!(operation, Operation::Connect)) {
+        let message = "No local installation or configuration was found.";
+        let status = ClientStatus::new(agent, State::NotInstalled, message);
+        return if explicit {
+            status.failure(Failure::new("AGENT_NOT_INSTALLED", message))
+        } else {
+            status
+        };
+    }
+    let extension_managed = match adapter.extension_installed() {
+        Ok(installed) => installed,
+        Err(error) => return ClientStatus::new(agent, State::Error, "").failure(error.into()),
+    };
+    if extension_managed {
+        let mut status = ClientStatus::new(
+            agent,
+            State::ExtensionManaged,
+            "The Beankeeper extension manages this connection.",
+        );
+        if matches!(operation, Operation::Disconnect) {
+            status = status.failure(Failure::new(
+                "AGENT_EXTENSION_MANAGED",
+                "Remove the Beankeeper extension in Claude Desktop Settings to disconnect it.",
+            ));
+        }
+        return status;
+    }
+    let outcome = match operation {
+        Operation::Connect => adapter.change(binary, Change::Connect).map(|()| {
+            ClientStatus::new(
+                agent,
+                State::Configured,
+                "Beankeeper is registered. Restart the agent client to load it.",
+            )
+        }),
+        Operation::Disconnect => adapter.change(binary, Change::Disconnect).map(|()| {
+            ClientStatus::new(
+                agent,
+                State::Disconnected,
+                "Managed Beankeeper entries were removed or already absent.",
+            )
+        }),
+        Operation::Detect | Operation::Doctor => adapter.registration(binary).and_then(|state| {
+            registration_status(
+                agent,
+                operation,
+                state,
+                adapter.skill_available()?,
+                &adapter,
+            )
+        }),
+    };
+    let mut status = match outcome {
+        Ok(status) => status,
+        Err(error) => ClientStatus::new(agent, State::Error, "").failure(error.into()),
+    };
+    status.config = Some(adapter.config);
+    status
+}
+
+fn registration_status(
+    agent: Agent,
+    operation: Operation,
+    registration: Registration,
+    skill_available: bool,
+    adapter: &adapters::Adapter,
+) -> Result<ClientStatus, AgentError> {
+    let (state, message) = match registration {
+        Registration::Missing => (
+            State::Available,
+            "Detected. Run bk agents connect to register Beankeeper.",
+        ),
+        Registration::Partial => (
+            State::PartiallyConfigured,
+            "One Beankeeper entry is missing. Run bk agents connect to repair it.",
+        ),
+        Registration::Owned if !skill_available => (
+            State::PartiallyConfigured,
+            "The Beankeeper skill is missing. Run bk agents connect to repair it.",
+        ),
+        Registration::Owned => (
+            State::Configured,
+            "The managed MCP configuration is present.",
+        ),
+        Registration::Conflict => return Err(AgentError::Conflict(adapter.config.clone())),
+    };
+    let incomplete = !matches!(state, State::Configured);
+    let mut result = ClientStatus::new(agent, state, message);
+    result.skill_installed = adapter.skill.as_ref().map(|_| skill_available);
+    if incomplete && matches!(operation, Operation::Doctor) {
+        result = result.failure(Failure::new("AGENT_NOT_CONFIGURED", message));
+    }
+    Ok(result)
+}

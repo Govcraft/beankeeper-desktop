@@ -5,7 +5,8 @@ param(
     [string]$InstallDir = $(if ($env:BK_INSTALL) { $env:BK_INSTALL } else {
         Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
     }),
-    [switch]$NoService = ($env:BK_NO_SERVICE -eq '1')
+    [switch]$NoService = ($env:BK_NO_SERVICE -eq '1'),
+    [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1')
 )
 $ErrorActionPreference = 'Stop'
 $Repository = 'Govcraft/beankeeper-desktop'
@@ -73,7 +74,7 @@ function Install-Beankeeper {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         $installed = Join-Path $InstallDir 'bk.exe'
         if (Test-Path -LiteralPath $installed) {
-            & $installed service --help *> $null
+            & $installed service --help 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 & $installed service stop
                 if ($LASTEXITCODE -ne 0) { throw 'Could not stop the existing background service' }
@@ -86,8 +87,12 @@ function Install-Beankeeper {
         }
         if (-not $copied) { throw 'The installed binary is still in use; close bk processes and retry' }
         if (-not $NoService) {
-            & $installed service install
-            if ($LASTEXITCODE -ne 0) { throw 'Background setup failed; run bk service install in your desktop session' }
+            & $installed service install --no-agents
+            if ($LASTEXITCODE -ne 0) { throw 'Background setup failed. Run bk service install --no-agents in your desktop session.' }
+            if (-not $NoAgents) {
+                & $installed agents connect --all
+                if ($LASTEXITCODE -ne 0) { throw 'Agent registration needs attention. Run bk agents doctor and retry bk agents connect --all.' }
+            }
         }
         Write-Host "Installed bk $releaseVersion to $InstallDir. Add this directory to your PATH."
     } finally {
