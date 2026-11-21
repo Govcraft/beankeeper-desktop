@@ -157,25 +157,48 @@ pub fn require_update_entitlement(released_at: DateTime<Utc>) -> Result<(), Prod
         ))
     }
 }
+fn license_service_origin() -> Result<String, ProductError> {
+    if let Ok(url) = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
+        && !url.is_empty()
+    {
+        return Ok(url);
+    }
+    option_env!("BEANKEEPER_LICENSE_SERVICE_URL")
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .ok_or(ProductError::Configuration(
+            "set BEANKEEPER_LICENSE_SERVICE_URL at runtime, or build it in with the same variable, before redeeming a claim code",
+        ))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 fn redeem(code_file: &std::path::Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
     use secrecy::ExposeSecret;
 
-    let service = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL").map_err(|_| {
-        ProductError::Configuration(
-            "set BEANKEEPER_LICENSE_SERVICE_URL before redeeming a claim code",
-        )
-    })?;
+    let service = license_service_origin()?;
     let mut url = reqwest::Url::parse(&service)
         .map_err(|_| ProductError::Configuration("invalid license service URL"))?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
+    let host = url
+        .host_str()
+        .ok_or(ProductError::Configuration("invalid license service URL"))?;
+    let loopback = is_loopback_host(host);
+    let https = url.scheme() == "https";
+    let http_loopback = url.scheme() == "http" && loopback;
+    if !(https || http_loopback)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ProductError::Configuration(
-            "license service must be an HTTPS origin without credentials",
+            "license service must be an HTTPS origin, or HTTP on loopback, without credentials",
         ));
     }
     url.set_path("/api/v1/licenses/redeem");
@@ -201,12 +224,13 @@ fn redeem(code_file: &std::path::Path, storefront: &str) -> Result<Vec<u8>, Prod
     } else {
         None
     };
-    let client = reqwest::blocking::Client::builder()
-        .https_only(true)
+    let mut client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|_| ProductError::Redemption)?;
+        .timeout(Duration::from_secs(15));
+    if https {
+        client = client.https_only(true);
+    }
+    let client = client.build().map_err(|_| ProductError::Redemption)?;
     let response = client
         .post(url)
         .json(&serde_json::json!({

@@ -14,7 +14,12 @@ Production signing keys are not available in this repository. Provision issuer
 - At build time, set `BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` to a JSON object mapping
   key identifiers to unpadded base64url public keys. The compiler embeds this
   public trust map. No signing key belongs in a build.
-- For a custom installation, set `BEANKEEPER_LICENSE_KEYS_FILE` to a JSON file with
+- The same public-key JSON may be baked in at compile time with
+`BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON`. `BEANKEEPER_LICENSE_SERVICE_URL` may also
+be set at build time (see `build.rs`); a runtime value wins. HTTP is allowed
+only when the host is loopback.
+
+For a custom installation, set `BEANKEEPER_LICENSE_KEYS_FILE` to a JSON file with
   the same map. This explicit local trust override replaces the embedded map.
 
 An empty map or unknown issuer fails closed. Never trust a public key copied

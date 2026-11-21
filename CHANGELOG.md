@@ -2,7 +2,21 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-20
+
+Release tags use `beankeeper-desktop-vX.Y.Z`. There is no paid Apple or Windows
+signing yet; installers may show Gatekeeper or SmartScreen warnings. Verify
+artifacts with cosign and GitHub attestations as described in the README.
+
 ### Added
+
+- Build-time `BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` and
+  `BEANKEEPER_LICENSE_SERVICE_URL` (via `build.rs` / `option_env!`), with
+  runtime overrides. A loopback HTTP license service is accepted so a locally
+  built `bk` can `license activate` against a self-run issuer.
+- A README "Unsigned builds" section covering Gatekeeper, SmartScreen, and
+  Sigstore / provenance verification.
+- Pin `beankeeper-cli` to git tag `beankeeper-cli-v0.27.0`.
 
 - Isolated offline Ed25519 Desktop license activation compatible with D10,
   perpetual entitlements and inclusive update windows, plus optional HTTPS
