@@ -1,11 +1,11 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
-    license::{self, LicenseClaims, LicenseError, TrustedKeys},
+    license::{self, LicenseError, TrustedKeys, VerifiedLicense},
     private_file::PrivateFile,
     updates::{self, UpdateError},
 };
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
 use std::{
     error::Error,
@@ -81,8 +81,8 @@ pub enum LicenseCommand {
         #[arg(long)]
         code_file: Option<PathBuf>,
         /// D10 storefront adapter used only with --code-file.
-        #[arg(long, default_value = "polar", requires = "code_file")]
-        storefront: Option<String>,
+        #[arg(long, requires = "code_file", ignore_case = true)]
+        storefront: Option<Storefront>,
     },
     /// Show the license service URL and issuer keys compiled into this binary.
     Trust {
@@ -90,6 +90,147 @@ pub enum LicenseCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Storefront adapters supported for online license redemption.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Storefront {
+    /// Polar license key (the default).
+    #[default]
+    Polar,
+    /// Gumroad license key.
+    Gumroad,
+    /// Etsy single-use claim code.
+    Etsy,
+}
+
+enum LicenseSource {
+    File(PathBuf),
+    Code {
+        file: PathBuf,
+        storefront: Storefront,
+    },
+}
+
+impl LicenseSource {
+    fn from_args(
+        file: Option<PathBuf>,
+        code_file: Option<PathBuf>,
+        storefront: Option<Storefront>,
+    ) -> Result<Self, ProductError> {
+        match (file, code_file, storefront) {
+            (Some(file), None, None) => Ok(Self::File(file)),
+            (None, Some(file), storefront) => Ok(Self::Code {
+                file,
+                storefront: storefront.unwrap_or_default(),
+            }),
+            _ => Err(ProductError::Configuration(
+                "select one license file or --code-file",
+            )),
+        }
+    }
+
+    fn read(self) -> Result<Vec<u8>, ProductError> {
+        match self {
+            Self::File(file) => bounded_file(&file, 32_768),
+            Self::Code { file, storefront } => redeem(&file, storefront),
+        }
+    }
+}
+
+struct RecoveryToken(SecretString);
+
+impl RecoveryToken {
+    fn read_for(code: &SecretString) -> Result<Self, ProductError> {
+        let path = std::env::var_os("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE")
+            .map(PathBuf::from)
+            .ok_or(ProductError::Configuration("Etsy redemption requires BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE; retain this separate private recovery credential before redeeming a single-use code"))?;
+        let token = read_redemption_secret(&path)?;
+        let value = token.expose_secret().trim();
+        if !(32..=512).contains(&value.len()) || value == code.expose_secret().trim() {
+            return Err(ProductError::Configuration(
+                "Etsy recovery token must contain 32 to 512 bytes and differ from the claim code",
+            ));
+        }
+        Ok(Self(token))
+    }
+}
+
+enum Redemption {
+    Polar(SecretString),
+    Gumroad(SecretString),
+    Etsy {
+        code: SecretString,
+        recovery: RecoveryToken,
+    },
+}
+
+impl Redemption {
+    fn from_file(file: &Path, storefront: Storefront) -> Result<Self, ProductError> {
+        let code = read_redemption_secret(file)?;
+        Ok(match storefront {
+            Storefront::Polar => Self::Polar(code),
+            Storefront::Gumroad => Self::Gumroad(code),
+            Storefront::Etsy => Self::Etsy {
+                recovery: RecoveryToken::read_for(&code)?,
+                code,
+            },
+        })
+    }
+
+    fn request(&self) -> RedemptionRequest<'_> {
+        match self {
+            Self::Polar(code) => RedemptionRequest::Polar {
+                key: code.expose_secret().trim(),
+                recovery_token: (),
+            },
+            Self::Gumroad(code) => RedemptionRequest::Gumroad {
+                key: code.expose_secret().trim(),
+                recovery_token: (),
+            },
+            Self::Etsy { code, recovery } => RedemptionRequest::Etsy {
+                key: code.expose_secret().trim(),
+                recovery_token: recovery,
+            },
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "storefront", rename_all = "lowercase")]
+enum RedemptionRequest<'a> {
+    Polar {
+        key: &'a str,
+        recovery_token: (),
+    },
+    Gumroad {
+        key: &'a str,
+        recovery_token: (),
+    },
+    Etsy {
+        key: &'a str,
+        #[serde(serialize_with = "serialize_recovery_token")]
+        recovery_token: &'a RecoveryToken,
+    },
+}
+
+fn serialize_recovery_token<S: serde::Serializer>(
+    token: &RecoveryToken,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(token.0.expose_secret().trim())
+}
+
+fn read_redemption_secret(path: &Path) -> Result<SecretString, ProductError> {
+    PrivateFile::open(path)?
+        .read_secret(4096)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::FileTooLarge => {
+                ProductError::Configuration("license input exceeds size limit")
+            }
+            io::ErrorKind::InvalidData => ProductError::Redemption,
+            _ => error.into(),
+        })
 }
 
 /// Compile-time license trust, ignoring runtime environment overrides.
@@ -186,12 +327,12 @@ pub fn trusted_keys() -> Result<TrustedKeys, ProductError> {
     };
     Ok(TrustedKeys::from_json(&bytes)?)
 }
-fn bounded_file(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, ProductError> {
+fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(limit + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
+    if u64::try_from(bytes.len()).map_or(true, |len| len > limit) {
         return Err(ProductError::Configuration(
             "license input exceeds size limit",
         ));
@@ -211,33 +352,27 @@ pub fn license_status() -> Result<String, ProductError> {
         .ok_or(ProductError::Configuration("activated license is missing"))?;
     Ok(describe(&claims, Utc::now()))
 }
-fn describe(claims: &LicenseClaims, now: DateTime<Utc>) -> String {
+fn describe(claims: &VerifiedLicense, now: DateTime<Utc>) -> String {
     // The clock only informs the display. Installation eligibility still uses
-    // the authenticated release date in require_update_entitlement.
-    let update_window = if now <= claims.updates_until {
+    // the authenticated release date in the signed manifest.
+    let update_window = if now <= claims.updates_until() {
         "open"
     } else {
         "ended; perpetual Desktop use remains active"
     };
     format!(
         "License status: active and valid.\nLicense {}: perpetual Desktop use; updates through {} (inclusive).\nUpdate window: {update_window}. Eligibility is based on the signed release date.",
-        claims.license_id,
-        claims.updates_until.to_rfc3339()
+        claims.id(),
+        claims.updates_until().to_rfc3339()
     )
 }
-/// Check release eligibility using an authenticated manifest timestamp.
-pub fn require_update_entitlement(released_at: DateTime<Utc>) -> Result<(), ProductError> {
-    let claims = license::load(&state_dir()?.join("license.json"), &trusted_keys()?)?.ok_or(
+/// Load the authenticated license used for release authorization.
+pub(crate) fn load_update_license() -> Result<VerifiedLicense, ProductError> {
+    license::load(&state_dir()?.join("license.json"), &trusted_keys()?)?.ok_or(
         ProductError::Configuration("activate a Desktop license before self-update"),
-    )?;
-    if license::entitlement(&claims, released_at).update_eligible {
-        Ok(())
-    } else {
-        Err(ProductError::Configuration(
-            "this release is outside the license update window",
-        ))
-    }
+    )
 }
+
 fn license_service_origin() -> Result<String, ProductError> {
     if let Ok(url) = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
         && !url.is_empty()
@@ -260,19 +395,7 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-fn read_redemption_secret(path: &Path) -> Result<SecretString, ProductError> {
-    PrivateFile::open(path)?
-        .read_secret(4096)
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::FileTooLarge => {
-                ProductError::Configuration("license input exceeds size limit")
-            }
-            io::ErrorKind::InvalidData => ProductError::Redemption,
-            _ => error.into(),
-        })
-}
-
-fn redeem(code_file: &Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
+fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> {
     let service = license_service_origin()?;
     let mut url = reqwest::Url::parse(&service)
         .map_err(|_| ProductError::Configuration("invalid license service URL"))?;
@@ -293,22 +416,7 @@ fn redeem(code_file: &Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
         ));
     }
     url.set_path("/api/v1/licenses/redeem");
-    let code = read_redemption_secret(code_file)?;
-    let recovery_token = if storefront == "etsy" {
-        let path = std::env::var_os("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE")
-            .map(PathBuf::from)
-            .ok_or(ProductError::Configuration("Etsy redemption requires BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE; retain this separate private recovery credential before redeeming a single-use code"))?;
-        let token = read_redemption_secret(&path)?;
-        let value = token.expose_secret().trim();
-        if !(32..=512).contains(&value.len()) || value == code.expose_secret().trim() {
-            return Err(ProductError::Configuration(
-                "Etsy recovery token must contain 32 to 512 bytes and differ from the claim code",
-            ));
-        }
-        Some(token)
-    } else {
-        None
-    };
+    let redemption = Redemption::from_file(file, storefront)?;
     let mut client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15));
@@ -318,11 +426,7 @@ fn redeem(code_file: &Path, storefront: &str) -> Result<Vec<u8>, ProductError> {
     let client = client.build().map_err(|_| ProductError::Redemption)?;
     let response = client
         .post(url)
-        .json(&serde_json::json!({
-            "storefront": storefront,
-            "key": code.expose_secret().trim(),
-            "recovery_token": recovery_token.as_ref().map(|token| token.expose_secret().trim())
-        }))
+        .json(&redemption.request())
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|_| ProductError::Redemption)?;
@@ -345,17 +449,10 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
             code_file,
             storefront,
         }) => {
+            let source = LicenseSource::from_args(file, code_file, storefront)?;
             // Resolve trust before redeeming a potentially single-use claim.
             let keys = trusted_keys()?;
-            let bytes = match (file, code_file) {
-                (Some(file), None) => bounded_file(&file, 32_768)?,
-                (None, Some(code)) => redeem(&code, storefront.as_deref().unwrap_or("polar"))?,
-                _ => {
-                    return Err(ProductError::Configuration(
-                        "select one license file or --code-file",
-                    ));
-                }
-            };
+            let bytes = source.read()?;
             let claims = license::activate(&bytes, &keys, &state_dir()?.join("license.json"))?;
             println!("{}", describe(&claims, Utc::now()));
         }
@@ -363,20 +460,20 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
     Ok(())
 }
 /// Opt-out applies before update disk/network activity. Set to `1` or `true`.
-pub fn updates_disabled() -> bool {
-    std::env::var("BEANKEEPER_NO_UPDATE_CHECK")
+pub fn update_checks() -> updates::UpdateChecks {
+    if std::env::var("BEANKEEPER_NO_UPDATE_CHECK")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        updates::UpdateChecks::Disabled
+    } else {
+        updates::UpdateChecks::Enabled
+    }
 }
 /// Safe cached status for a paired browser page, without triggering a request.
 pub fn status_text() -> String {
     let license = license_status().unwrap_or_else(|e| format!("License status: unavailable. {e}."));
     let updates = state_dir()
-        .and_then(|dir| {
-            Ok(updates::status(
-                &dir.join("updates.json"),
-                updates_disabled(),
-            )?)
-        })
+        .and_then(|dir| Ok(updates::status(&dir.join("updates.json"), update_checks())?))
         .unwrap_or_else(|e| e.to_string());
     format!("{license}\n{updates}")
 }
@@ -394,10 +491,13 @@ mod tests {
         let claims = verify_offline(include_bytes!("../tests/fixtures/license.json"), &keys)
             .expect("verified fixture");
         for (now, expected_window) in [
-            (claims.issued_at, "Update window: open."),
-            (claims.updates_until, "Update window: open."),
             (
-                claims.updates_until + chrono::Duration::seconds(1),
+                claims.updates_until() - chrono::Duration::days(1),
+                "Update window: open.",
+            ),
+            (claims.updates_until(), "Update window: open."),
+            (
+                claims.updates_until() + chrono::Duration::seconds(1),
                 "Update window: ended; perpetual Desktop use remains active.",
             ),
         ] {
@@ -406,8 +506,56 @@ mod tests {
             assert!(status.contains(expected_window));
             assert!(status.contains("2027-11-20T12:00:00+00:00 (inclusive)"));
             assert!(status.contains("Eligibility is based on the signed release date."));
-            assert!(!status.contains(&claims.purchaser_ref));
+            assert!(!status.contains("customer-fixture-1"));
         }
+    }
+
+    #[test]
+    fn storefront_has_a_closed_case_insensitive_cli_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{LicenseCommand, LicenseOptions, Storefront};
+        use clap::FromArgMatches;
+
+        for (spelling, expected) in [
+            ("polar", Storefront::Polar),
+            ("gumroad", Storefront::Gumroad),
+            ("Etsy", Storefront::Etsy),
+        ] {
+            let matches = crate::cli::command().try_get_matches_from([
+                "bk",
+                "license",
+                "activate",
+                "--code-file",
+                "code.txt",
+                "--storefront",
+                spelling,
+            ])?;
+            let options = matches
+                .subcommand_matches("license")
+                .ok_or("license command")?;
+            let Some(LicenseCommand::Activate {
+                storefront: Some(storefront),
+                ..
+            }) = LicenseOptions::from_arg_matches(options)?.command
+            else {
+                return Err("missing storefront option".into());
+            };
+            assert_eq!(storefront, expected);
+        }
+        assert!(
+            crate::cli::command()
+                .try_get_matches_from([
+                    "bk",
+                    "license",
+                    "activate",
+                    "--code-file",
+                    "code.txt",
+                    "--storefront",
+                    "unknown",
+                ])
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

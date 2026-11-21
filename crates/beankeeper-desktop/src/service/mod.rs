@@ -18,7 +18,6 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cli::ServeOptions,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
     setup::{self, keychain},
 };
@@ -498,15 +497,7 @@ fn host(paths: &Paths) -> Result<(), ServiceError> {
     cli.db = config.books;
     let _passphrase = setup::stored_passphrase(&mut cli)?;
     private_json(&paths.runtime(), &runtime)?;
-    let result = crate::server::serve_listener(
-        &cli,
-        ServeOptions {
-            bind,
-            allow_remote: false,
-            read_only: false,
-        },
-        listener,
-    );
+    let result = crate::server::serve_listener(&cli, listener);
     let _ = remove_if_exists(&paths.runtime());
     result.map_err(Into::into)
 }

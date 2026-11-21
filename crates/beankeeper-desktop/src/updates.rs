@@ -1,5 +1,6 @@
 //! Signed release discovery and fail-closed installation. No ledger access.
 
+use crate::license::{self, UpdateEligibility, UpdateGrant, VerifiedLicense};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,23 +72,33 @@ impl From<serde_json::Error> for UpdateError {
     }
 }
 
-/// Signed metadata. The detached bundle authenticates the exact JSON bytes.
+// Wire metadata used for both incoming JSON and backwards-compatible cache
+// entries. Deserializing it confers no authority to install an update.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Manifest {
-    pub schema_version: u32,
-    pub version: String,
-    pub released_at: DateTime<Utc>,
-    pub artifacts: BTreeMap<String, Artifact>,
-}
-/// SHA-256 of the archive named by the release layout contract.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Artifact {
-    pub sha256: String,
+struct Manifest {
+    schema_version: u32,
+    version: String,
+    released_at: DateTime<Utc>,
+    artifacts: BTreeMap<String, Artifact>,
 }
 
-fn release_version(value: &str) -> Result<semver::Version, UpdateError> {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Artifact {
+    sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReleaseVersion(semver::Version);
+
+impl fmt::Display for ReleaseVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+fn release_version(value: &str) -> Result<ReleaseVersion, UpdateError> {
     let version =
         semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
     let supported_prerelease = version
@@ -100,11 +111,10 @@ fn release_version(value: &str) -> Result<semver::Version, UpdateError> {
             "only stable and rc.N releases are supported",
         ));
     }
-    Ok(version)
+    Ok(ReleaseVersion(version))
 }
 
-/// Local Desktop version. Prereleases such as 0.1.0-rc.1 are allowed so an rc
-/// binary can compare itself to stable and RC manifests. Build metadata is not.
+/// Local prereleases may opt into RC updates. Build metadata is prohibited.
 fn installed_version(value: &str) -> Result<semver::Version, UpdateError> {
     let version =
         semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
@@ -113,28 +123,74 @@ fn installed_version(value: &str) -> Result<semver::Version, UpdateError> {
     }
     Ok(version)
 }
-impl Manifest {
-    fn parse(bytes: &[u8]) -> Result<Self, UpdateError> {
-        let manifest: Self = serde_json::from_slice(bytes)?;
-        release_version(&manifest.version)?;
-        if manifest.schema_version != 1
-            || manifest.released_at.timestamp() <= 0
-            || manifest.artifacts.is_empty()
-            || manifest
-                .artifacts
-                .values()
-                .any(|a| a.sha256.len() != 64 || !a.sha256.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
-            return Err(UpdateError::Invalid("unsupported manifest or checksum"));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sha256Digest([u8; 32]);
+
+impl Sha256Digest {
+    fn from_hex(text: &str) -> Result<Self, UpdateError> {
+        fn nibble(byte: u8) -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            }
         }
-        Ok(manifest)
+        let source: &[u8; 64] = text
+            .as_bytes()
+            .try_into()
+            .map_err(|_| UpdateError::Invalid("invalid SHA-256 checksum"))?;
+        let mut digest = [0; 32];
+        for (byte, &[high, low]) in digest.iter_mut().zip(source.as_chunks::<2>().0) {
+            let high = nibble(high).ok_or(UpdateError::Invalid("invalid SHA-256 checksum"))?;
+            let low = nibble(low).ok_or(UpdateError::Invalid("invalid SHA-256 checksum"))?;
+            *byte = high << 4 | low;
+        }
+        Ok(Self(digest))
     }
-    /// Compare semantically, keeping stable installations off prereleases.
-    pub fn newer_than(&self, current: &str) -> Result<bool, UpdateError> {
-        let candidate = release_version(&self.version)?;
-        let current = installed_version(current)?;
-        Ok((!current.pre.is_empty() || candidate.pre.is_empty()) && candidate > current)
+}
+
+struct VerifiedManifest {
+    version: ReleaseVersion,
+    artifacts: BTreeMap<Target, Sha256Digest>,
+    cache_record: Manifest,
+}
+
+impl VerifiedManifest {
+    fn is_newer_than(&self, current: &semver::Version) -> bool {
+        (!current.pre.is_empty() || self.version.0.pre.is_empty()) && self.version.0 > *current
     }
+
+    fn require_newer(self, current: &semver::Version) -> Result<NewerRelease, UpdateError> {
+        if !self.is_newer_than(current) {
+            return Err(UpdateError::Invalid(
+                "release is not newer than this Desktop binary",
+            ));
+        }
+        Ok(NewerRelease(self))
+    }
+}
+
+struct NewerRelease(VerifiedManifest);
+
+impl NewerRelease {
+    fn authorize(self, license: &VerifiedLicense) -> Result<AuthorizedRelease, UpdateError> {
+        match license::entitlement(license, self.0.cache_record.released_at) {
+            UpdateEligibility::Eligible(grant) => Ok(AuthorizedRelease {
+                manifest: self.0,
+                _grant: grant,
+            }),
+            UpdateEligibility::OutsideWindow { .. } => Err(UpdateError::Invalid(
+                "activate a license covering this release's update date",
+            )),
+        }
+    }
+}
+
+struct AuthorizedRelease {
+    manifest: VerifiedManifest,
+    _grant: UpdateGrant,
 }
 
 /// Discovery is untrusted: only a constrained tag is used, never API asset URLs.
@@ -145,28 +201,29 @@ struct GithubRelease {
     prerelease: bool,
 }
 
-fn select_release(releases: &[GithubRelease], current: &str) -> Result<String, UpdateError> {
-    let current = installed_version(current)?;
+fn select_release(
+    releases: &[GithubRelease],
+    current: &semver::Version,
+) -> Result<ReleaseVersion, UpdateError> {
     releases
         .iter()
         .filter(|release| !release.draft)
         .filter_map(|release| {
             let version = release_version(release.tag_name.strip_prefix(TAG_PREFIX)?).ok()?;
-            let prerelease = !version.pre.is_empty();
+            let prerelease = !version.0.pre.is_empty();
             (release.prerelease == prerelease && (!current.pre.is_empty() || !prerelease))
                 .then_some(version)
         })
         .max()
-        .map(|version| version.to_string())
         .ok_or(UpdateError::Invalid("no supported published release found"))
 }
 
 fn fetch_manifest(
-    current: &str,
+    current: &semver::Version,
     mut fetch: impl FnMut(&str, u64) -> Result<Vec<u8>, UpdateError>,
     verifier: &dyn BundleVerifier,
-) -> Result<Manifest, UpdateError> {
-    let prerelease = !installed_version(current)?.pre.is_empty();
+) -> Result<VerifiedManifest, UpdateError> {
+    let prerelease = !current.pre.is_empty();
     let endpoint = if prerelease {
         format!("{RELEASE_API}?per_page=100&")
     } else {
@@ -187,29 +244,32 @@ fn fetch_manifest(
         &asset_url(&version, "update-manifest.json.sigstore"),
         MAX_METADATA,
     )?;
-    let manifest = verify_manifest(&bytes, &bundle, verifier)?;
-    if manifest.version != version {
-        return Err(UpdateError::Invalid(
-            "manifest version does not match release tag",
-        ));
-    }
-    Ok(manifest)
+    verify_manifest(&bytes, &bundle, Some(version), verifier)
 }
 
-/// Verify release blobs against one exact workflow/tag and GitHub's OIDC issuer.
-/// Tests inject an offline verifier at this boundary; CLI always uses `Cosign`.
-pub trait BundleVerifier {
-    fn verify(&self, artifact: &Path, bundle: &Path, version: &str) -> Result<(), UpdateError>;
+/// Authenticate bytes against a constrained release tag.
+trait BundleVerifier {
+    fn verify(
+        &self,
+        artifact: &Path,
+        bundle: &Path,
+        version: &ReleaseVersion,
+    ) -> Result<(), UpdateError>;
 }
-/// Uses cosign from PATH, without shell interpolation or insecure fallbacks.
-pub struct Cosign;
+
+/// Uses cosign from PATH with fixed trust identity and no shell interpolation.
+struct Cosign;
 impl BundleVerifier for Cosign {
-    fn verify(&self, artifact: &Path, bundle: &Path, version: &str) -> Result<(), UpdateError> {
-        release_version(version)?;
+    fn verify(
+        &self,
+        artifact: &Path,
+        bundle: &Path,
+        version: &ReleaseVersion,
+    ) -> Result<(), UpdateError> {
         if !bundle.is_file() || fs::metadata(bundle)?.len() == 0 {
             return Err(UpdateError::Signature);
         }
-        let status = cosign_command(artifact, bundle, version)?
+        let status = cosign_command(artifact, bundle, version)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -223,11 +283,9 @@ impl BundleVerifier for Cosign {
     }
 }
 
-fn cosign_command(artifact: &Path, bundle: &Path, version: &str) -> Result<Command, UpdateError> {
-    release_version(version)?;
-    let identity = format!(
-        "{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v{version}"
-    );
+fn cosign_command(artifact: &Path, bundle: &Path, version: &ReleaseVersion) -> Command {
+    let identity =
+        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}");
     let mut command = Command::new("cosign");
     command
         .args([
@@ -242,13 +300,13 @@ fn cosign_command(artifact: &Path, bundle: &Path, version: &str) -> Result<Comma
         ])
         .arg(bundle)
         .arg(artifact);
-    Ok(command)
+    command
 }
 
 fn verify_bytes(
     bytes: &[u8],
     bundle: &[u8],
-    version: &str,
+    version: &ReleaseVersion,
     verifier: &dyn BundleVerifier,
 ) -> Result<(), UpdateError> {
     if bundle.is_empty() {
@@ -260,35 +318,111 @@ fn verify_bytes(
     signature.write_all(bundle)?;
     verifier.verify(data.path(), signature.path(), version)
 }
-/// Parse constrained metadata to select a tag, then authenticate its exact bytes.
-pub fn verify_manifest(
+
+fn verify_manifest(
     bytes: &[u8],
     bundle: &[u8],
+    expected: Option<ReleaseVersion>,
     verifier: &dyn BundleVerifier,
-) -> Result<Manifest, UpdateError> {
-    let manifest = Manifest::parse(bytes)?;
-    verify_bytes(bytes, bundle, &manifest.version, verifier)?;
-    Ok(manifest)
+) -> Result<VerifiedManifest, UpdateError> {
+    let manifest: Manifest = serde_json::from_slice(bytes)?;
+    let version = match expected {
+        Some(version) if manifest.version == version.to_string() => version,
+        Some(_) => {
+            return Err(UpdateError::Invalid(
+                "manifest version does not match release tag",
+            ));
+        }
+        None => release_version(&manifest.version)?,
+    };
+    if manifest.schema_version != 1
+        || manifest.released_at.timestamp() <= 0
+        || manifest.artifacts.is_empty()
+    {
+        return Err(UpdateError::Invalid("unsupported manifest"));
+    }
+    verify_bytes(bytes, bundle, &version, verifier)?;
+    let mut artifacts = BTreeMap::new();
+    for (platform, artifact) in &manifest.artifacts {
+        let digest = Sha256Digest::from_hex(&artifact.sha256)?;
+        // Older binaries can still update when the release adds a platform.
+        if let Some(target) = Target::from_triple(platform) {
+            artifacts.insert(target, digest);
+        }
+    }
+    Ok(VerifiedManifest {
+        version,
+        artifacts,
+        cache_record: manifest,
+    })
 }
 
-/// Explicit supported targets match the packaging matrix.
-pub fn target() -> Result<&'static str, UpdateError> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
-        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
-        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
-        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
-        _ => Err(UpdateError::Invalid("unsupported update platform")),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Target {
+    LinuxX64,
+    LinuxArm64,
+    MacX64,
+    MacArm64,
+    WindowsX64,
+}
+
+impl Target {
+    const ALL: [Self; 5] = [
+        Self::LinuxX64,
+        Self::LinuxArm64,
+        Self::MacX64,
+        Self::MacArm64,
+        Self::WindowsX64,
+    ];
+
+    fn from_triple(triple: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|target| target.triple() == triple)
+    }
+
+    fn triple(self) -> &'static str {
+        match self {
+            Self::LinuxX64 => "x86_64-unknown-linux-gnu",
+            Self::LinuxArm64 => "aarch64-unknown-linux-gnu",
+            Self::MacX64 => "x86_64-apple-darwin",
+            Self::MacArm64 => "aarch64-apple-darwin",
+            Self::WindowsX64 => "x86_64-pc-windows-msvc",
+        }
+    }
+
+    fn current() -> Result<Self, UpdateError> {
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => Ok(Self::LinuxX64),
+            ("linux", "aarch64") => Ok(Self::LinuxArm64),
+            ("macos", "x86_64") => Ok(Self::MacX64),
+            ("macos", "aarch64") => Ok(Self::MacArm64),
+            ("windows", "x86_64") => Ok(Self::WindowsX64),
+            _ => Err(UpdateError::Invalid("unsupported update platform")),
+        }
+    }
+
+    fn archive_extension(self) -> &'static str {
+        match self {
+            Self::WindowsX64 => "zip",
+            Self::LinuxX64 | Self::LinuxArm64 | Self::MacX64 | Self::MacArm64 => "tar.gz",
+        }
+    }
+
+    fn binary_name(self) -> &'static str {
+        match self {
+            Self::WindowsX64 => "bk.exe",
+            Self::LinuxX64 | Self::LinuxArm64 | Self::MacX64 | Self::MacArm64 => "bk",
+        }
     }
 }
-fn archive_name(version: &str, target: &str) -> String {
-    let extension = if target.contains("windows") {
-        "zip"
-    } else {
-        "tar.gz"
-    };
-    format!("bk-{version}-{target}.{extension}")
+
+fn archive_name(version: &ReleaseVersion, target: Target) -> String {
+    format!(
+        "bk-{version}-{}.{}",
+        target.triple(),
+        target.archive_extension()
+    )
 }
 fn download(url: &str, limit: u64) -> Result<Vec<u8>, UpdateError> {
     let client = reqwest::blocking::Client::builder()
@@ -308,12 +442,12 @@ fn download(url: &str, limit: u64) -> Result<Vec<u8>, UpdateError> {
         })?;
     let mut bytes = Vec::new();
     response.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
+    if u64::try_from(bytes.len()).map_or(true, |len| len > limit) {
         return Err(UpdateError::Invalid("download exceeds size limit"));
     }
     Ok(bytes)
 }
-fn asset_url(version: &str, name: &str) -> String {
+fn asset_url(version: &ReleaseVersion, name: &str) -> String {
     format!("{REPOSITORY}/releases/download/beankeeper-desktop-v{version}/{name}")
 }
 
@@ -381,12 +515,19 @@ fn cached_status(cache: &Cache) -> String {
     format!("{message}\nLast attempt: {attempted_at}.")
 }
 
-/// Last checked state, read without any network request. Opt-out hides stale results.
-pub fn status(path: &Path, disabled: bool) -> Result<String, UpdateError> {
-    status_with(path, disabled, env!("CARGO_PKG_VERSION"))
+/// Whether background and manual update checks may use disk or network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChecks {
+    Enabled,
+    Disabled,
 }
-fn status_with(path: &Path, disabled: bool, current: &str) -> Result<String, UpdateError> {
-    if disabled {
+
+/// Last checked state, read without any network request. Opt-out hides stale results.
+pub fn status(path: &Path, checks: UpdateChecks) -> Result<String, UpdateError> {
+    status_with(path, checks, env!("CARGO_PKG_VERSION"))
+}
+fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<String, UpdateError> {
+    if checks == UpdateChecks::Disabled {
         return Ok("Automatic update checks are disabled.".into());
     }
     let cache = read_cache(path, current)?;
@@ -398,24 +539,24 @@ fn status_with(path: &Path, disabled: bool, current: &str) -> Result<String, Upd
 /// At most one network attempt per day per Desktop version, including failures
 /// and process restarts. Legacy caches are refreshed on the next check.
 /// Opt-out is evaluated before files or the network are accessed.
-pub fn check(path: &Path, disabled: bool, now: u64) -> Result<String, UpdateError> {
-    check_with(path, disabled, now, env!("CARGO_PKG_VERSION"), || {
-        fetch_manifest(env!("CARGO_PKG_VERSION"), download, &Cosign)
+pub fn check(path: &Path, checks: UpdateChecks, now: u64) -> Result<String, UpdateError> {
+    check_with(path, checks, now, env!("CARGO_PKG_VERSION"), |current| {
+        fetch_manifest(current, download, &Cosign)
     })
 }
 fn check_with(
     path: &Path,
-    disabled: bool,
+    checks: UpdateChecks,
     now: u64,
     current: &str,
-    fetch: impl FnOnce() -> Result<Manifest, UpdateError>,
+    fetch: impl FnOnce(&semver::Version) -> Result<VerifiedManifest, UpdateError>,
 ) -> Result<String, UpdateError> {
-    if disabled {
-        return status_with(path, true, current);
+    if checks == UpdateChecks::Disabled {
+        return status_with(path, UpdateChecks::Disabled, current);
     }
     let mut cache = read_cache(path, current)?;
     if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-        return status_with(path, false, current);
+        return status_with(path, UpdateChecks::Enabled, current);
     }
     let parent = path
         .parent()
@@ -446,15 +587,16 @@ fn check_with(
         // Re-read under lock to handle a concurrent completed checker.
         cache = read_cache(path, current)?;
         if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-            return status_with(path, false, current);
+            return status_with(path, UpdateChecks::Enabled, current);
         }
         cache.desktop_version = current.to_owned();
         cache.last_attempt = now.max(1);
         cache.message = "Update check did not complete.".into();
         write_cache(path, &cache)?;
-        match fetch() {
+        let installed = installed_version(current)?;
+        match fetch(&installed) {
             Ok(manifest) => {
-                cache.message = if manifest.newer_than(current)? {
+                cache.message = if manifest.is_newer_than(&installed) {
                     format!(
                         "Desktop {} is available. Run `bk self-update`.",
                         manifest.version
@@ -462,7 +604,7 @@ fn check_with(
                 } else {
                     "Desktop is up to date.".into()
                 };
-                cache.manifest = Some(manifest);
+                cache.manifest = Some(manifest.cache_record);
             }
             Err(error) => {
                 cache.message = error.to_string();
@@ -470,7 +612,7 @@ fn check_with(
             }
         }
         write_cache(path, &cache)?;
-        status_with(path, false, current)
+        status_with(path, UpdateChecks::Enabled, current)
     })();
     let _ = fs::remove_file(lock);
     result
@@ -484,40 +626,34 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
         .ok_or(UpdateError::Invalid(
             "run bk update-check successfully first",
         ))?;
-    let bytes = download(
-        &asset_url(&cached.version, "update-manifest.json"),
-        MAX_METADATA,
-    )?;
+    let version = release_version(&cached.version)?;
+    let bytes = download(&asset_url(&version, "update-manifest.json"), MAX_METADATA)?;
     let bundle = download(
-        &asset_url(&cached.version, "update-manifest.json.sigstore"),
+        &asset_url(&version, "update-manifest.json.sigstore"),
         MAX_METADATA,
     )?;
-    let manifest = verify_manifest(&bytes, &bundle, &Cosign)?;
-    if manifest.version != cached.version || !manifest.newer_than(env!("CARGO_PKG_VERSION"))? {
-        return Err(UpdateError::Invalid(
-            "release is not newer than this Desktop binary",
-        ));
-    }
-    crate::product::require_update_entitlement(manifest.released_at).map_err(|_| {
+    let current = installed_version(env!("CARGO_PKG_VERSION"))?;
+    let release =
+        verify_manifest(&bytes, &bundle, Some(version), &Cosign)?.require_newer(&current)?;
+    let license = crate::product::load_update_license().map_err(|_| {
         UpdateError::Invalid("activate a license covering this release's update date")
     })?;
-    let target = target()?;
-    let name = archive_name(&manifest.version, target);
-    let archive = download(&asset_url(&manifest.version, &name), MAX_ARCHIVE)?;
+    let authorized = release.authorize(&license)?;
+    let version = &authorized.manifest.version;
+    let target = Target::current()?;
+    let name = archive_name(version, target);
+    let archive = download(&asset_url(version, &name), MAX_ARCHIVE)?;
     let archive_bundle = download(
-        &asset_url(&manifest.version, &format!("{name}.sigstore")),
+        &asset_url(version, &format!("{name}.sigstore")),
         MAX_METADATA,
     )?;
-    let checksums = download(
-        &asset_url(&manifest.version, "checksums-sha256.txt"),
-        MAX_METADATA,
-    )?;
+    let checksums = download(&asset_url(version, "checksums-sha256.txt"), MAX_METADATA)?;
     let checksums_bundle = download(
-        &asset_url(&manifest.version, "checksums-sha256.txt.sigstore"),
+        &asset_url(version, "checksums-sha256.txt.sigstore"),
         MAX_METADATA,
     )?;
     install(
-        &manifest,
+        &authorized,
         target,
         ReleaseFiles {
             archive: &archive,
@@ -530,26 +666,17 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
     )
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+struct ReleaseFiles<'a> {
+    archive: &'a [u8],
+    bundle: &'a [u8],
+    checksums: &'a [u8],
+    checksums_bundle: &'a [u8],
 }
 
-/// A release's downloaded evidence, verified before any executable replacement.
-pub struct ReleaseFiles<'a> {
-    pub archive: &'a [u8],
-    pub bundle: &'a [u8],
-    pub checksums: &'a [u8],
-    pub checksums_bundle: &'a [u8],
-}
-
-/// Verify all evidence and atomically replace a destination with just its binary.
-/// The caller supplies a manifest authenticated by `verify_manifest`.
-pub fn install(
-    manifest: &Manifest,
-    target: &str,
+/// Verify artifact evidence and atomically replace the executable.
+fn install(
+    release: &AuthorizedRelease,
+    target: Target,
     files: ReleaseFiles<'_>,
     destination: &Path,
     verifier: &dyn BundleVerifier,
@@ -560,36 +687,31 @@ pub fn install(
         checksums,
         checksums_bundle,
     } = files;
-    release_version(&manifest.version)?;
-    let name = archive_name(&manifest.version, target);
+    let manifest = &release.manifest;
+    let version = &manifest.version;
+    let name = archive_name(version, target);
     let artifact = manifest
         .artifacts
-        .get(target)
+        .get(&target)
         .ok_or(UpdateError::Invalid("release does not support this target"))?;
-    verify_bytes(checksums, checksums_bundle, &manifest.version, verifier)?;
-    verify_bytes(archive, bundle, &manifest.version, verifier)?;
-    let hash = sha256(archive);
+    verify_bytes(checksums, checksums_bundle, version, verifier)?;
+    verify_bytes(archive, bundle, version, verifier)?;
+    let hash = Sha256Digest(Sha256::digest(archive).into());
     let lines = std::str::from_utf8(checksums)
         .map_err(|_| UpdateError::Invalid("invalid checksum manifest"))?;
-    let matching: Vec<_> = lines
+    let mut matching = lines
         .lines()
         .filter_map(|line| line.split_once("  "))
-        .filter(|(_, filename)| *filename == name)
-        .collect();
-    if hash != artifact.sha256 || matching.len() != 1 || matching[0].0 != hash {
+        .filter(|(_, filename)| *filename == name);
+    let listed = matching
+        .next()
+        .map(|(digest, _)| Sha256Digest::from_hex(digest));
+    if hash != *artifact || listed.transpose()? != Some(hash) || matching.next().is_some() {
         return Err(UpdateError::Invalid(
             "archive checksum mismatch or missing/duplicate checksum",
         ));
     }
-    let expected = format!(
-        "bk-{}-{target}/{}",
-        manifest.version,
-        if target.contains("windows") {
-            "bk.exe"
-        } else {
-            "bk"
-        }
-    );
+    let expected = format!("bk-{version}-{}/{}", target.triple(), target.binary_name());
     let parent = destination.parent().ok_or(UpdateError::Invalid(
         "installation needs a parent directory",
     ))?;
@@ -624,12 +746,12 @@ fn copy_binary(reader: impl Read, output: &mut NamedTempFile) -> Result<(), Upda
 }
 fn extract_binary(
     bytes: &[u8],
-    target: &str,
+    target: Target,
     expected: &str,
     output: &mut NamedTempFile,
 ) -> Result<(), UpdateError> {
     let mut found = false;
-    if target.contains("windows") {
+    if target == Target::WindowsX64 {
         let mut archive = zip::ZipArchive::new(io::Cursor::new(bytes))
             .map_err(|_| UpdateError::Invalid("invalid ZIP archive"))?;
         for i in 0..archive.len() {
@@ -676,13 +798,13 @@ pub fn now() -> u64 {
         .as_secs()
 }
 /// Start a best-effort daily check without delaying ledger startup.
-pub fn background(path: PathBuf, disabled: bool) {
-    if disabled {
+pub fn background(path: PathBuf, checks: UpdateChecks) {
+    if checks == UpdateChecks::Disabled {
         return;
     }
     std::thread::spawn(move || {
         loop {
-            let _ = check(&path, false, now());
+            let _ = check(&path, UpdateChecks::Enabled, now());
             std::thread::park_timeout(Duration::from_secs(DAY));
         }
     });
@@ -701,7 +823,7 @@ mod tests {
             &self,
             artifact: &Path,
             bundle: &Path,
-            _version: &str,
+            _version: &ReleaseVersion,
         ) -> Result<(), UpdateError> {
             let signature =
                 Signature::from_slice(&fs::read(bundle)?).map_err(|_| UpdateError::Signature)?;
@@ -716,6 +838,30 @@ mod tests {
             .sign(bytes)
             .to_bytes()
             .to_vec()
+    }
+    fn sha256(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::with_capacity(64);
+        for byte in Sha256::digest(bytes) {
+            let _ = write!(text, "{byte:02x}");
+        }
+        text
+    }
+    fn verified(manifest: &Manifest) -> Result<VerifiedManifest, UpdateError> {
+        let bytes = serde_json::to_vec(manifest)?;
+        verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier)
+    }
+    fn authorize(manifest: &Manifest, current: &str) -> Result<AuthorizedRelease, Box<dyn Error>> {
+        let keys = crate::license::TrustedKeys::from_json(include_bytes!(
+            "../tests/fixtures/license-public-keys.json"
+        ))?;
+        let license = crate::license::verify_offline(
+            include_bytes!("../tests/fixtures/license.json"),
+            &keys,
+        )?;
+        Ok(verified(manifest)?
+            .require_newer(&installed_version(current)?)?
+            .authorize(&license)?)
     }
     fn manifest(archive: &[u8], target: &str) -> Manifest {
         Manifest {
@@ -755,7 +901,11 @@ mod tests {
     }
     #[test]
     fn official_verifier_pins_exact_identity_and_issuer_without_bypass_flags() -> TestResult {
-        let command = cosign_command(Path::new("archive"), Path::new("bundle"), "9.10.0")?;
+        let command = cosign_command(
+            Path::new("archive"),
+            Path::new("bundle"),
+            &release_version("9.10.0")?,
+        );
         let arguments: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -775,25 +925,25 @@ mod tests {
                 "archive"
             ]
         );
-        assert!(cosign_command(Path::new("archive"), Path::new("bundle"), "../../tag").is_err());
+        assert!(release_version("../../tag").is_err());
         Ok(())
     }
     #[test]
     fn signed_manifest_authenticates_exact_bytes_and_semantic_version() -> TestResult {
         let bytes = serde_json::to_vec(&manifest(b"fixture", "x86_64-unknown-linux-gnu"))?;
-        let parsed = verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier)?;
-        assert!(parsed.newer_than("9.9.99")?);
-        assert!(!parsed.newer_than("10.0.0")?);
-        assert!(parsed.newer_than("9.10.0-rc.1")?);
+        let parsed = verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier)?;
+        assert!(parsed.is_newer_than(&installed_version("9.9.99")?));
+        assert!(!parsed.is_newer_than(&installed_version("10.0.0")?));
+        assert!(parsed.is_newer_than(&installed_version("9.10.0-rc.1")?));
         let mut tampered = bytes.clone();
         tampered.push(b' ');
-        assert!(verify_manifest(&tampered, &sign(&bytes), &OfflineVerifier).is_err());
-        assert!(verify_manifest(&bytes, &[], &OfflineVerifier).is_err());
-        assert!(verify_manifest(&bytes, b"invalid bundle", &OfflineVerifier).is_err());
-        let mut unsupported = serde_json::to_value(parsed)?;
+        assert!(verify_manifest(&tampered, &sign(&bytes), None, &OfflineVerifier).is_err());
+        assert!(verify_manifest(&bytes, &[], None, &OfflineVerifier).is_err());
+        assert!(verify_manifest(&bytes, b"invalid bundle", None, &OfflineVerifier).is_err());
+        let mut unsupported = serde_json::to_value(parsed.cache_record)?;
         unsupported["schema_version"] = 2.into();
         let bytes = serde_json::to_vec(&unsupported)?;
-        assert!(verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier).is_err());
+        assert!(verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier).is_err());
         assert!(release_version("1.0.0/../../payload").is_err());
         assert!(release_version("1.0.0-rc.1").is_ok());
         assert!(installed_version("1.0.0-rc.1").is_ok());
@@ -826,7 +976,7 @@ mod tests {
         ] {
             manifest.version = candidate.into();
             assert_eq!(
-                manifest.newer_than(current)?,
+                verified(&manifest)?.is_newer_than(&installed_version(current)?),
                 newer,
                 "{candidate} vs {current}"
             );
@@ -847,12 +997,21 @@ mod tests {
             {"tag_name":"beankeeper-desktop-v0.2.0-rc.10","draft":false,"prerelease":true},
             {"tag_name":"beankeeper-desktop-v0.2.0-rc.2","draft":false,"prerelease":true}
         ]))?;
-        assert_eq!(select_release(&releases, "0.1.0-rc.1")?, "0.2.0-rc.10");
-        assert_eq!(select_release(&releases, "0.1.0")?, "0.1.0");
-        assert_eq!(select_release(&releases[7..], "0.1.0-rc.1")?, "0.2.0-rc.10");
-        assert!(select_release(&releases[7..], "0.1.0").is_err());
-        assert!(select_release(&[], "0.1.0-rc.1").is_err());
-        assert!(select_release(&releases, "invalid").is_err());
+        assert_eq!(
+            select_release(&releases, &installed_version("0.1.0-rc.1")?)?.to_string(),
+            "0.2.0-rc.10"
+        );
+        assert_eq!(
+            select_release(&releases, &installed_version("0.1.0")?)?.to_string(),
+            "0.1.0"
+        );
+        assert_eq!(
+            select_release(&releases[7..], &installed_version("0.1.0-rc.1")?)?.to_string(),
+            "0.2.0-rc.10"
+        );
+        assert!(select_release(&releases[7..], &installed_version("0.1.0")?).is_err());
+        assert!(select_release(&[], &installed_version("0.1.0-rc.1")?).is_err());
+        assert!(installed_version("invalid").is_err());
         Ok(())
     }
 
@@ -881,7 +1040,7 @@ mod tests {
             };
             let mut urls = Vec::new();
             let fetched = fetch_manifest(
-                current,
+                &installed_version(current)?,
                 |url, limit| {
                     assert_eq!(limit, MAX_METADATA);
                     urls.push(url.to_owned());
@@ -894,7 +1053,7 @@ mod tests {
                 },
                 &OfflineVerifier,
             )?;
-            assert_eq!(fetched.version, version);
+            assert_eq!(fetched.version.to_string(), version);
             let endpoint = if current.contains("-rc.") {
                 format!("{RELEASE_API}?per_page=100&")
             } else {
@@ -904,14 +1063,18 @@ mod tests {
                 urls,
                 [
                     format!("{endpoint}version={current}&os={}", std::env::consts::OS),
-                    asset_url(version, "update-manifest.json"),
-                    asset_url(version, "update-manifest.json.sigstore"),
+                    asset_url(&release_version(version)?, "update-manifest.json"),
+                    asset_url(&release_version(version)?, "update-manifest.json.sigstore"),
                 ]
             );
             let checked_at = now();
-            let result = check_with(&path, false, checked_at, env!("CARGO_PKG_VERSION"), || {
-                Ok(fetched)
-            })?;
+            let result = check_with(
+                &path,
+                UpdateChecks::Enabled,
+                checked_at,
+                env!("CARGO_PKG_VERSION"),
+                |_| Ok(fetched),
+            )?;
             assert_eq!(
                 read_cache(&path, env!("CARGO_PKG_VERSION"))?
                     .manifest
@@ -922,10 +1085,10 @@ mod tests {
             assert_eq!(
                 check_with(
                     &path,
-                    false,
+                    UpdateChecks::Enabled,
                     checked_at + 1,
                     env!("CARGO_PKG_VERSION"),
-                    || panic!("daily cache ignored")
+                    |_| panic!("daily cache ignored")
                 )?,
                 result
             );
@@ -939,16 +1102,26 @@ mod tests {
         let mut manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
         manifest.version = "0.1.0-rc.2".into();
         let bytes = serde_json::to_vec(&manifest)?;
-        for (bundle, expected) in [
-            (sign(&bytes), "manifest version does not match release tag"),
-            (Vec::new(), "Sigstore verification failed"),
-            (b"invalid bundle".to_vec(), "Sigstore verification failed"),
+        for (tag, bundle, expected) in [
+            (
+                "0.1.0-rc.1",
+                sign(&bytes),
+                "manifest version does not match release tag",
+            ),
+            ("0.1.0-rc.2", Vec::new(), "Sigstore verification failed"),
+            (
+                "0.1.0-rc.2",
+                b"invalid bundle".to_vec(),
+                "Sigstore verification failed",
+            ),
         ] {
             let result = fetch_manifest(
-                "0.1.0-rc.1",
+                &installed_version("0.1.0-rc.1")?,
                 |url, _| {
                     if url.starts_with(RELEASE_API) {
-                        Ok(br#"[{"tag_name":"beankeeper-desktop-v0.1.0-rc.1","draft":false,"prerelease":true}]"#.to_vec())
+                        Ok(serde_json::to_vec(
+                            &serde_json::json!([{ "tag_name": format!("{TAG_PREFIX}{tag}"), "draft": false, "prerelease": true }]),
+                        )?)
                     } else if url.ends_with(".sigstore") {
                         Ok(bundle.clone())
                     } else {
@@ -959,7 +1132,11 @@ mod tests {
             );
             assert!(result.is_err_and(|error| error.to_string().contains(expected)));
         }
-        let command = cosign_command(Path::new("archive"), Path::new("bundle"), "0.1.0-rc.2")?;
+        let command = cosign_command(
+            Path::new("archive"),
+            Path::new("bundle"),
+            &release_version("0.1.0-rc.2")?,
+        );
         assert!(command.get_args().any(|arg| arg == format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.2").as_str()));
         Ok(())
     }
@@ -971,7 +1148,7 @@ mod tests {
         let bytes = br#"{"last_attempt":1795226804,"manifest":null,"message":"update download failed; check connectivity and retry after the daily interval"}"#;
         fs::write(&path, bytes)?;
         assert_eq!(
-            status(&path, false)?,
+            status(&path, UpdateChecks::Enabled)?,
             "Updates have not been checked. Run `bk update-check`."
         );
         assert_eq!(fs::read(&path)?, bytes);
@@ -1004,25 +1181,31 @@ mod tests {
                 let bytes = serde_json::to_vec(&cache)?;
                 fs::write(&path, &bytes)?;
                 assert_eq!(
-                    status_with(&path, false, current)?,
+                    status_with(&path, UpdateChecks::Enabled, current)?,
                     "Updates have not been checked. Run `bk update-check`."
                 );
                 assert_eq!(fs::read(&path)?, bytes);
 
-                let result = check_with(&path, false, attempted_at + 1, current, || {
-                    let pending = read_cache(&path, current)?;
-                    assert_eq!(pending.desktop_version, current);
-                    assert_eq!(pending.message, "Update check did not complete.");
-                    Ok(cached_manifest)
-                })?;
+                let result = check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    attempted_at + 1,
+                    current,
+                    |_| {
+                        let pending = read_cache(&path, current)?;
+                        assert_eq!(pending.desktop_version, current);
+                        assert_eq!(pending.message, "Update check did not complete.");
+                        verified(&cached_manifest)
+                    },
+                )?;
                 assert!(result.starts_with("Desktop is up to date."));
-                assert_eq!(status_with(&path, false, current)?, result);
+                assert_eq!(status_with(&path, UpdateChecks::Enabled, current)?, result);
                 let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
                 assert_eq!(persisted["desktop_version"], current);
                 assert_eq!(persisted["last_attempt"], attempted_at + 1);
                 for time in [attempted_at, attempted_at + 2, attempted_at + DAY] {
                     assert_eq!(
-                        check_with(&path, false, time, current, || panic!(
+                        check_with(&path, UpdateChecks::Enabled, time, current, |_| panic!(
                             "same version retried within a day"
                         ))?,
                         result
@@ -1039,22 +1222,30 @@ mod tests {
         let path = directory.path().join("updates.json");
         let attempted_at = 1_795_226_804;
         for current in ["0.1.0-rc.1", "0.1.0-rc.7", "0.1.0", "0.2.0-rc.1"] {
-            let result = check_with(&path, false, attempted_at, current, || {
+            let result = check_with(&path, UpdateChecks::Enabled, attempted_at, current, |_| {
                 Err(UpdateError::Network)
             })?;
             assert!(result.starts_with("Could not check for updates:"));
             assert_eq!(read_cache(&path, current)?.desktop_version, current);
             assert!(read_cache(&path, current)?.manifest.is_none());
             assert_eq!(
-                check_with(&path, false, attempted_at + 1, current, || panic!(
-                    "failed check retried within a day"
-                ))?,
+                check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    attempted_at + 1,
+                    current,
+                    |_| panic!("failed check retried within a day")
+                )?,
                 result
             );
             assert!(
-                check_with(&path, false, attempted_at + DAY, current, || {
-                    Err(UpdateError::Signature)
-                })?
+                check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    attempted_at + DAY,
+                    current,
+                    |_| { Err(UpdateError::Signature) }
+                )?
                 .contains("Sigstore verification failed")
             );
         }
@@ -1066,16 +1257,16 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("updates.json");
         assert_eq!(
-            status(&path, false)?,
+            status(&path, UpdateChecks::Enabled)?,
             "Updates have not been checked. Run `bk update-check`."
         );
         assert!(!path.exists());
         fs::write(&path, b"invalid cache")?;
         assert_eq!(
-            status(&path, true)?,
+            status(&path, UpdateChecks::Disabled)?,
             "Automatic update checks are disabled."
         );
-        assert!(status(&path, false).is_err());
+        assert!(status(&path, UpdateChecks::Enabled).is_err());
         Ok(())
     }
 
@@ -1109,10 +1300,10 @@ mod tests {
         older.version = "0.0.0".into();
         let cases = [
             (
-                Ok(available),
+                verified(&available),
                 "Desktop 9.10.0 is available. Run `bk self-update`.",
             ),
-            (Ok(older), "Desktop is up to date."),
+            (verified(&older), "Desktop is up to date."),
             (
                 Err(UpdateError::Http(reqwest::StatusCode::NOT_FOUND)),
                 "Could not check for updates: the release file was not found (HTTP 404). Checks run at most once per day.",
@@ -1139,14 +1330,24 @@ mod tests {
                     .format("%Y-%m-%d %H:%M:%S")
             );
             assert_eq!(
-                check_with(&path, false, now, env!("CARGO_PKG_VERSION"), || result)?,
+                check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    now,
+                    env!("CARGO_PKG_VERSION"),
+                    |_| result
+                )?,
                 expected
             );
-            assert_eq!(status(&path, false)?, expected);
+            assert_eq!(status(&path, UpdateChecks::Enabled)?, expected);
             assert_eq!(
-                check_with(&path, false, now + 1, env!("CARGO_PKG_VERSION"), || panic!(
-                    "cached status fetched again"
-                ))?,
+                check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    now + 1,
+                    env!("CARGO_PKG_VERSION"),
+                    |_| panic!("cached status fetched again")
+                )?,
                 expected
             );
         }
@@ -1158,28 +1359,44 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("state/updates.json");
         assert!(
-            check_with(&path, true, DAY, env!("CARGO_PKG_VERSION"), || panic!(
-                "opt-out contacted network"
-            ))?
+            check_with(
+                &path,
+                UpdateChecks::Disabled,
+                DAY,
+                env!("CARGO_PKG_VERSION"),
+                |_| panic!("opt-out contacted network")
+            )?
             .contains("disabled")
         );
         assert!(!path.exists());
-        let result = check_with(&path, false, DAY, env!("CARGO_PKG_VERSION"), || {
-            Ok(manifest(b"fixture", "x86_64-unknown-linux-gnu"))
-        })?;
+        let result = check_with(
+            &path,
+            UpdateChecks::Enabled,
+            DAY,
+            env!("CARGO_PKG_VERSION"),
+            |_| verified(&manifest(b"fixture", "x86_64-unknown-linux-gnu")),
+        )?;
         assert!(result.contains("9.10.0 is available"));
         for now in [DAY, DAY + 1, 1, 2 * DAY - 1] {
             assert!(
-                check_with(&path, false, now, env!("CARGO_PKG_VERSION"), || panic!(
-                    "cache contacted network"
-                ))?
+                check_with(
+                    &path,
+                    UpdateChecks::Enabled,
+                    now,
+                    env!("CARGO_PKG_VERSION"),
+                    |_| panic!("cache contacted network")
+                )?
                 .contains("9.10.0 is available")
             );
         }
         assert!(
-            check_with(&path, false, 2 * DAY, env!("CARGO_PKG_VERSION"), || Err(
-                UpdateError::Network
-            ))?
+            check_with(
+                &path,
+                UpdateChecks::Enabled,
+                2 * DAY,
+                env!("CARGO_PKG_VERSION"),
+                |_| Err(UpdateError::Network)
+            )?
             .contains("Could not check for updates: the release server could not be reached")
         );
         assert!(
@@ -1187,13 +1404,21 @@ mod tests {
                 .manifest
                 .is_none()
         );
-        check_with(&path, false, 2 * DAY + 1, env!("CARGO_PKG_VERSION"), || {
-            panic!("failed check was retried early")
-        })?;
+        check_with(
+            &path,
+            UpdateChecks::Enabled,
+            2 * DAY + 1,
+            env!("CARGO_PKG_VERSION"),
+            |_| panic!("failed check was retried early"),
+        )?;
         assert!(
-            check_with(&path, true, 3 * DAY, env!("CARGO_PKG_VERSION"), || panic!(
-                "opt-out ignored"
-            ))?
+            check_with(
+                &path,
+                UpdateChecks::Disabled,
+                3 * DAY,
+                env!("CARGO_PKG_VERSION"),
+                |_| panic!("opt-out ignored")
+            )?
             .contains("disabled")
         );
         Ok(())
@@ -1204,9 +1429,13 @@ mod tests {
         let path = directory.path().join("updates.json");
         fs::write(path.with_extension("lock"), b"")?;
         assert!(
-            check_with(&path, false, DAY, env!("CARGO_PKG_VERSION"), || panic!(
-                "concurrent check contacted network"
-            ))?
+            check_with(
+                &path,
+                UpdateChecks::Enabled,
+                DAY,
+                env!("CARGO_PKG_VERSION"),
+                |_| panic!("concurrent check contacted network")
+            )?
             .contains("in progress")
         );
         Ok(())
@@ -1217,10 +1446,15 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("bk");
         fs::write(&destination, b"old executable")?;
-        let target = "x86_64-unknown-linux-gnu";
-        let archive = archive("9.10.0", target);
-        let manifest = manifest(&archive, target);
-        let checksums = format!("{}  {}\n", sha256(&archive), archive_name("9.10.0", target));
+        let target = Target::LinuxX64;
+        let archive = archive("9.10.0", target.triple());
+        let wire = manifest(&archive, target.triple());
+        let manifest = authorize(&wire, "9.9.0")?;
+        let checksums = format!(
+            "{}  {}\n",
+            sha256(&archive),
+            archive_name(&release_version("9.10.0")?, target)
+        );
         let bundle = sign(&archive);
         let checksums_bundle = sign(checksums.as_bytes());
         for (artifact_signature, checksum_signature, list) in [
@@ -1249,7 +1483,11 @@ mod tests {
         }
         // Correctly signed checksum lists can still disagree with the artifact.
         for list in [
-            format!("{}  {}\n", "0".repeat(64), archive_name("9.10.0", target)),
+            format!(
+                "{}  {}\n",
+                "0".repeat(64),
+                archive_name(&release_version("9.10.0")?, target)
+            ),
             checksums.repeat(2),
             String::new(),
         ] {
@@ -1290,18 +1528,62 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn install_accepts_either_case_for_signed_hexadecimal_checksums() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("bk");
+        let target = Target::LinuxX64;
+        let archive = archive("9.10.0", target.triple());
+        let mut wire = manifest(&archive, target.triple());
+        let artifact = wire
+            .artifacts
+            .get_mut(target.triple())
+            .ok_or("fixture artifact")?;
+        artifact.sha256.make_ascii_uppercase();
+        let name = archive_name(&release_version("9.10.0")?, target);
+        let checksums = format!("{}  {name}\n", artifact.sha256);
+        let release = authorize(&wire, "9.9.0")?;
+        install(
+            &release,
+            target,
+            ReleaseFiles {
+                archive: &archive,
+                bundle: &sign(&archive),
+                checksums: checksums.as_bytes(),
+                checksums_bundle: &sign(checksums.as_bytes()),
+            },
+            &destination,
+            &OfflineVerifier,
+        )?;
+        assert_eq!(fs::read(&destination)?, b"fixture executable");
+        Ok(())
+    }
+
+    #[test]
+    fn release_needs_both_a_newer_version_and_a_covered_release_date() -> TestResult {
+        let mut wire = manifest(b"fixture", Target::LinuxX64.triple());
+        assert!(authorize(&wire, "9.9.0").is_ok());
+        assert!(authorize(&wire, "9.10.0").is_err());
+        wire.released_at = "2030-01-01T00:00:00Z".parse()?;
+        assert!(authorize(&wire, "9.9.0").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn rc_release_installs_only_after_manifest_archive_and_checksum_verification() -> TestResult {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("bk");
         fs::write(&destination, b"old executable")?;
         let version = "0.1.0-rc.10";
-        let target = "x86_64-unknown-linux-gnu";
-        let archive = archive(version, target);
-        let mut manifest = manifest(&archive, target);
+        let target = Target::LinuxX64;
+        let archive = archive(version, target.triple());
+        let mut manifest = manifest(&archive, target.triple());
         manifest.version = version.into();
-        let bytes = serde_json::to_vec(&manifest)?;
-        let manifest = verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier)?;
-        let checksums = format!("{}  {}\n", sha256(&archive), archive_name(version, target));
+        let manifest = authorize(&manifest, "0.1.0-rc.2")?;
+        let checksums = format!(
+            "{}  {}\n",
+            sha256(&archive),
+            archive_name(&release_version(version)?, target)
+        );
         for bundle in [b"invalid".to_vec(), sign(&archive)] {
             let result = install(
                 &manifest,
@@ -1330,13 +1612,17 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("bk");
         fs::write(&destination, b"old executable")?;
-        let target = "x86_64-unknown-linux-gnu";
+        let target = Target::LinuxX64;
         for bytes in [
             b"invalid tar".to_vec(),
             archive("9.10.0", "aarch64-apple-darwin"),
         ] {
-            let manifest = manifest(&bytes, target);
-            let list = format!("{}  {}\n", sha256(&bytes), archive_name("9.10.0", target));
+            let manifest = authorize(&manifest(&bytes, target.triple()), "9.9.0")?;
+            let list = format!(
+                "{}  {}\n",
+                sha256(&bytes),
+                archive_name(&release_version("9.10.0")?, target)
+            );
             assert!(
                 install(
                     &manifest,
@@ -1369,7 +1655,7 @@ mod tests {
         let mut output = NamedTempFile::new()?;
         extract_binary(
             &bytes,
-            "x86_64-pc-windows-msvc",
+            Target::WindowsX64,
             "bk-9.10.0-x86_64-pc-windows-msvc/bk.exe",
             &mut output,
         )?;

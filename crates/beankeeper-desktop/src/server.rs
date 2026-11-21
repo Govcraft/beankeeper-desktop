@@ -16,25 +16,36 @@ use beankeeper_cli::{
 use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
-    cli::ServeOptions,
     navigation::{self, Navigation},
     onboarding::DesktopTools,
     pairing::{self, PairingState},
     review, ui,
 };
 
+/// Address accepted by Desktop's local/remote listener policy.
+#[derive(Debug, Clone, Copy)]
+pub struct ValidatedBind(SocketAddr);
+
+impl ValidatedBind {
+    /// The accepted socket address.
+    #[must_use]
+    pub fn address(self) -> SocketAddr {
+        self.0
+    }
+}
+
 /// Refuse remote listeners unless explicitly requested.
 ///
 /// # Errors
 /// Returns an actionable error for a non-loopback bind without consent.
-pub fn validate_bind(bind: SocketAddr, allow_remote: bool) -> Result<(), DesktopError> {
+pub fn validate_bind(bind: SocketAddr, allow_remote: bool) -> Result<ValidatedBind, DesktopError> {
     if bind.ip().is_loopback() && !ui_loopback(bind.ip()) {
         return Err(DesktopError::UnsupportedLoopback(bind));
     }
     if !bind.ip().is_loopback() && !allow_remote {
         return Err(DesktopError::UnsafeBind(bind));
     }
-    Ok(())
+    Ok(ValidatedBind(bind))
 }
 
 pub(crate) fn ui_loopback(ip: IpAddr) -> bool {
@@ -112,10 +123,9 @@ pub fn application(
 ///
 /// # Errors
 /// Returns bind, runtime, passphrase, ledger or server failures.
-pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
-    validate_bind(options.bind, options.allow_remote)?;
-    let listener = std::net::TcpListener::bind(options.bind)?;
-    serve_listener(cli, options, listener)
+pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), DesktopError> {
+    let listener = std::net::TcpListener::bind(bind.address())?;
+    serve_bound(cli, listener, read_only)
 }
 
 /// Host an already-bound loopback socket, preserving port fallback without a bind race.
@@ -124,10 +134,17 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
 /// Returns runtime, ledger or server startup failures.
 pub(crate) fn serve_listener(
     cli: &Cli,
-    options: ServeOptions,
     listener: std::net::TcpListener,
 ) -> Result<(), DesktopError> {
-    validate_bind(listener.local_addr()?, options.allow_remote)?;
+    validate_bind(listener.local_addr()?, false)?;
+    serve_bound(cli, listener, false)
+}
+
+fn serve_bound(
+    cli: &Cli,
+    listener: std::net::TcpListener,
+    read_only: bool,
+) -> Result<(), DesktopError> {
     listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -141,11 +158,11 @@ pub(crate) fn serve_listener(
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
-    let app = application(cli, options.read_only, bound, config, pairing)?;
+    let app = application(cli, read_only, bound, config, pairing)?;
     if let Ok(directory) = crate::product::state_dir() {
         crate::updates::background(
             directory.join("updates.json"),
-            crate::product::updates_disabled(),
+            crate::product::update_checks(),
         );
     }
     eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
@@ -154,7 +171,7 @@ pub(crate) fn serve_listener(
         "Beankeeper Desktop listening on {} (MCP: /mcp)",
         local_url(bound)
     );
-    if !options.bind.ip().is_loopback() {
+    if !bound.ip().is_loopback() {
         eprintln!(
             "Remote listener enabled: plaintext HTTP, no TLS; Host/Origin remain restricted to localhost, 127.0.0.1 and [::1]"
         );
