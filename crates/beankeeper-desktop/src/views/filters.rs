@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::links::{
     LinkError,
-    values::{Clearance, Currency, Date, MinorAmount, Offset},
+    values::{AccountSelection, Clearance, Currency, Date, MinorAmount, Offset},
 };
 
 use super::{ViewError, append_url_param, encode};
@@ -25,6 +25,9 @@ pub(crate) struct ViewQuery {
     pub status: Option<String>,
     pub offset: Option<i64>,
     pub currency: Option<String>,
+    pub cash_account: Option<String>,
+    pub receivable_account: Option<String>,
+    pub payable_account: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -137,6 +140,9 @@ pub(crate) struct Filters {
     pub(crate) dates: DateBounds,
     pub(crate) comparison: Option<Comparison>,
     pub(crate) currency: Option<Currency>,
+    pub(crate) cash_account: Option<AccountSelection>,
+    pub(crate) receivable_account: Option<AccountSelection>,
+    pub(crate) payable_account: Option<AccountSelection>,
     amounts: AmountBounds,
     pub(super) search: Option<Search>,
     pub(super) status: Option<Clearance>,
@@ -187,6 +193,9 @@ impl ViewQuery {
                 .map_err(|LinkError(message)| ViewError::Invalid(message))?
                 .unwrap_or_default(),
             currency,
+            cash_account: parse_optional(self.cash_account)?,
+            receivable_account: parse_optional(self.receivable_account)?,
+            payable_account: parse_optional(self.payable_account)?,
         })
     }
 }

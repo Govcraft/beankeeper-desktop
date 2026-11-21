@@ -17,8 +17,8 @@ use clap::Parser;
 use serde::Deserialize;
 
 use crate::{
-    links::values::{Currency, SCAN_LIMIT},
-    links::{ACCOUNTS, HOME, LedgerRoute, REPORTS, REVIEW, ReportKind, TRANSACTIONS},
+    links::values::{AccountSelection, Currency, Date, SCAN_LIMIT},
+    links::{ACCOUNTS, HOME, LedgerRoute, REPORTS, REVIEW, ReportKind, SUMMARY, TRANSACTIONS},
     markup::{Attribute, Markup, markup, write_markup},
     money,
 };
@@ -230,15 +230,28 @@ fn company_form(
 
 pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, ViewError> {
     let route = LedgerRoute::parse(path).map_err(|_| ViewError::NotFound)?;
-    if matches!(route, LedgerRoute::Register)
-        && matches!(query.comparison, Some(Comparison::AsOf(_)))
-    {
-        return Err(ViewError::Invalid(
-            "Register comparison requires compare_from and compare_to.",
-        ));
+    if matches!(query.comparison, Some(Comparison::AsOf(_))) {
+        match route {
+            LedgerRoute::Register => {
+                return Err(ViewError::Invalid(
+                    "Register comparison requires compare_from and compare_to.",
+                ));
+            }
+            LedgerRoute::Summary => {
+                return Err(ViewError::Invalid(
+                    "Financial summary comparison requires compare_from and compare_to.",
+                ));
+            }
+            _ => {}
+        }
     }
     let (title, description, nav) = match route {
         LedgerRoute::Home => ("Your books", "A snapshot of your recorded finances.", HOME),
+        LedgerRoute::Summary => (
+            "Financial summary",
+            "Recorded balances and changes over the selected periods.",
+            HOME,
+        ),
         LedgerRoute::Accounts => (
             "Accounts",
             "Browse companies and their complete chart of accounts.",
@@ -264,7 +277,7 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         let note = markup!(
             "<p class=\"empty\">No companies yet. Ask your agent to initialize your books and create a company.</p>"
         );
-        let content = if matches!(route, LedgerRoute::Home) {
+        let content = if matches!(route, LedgerRoute::Home | LedgerRoute::Summary) {
             let mut home = markup!(
                 "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>{}</section>",
                 note
@@ -287,13 +300,18 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
     if let Some(account) = query.account.as_deref() {
         db::get_account(db.conn(), company, account)?;
     }
-    let mut content = if matches!(route, LedgerRoute::Home) {
+    let mut content = if matches!(route, LedgerRoute::Home | LedgerRoute::Summary) {
         Markup::default()
     } else {
         company_form(&companies, company, query, path)
     };
     match route {
-        LedgerRoute::Home => financial_snapshot(db, company, query, &mut content)?,
+        LedgerRoute::Home => {
+            financial_snapshot(db, company, query, SnapshotView::Home, &mut content)?
+        }
+        LedgerRoute::Summary => {
+            financial_snapshot(db, company, query, SnapshotView::Detail, &mut content)?
+        }
         LedgerRoute::Accounts => accounts(db, company, query, &mut content)?,
         LedgerRoute::Register => {
             register(db, company, query, RegisterSection::Primary, &mut content)?;
@@ -343,12 +361,58 @@ struct SummaryResponse {
 #[derive(Deserialize)]
 struct SummaryHighlights {
     highlights: Vec<String>,
+    periods: SummaryPeriods,
+}
+
+#[derive(Deserialize)]
+struct SummaryPeriods {
+    current: SummaryPeriod,
+    prior: SummaryPeriod,
+}
+
+#[derive(Deserialize)]
+struct SummaryPeriod {
+    from: Date,
+    to: Date,
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotView {
+    Home,
+    Detail,
+}
+
+impl SnapshotView {
+    fn request(self, query: &Filters, currency: beankeeper::types::Currency) -> SummaryArgs {
+        let mut args = SummaryArgs {
+            currency: Some(currency.code().to_owned()),
+            ..SummaryArgs::default()
+        };
+        if let Self::Detail = self {
+            args.from = query.dates.from().map(|date| date.to_string());
+            args.to = query.dates.to().map(|date| date.to_string());
+            if let Some(comparison) = query.comparison {
+                let bounds = comparison.bounds();
+                args.compare_from = bounds.from().map(|date| date.to_string());
+                args.compare_to = bounds.to().map(|date| date.to_string());
+            }
+            args.cash_account = selected_accounts(query.cash_account.as_ref());
+            args.receivable_account = selected_accounts(query.receivable_account.as_ref());
+            args.payable_account = selected_accounts(query.payable_account.as_ref());
+        }
+        args
+    }
+}
+
+fn selected_accounts(filter: Option<&AccountSelection>) -> Vec<String> {
+    filter.map_or_else(Vec::new, AccountSelection::codes)
 }
 
 fn financial_snapshot(
     db: &Db,
     company: &str,
     query: &Filters,
+    view: SnapshotView,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
     write_markup!(
@@ -363,15 +427,27 @@ fn financial_snapshot(
         Ok(currency) => {
             let cli = Cli::try_parse_from(["bk", "summary"])
                 .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
-            let args = SummaryArgs {
-                currency: Some(currency.code().to_owned()),
-                ..SummaryArgs::default()
-            };
+            let args = view.request(query, currency);
             let result = execute_summary(&cli, db, company, &args)?;
             let summary: SummaryResponse = serde_json::from_value(result)
                 .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
+            let headlines = match view {
+                SnapshotView::Home => 5,
+                SnapshotView::Detail => {
+                    let SummaryPeriods { current, prior } = summary.data.periods;
+                    write_markup!(
+                        html,
+                        "<p>{} through {}, compared with {} through {}.</p>",
+                        current.from,
+                        current.to,
+                        prior.from,
+                        prior.to,
+                    );
+                    summary.data.highlights.len()
+                }
+            };
             write_markup!(html, "<ul>");
-            for highlight in summary.data.highlights.iter().take(5) {
+            for highlight in summary.data.highlights.iter().take(headlines) {
                 write_markup!(html, "<li>{}</li>", highlight);
             }
             write_markup!(html, "</ul>");
@@ -393,6 +469,7 @@ fn snapshot_links(html: &mut Markup, company: Option<&str>, currency: Option<&Cu
         "<p>You can ask your agent any question about these books.</p><section aria-labelledby=\"detail-title\"><h2 id=\"detail-title\">View details</h2><ul>"
     );
     for (label, path, select_currency) in [
+        ("Financial summary", SUMMARY, true),
         ("Accounts", ACCOUNTS, false),
         ("Transactions", TRANSACTIONS, true),
         ("Reports", REPORTS, true),

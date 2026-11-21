@@ -210,6 +210,54 @@ impl fmt::Display for Threshold {
 
 string_wire!(Threshold);
 
+/// Exact account codes selected by an upstream report, accepting the old scalar form.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum AccountSelection {
+    One(AccountCode),
+    Multiple(Vec<AccountCode>),
+}
+
+impl AccountSelection {
+    fn as_slice(&self) -> &[AccountCode] {
+        match self {
+            Self::One(account) => std::slice::from_ref(account),
+            Self::Multiple(accounts) => accounts,
+        }
+    }
+
+    pub(crate) fn codes(&self) -> Vec<String> {
+        self.as_slice().iter().map(ToString::to_string).collect()
+    }
+}
+
+impl FromStr for AccountSelection {
+    type Err = LinkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if !value.contains(',') {
+            return value.trim().parse().map(Self::One);
+        }
+        value
+            .split(',')
+            .map(|code| code.trim().parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self::Multiple)
+    }
+}
+
+impl fmt::Display for AccountSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, account) in self.as_slice().iter().enumerate() {
+            if index > 0 {
+                f.write_str(",")?;
+            }
+            account.fmt(f)?;
+        }
+        Ok(())
+    }
+}
+
 /// A positive upstream SQLite transaction ID, retaining existing link addresses.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "i64", into = "i64")]
