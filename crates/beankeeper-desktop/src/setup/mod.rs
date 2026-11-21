@@ -174,7 +174,14 @@ pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
         Some(path) => Box::new(FileSecretStore::new(path.clone())),
         None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
     };
-    run_with_store(cli, options, store.as_ref(), None)
+    run_with_store(cli, options, store.as_ref(), ClientRegistration::Standalone)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ClientRegistration<'a> {
+    Standalone,
+    Managed { previous_executable: &'a Path },
+    Skip,
 }
 
 /// Provision service books without prompting, printing secrets or opening a browser.
@@ -186,7 +193,7 @@ pub(crate) fn run_service(
     cli: &mut Cli,
     home: &Path,
     bind: SocketAddr,
-    previous_executable: &Path,
+    registration: ClientRegistration<'_>,
     file_store: bool,
 ) -> Result<(), SetupError> {
     let mut options = SetupOptions::from_service(home, bind);
@@ -197,7 +204,7 @@ pub(crate) fn run_service(
         Some(path) => Box::new(FileSecretStore::new(path.clone())),
         None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
     };
-    run_with_store(cli, &options, store.as_ref(), Some(previous_executable))
+    run_with_store(cli, &options, store.as_ref(), registration)
 }
 
 impl SetupOptions {
@@ -223,7 +230,7 @@ fn run_with_store(
     cli: &mut Cli,
     options: &SetupOptions,
     store: &dyn SecretStore,
-    service_executable: Option<&Path>,
+    registration: ClientRegistration<'_>,
 ) -> Result<(), SetupError> {
     crate::server::validate_bind(options.bind, false)?;
     if options.bind.port() == 0 {
@@ -262,9 +269,22 @@ fn run_with_store(
         .unwrap_or_else(|| cli.db.with_extension("recovery.txt"));
     let url = format!("{}mcp", crate::server::local_url(options.bind));
     let executable = std::env::current_exe()?;
-    let plan = match service_executable {
-        Some(previous) => config::prepare_service_configs(&home, &executable, previous)?,
-        None => config::prepare_configs(&home, &executable, &cli.db, &token_file, &url)?,
+    let plan = match registration {
+        ClientRegistration::Standalone => Some(config::prepare_configs(
+            &home,
+            &executable,
+            &cli.db,
+            &token_file,
+            &url,
+        )?),
+        ClientRegistration::Managed {
+            previous_executable,
+        } => Some(config::prepare_service_configs(
+            &home,
+            &executable,
+            previous_executable,
+        )?),
+        ClientRegistration::Skip => None,
     };
     // Validate output collisions before creating a ledger or storing credentials.
     if !existed
@@ -284,7 +304,11 @@ fn run_with_store(
         cli.db.with_extension("desktop.json"),
         cli.db.with_extension("desktop.log"),
     ];
-    outputs.extend(plan.paths().map(Path::to_path_buf));
+    outputs.extend(
+        plan.iter()
+            .flat_map(config::ConfigPlan::paths)
+            .map(Path::to_path_buf),
+    );
     if let Some(path) = &options.secret_store_file {
         outputs.push(path.clone());
     }
@@ -320,7 +344,9 @@ fn run_with_store(
     let fallback = cli.db.with_extension("passphrase");
     let automatic_file = match store.store(&cli.db, &secret) {
         Ok(()) => None,
-        Err(keychain::KeychainError::Unavailable) if service_executable.is_some() && !existed => {
+        Err(keychain::KeychainError::Unavailable)
+            if !matches!(registration, ClientRegistration::Standalone) && !existed =>
+        {
             FileSecretStore::new(fallback.clone()).store(&cli.db, &secret)?;
             eprintln!("OS secret store unavailable; using a private credential file.");
             Some(fallback)
@@ -363,7 +389,7 @@ fn run_with_store(
         options,
         &token_file,
         &owner_file,
-        service_executable.is_some() && existed,
+        !matches!(registration, ClientRegistration::Standalone) && existed,
     )?;
     let marker = cli.db.with_extension("desktop.json");
     if !marker.exists() || options.secret_store_file.is_some() {
@@ -389,7 +415,10 @@ fn run_with_store(
             private_create(&marker, metadata.to_string().as_bytes())?;
         }
     }
-    let configs = plan.write()?;
+    let configs = match plan {
+        Some(plan) => plan.write()?,
+        None => Vec::new(),
+    };
     println!(
         "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
         cli.db.display(),
@@ -868,7 +897,9 @@ mod tests {
             &mut cli,
             &options,
             &UnavailableStore,
-            Some(&std::env::current_exe()?),
+            ClientRegistration::Managed {
+                previous_executable: &std::env::current_exe()?,
+            },
         )?;
         let marker: serde_json::Value =
             serde_json::from_slice(&fs::read(books.with_extension("desktop.json"))?)?;
@@ -891,7 +922,9 @@ mod tests {
             &mut cli,
             &home,
             "127.0.0.1:8750".parse()?,
-            &std::env::current_exe()?,
+            ClientRegistration::Managed {
+                previous_executable: &std::env::current_exe()?,
+            },
             false,
         )?;
         assert_eq!(fs::read(books.with_extension("recovery.txt"))?, recovery);

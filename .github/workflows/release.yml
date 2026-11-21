@@ -172,6 +172,8 @@ jobs:
           files-folder-filter: exe
       - name: Archive final binary
         run: python scripts/release.py archive --target "$TARGET"
+      - name: Bundle the native Claude Desktop extension
+        run: python scripts/release.py mcpb --target "$TARGET"
       - name: Validate Linux package contents
         if: runner.os == 'Linux'
         run: |
@@ -259,6 +261,7 @@ jobs:
             release/*.pkg
             release/*.zip
             release/*.exe
+            release/*.mcpb
             release/checksums-sha256.txt
             release/update-manifest.json
       - uses: softprops/action-gh-release@v2

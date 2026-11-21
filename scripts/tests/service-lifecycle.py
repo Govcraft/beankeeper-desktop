@@ -25,6 +25,81 @@ def safe_log_tail(path):
     return content[-8000:]
 
 
+def exercise_extension(binary, root, base_env):
+    """Exercise the MCPB launch command with a fresh native service registration."""
+    parent = root / "fresh extension"
+    cache = parent / "Claude cache"
+    cache.mkdir(parents=True)
+    launcher = cache / binary.name
+    shutil.copy2(binary, launcher)
+    env = {
+        **base_env,
+        "BEANKEEPER_SERVICE_DATA_DIR": str(parent / "data"),
+        "BEANKEEPER_DESKTOP_STATE_DIR": str(parent / "state"),
+        "BEANKEEPER_SERVICE_LOG_DIR": str(parent / "logs"),
+    }
+    if os.name == "nt":
+        home = Path(env["USERPROFILE"])
+        claude_desktop = home / "AppData/Roaming/Claude/claude_desktop_config.json"
+    else:
+        home = Path(env["HOME"])
+        support = "Library/Application Support" if sys.platform == "darwin" else ".config"
+        claude_desktop = home / support / "Claude/claude_desktop_config.json"
+    client_configs = (home / ".claude.json", home / ".codex/config.toml", claude_desktop)
+    before = {path: path.read_bytes() if path.exists() else None for path in client_configs}
+
+    def run(executable, *arguments, **kwargs):
+        return subprocess.run(
+            [str(executable), *arguments], env=env, capture_output=True,
+            text=True, encoding="utf-8", timeout=120, **kwargs,
+        )
+
+    requests = [
+        {"id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "extension-ci", "version": "1"},
+        }},
+        {"method": "notifications/initialized"},
+        {"id": 2, "method": "tools/list", "params": {}},
+        {"id": 3, "method": "tools/call", "params": {"name": "setup_status", "arguments": {}}},
+    ]
+    messages = "".join(json.dumps({"jsonrpc": "2.0", **request}) + "\n" for request in requests)
+    try:
+        output = run(launcher, "mcp", "extension", input=messages)
+        assert output.returncode == 0, output.stderr + safe_log_tail(parent / "logs/service.log")
+        replies = {reply["id"]: reply["result"] for reply in map(json.loads, output.stdout.splitlines())}
+        assert replies[1]["serverInfo"]["name"] == "beankeeper"
+        assert "setup_status" in replies[1]["instructions"]
+        assert any(tool["name"] == "setup_status" for tool in replies[2]["tools"])
+        assert not replies[3].get("isError", False)
+        assert replies[3]["structuredContent"]["state"] == "installed"
+        assert replies[3]["structuredContent"]["summary"]
+
+        # Startup points outside the extension cache, allowing the host app to
+        # replace or remove the bundle while the service and books are intact.
+        launcher.unlink()
+        installed = parent / "state" / "claude-extension" / launcher.name
+        assert installed.is_file()
+        output = run(installed, "service", "status", "--json")
+        assert output.returncode == 0, output.stderr
+        status = json.loads(output.stdout)
+        assert status["installed"] and status["running"]
+        books = Path(status["books"])
+        assert books.with_suffix(".recovery.txt").exists()
+        assert not books.read_bytes().startswith(b"SQLite format 3")
+        assert {path: path.read_bytes() if path.exists() else None for path in client_configs} == before
+
+        # An explicitly stopped service must stay stopped on the next launch.
+        stopped = run(installed, "service", "stop")
+        assert stopped.returncode == 0, stopped.stderr
+        output = run(installed, "mcp", "extension", input=messages)
+        assert output.returncode != 0 and "SERVICE_NOT_READY" in output.stderr
+        assert not output.stdout
+        print("Claude extension first launch, MCP tools, durable executable and persistent stop passed")
+    finally:
+        run(binary, "service", "uninstall")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -204,6 +279,7 @@ def main():
             for path, digest in credentials.items():
                 assert fingerprint(path) == digest
             print("Service install, fallback, health, crash restart, persistent stop, upgrade, data preservation and uninstall passed")
+            exercise_extension(binary, root, env)
         finally:
             occupied.close()
             if installed:
