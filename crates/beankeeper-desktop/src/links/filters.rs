@@ -1,6 +1,9 @@
 //! Per-view filter sets. Only deserialization can construct a validated set.
 
-use super::{LinkError, encode_path, fields, values::*};
+use super::{
+    LinkError, REPORTS, REVIEW_PREFIX, ReportKind, TRANSACTION_PREFIX, encode_path, fields,
+    values::*,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::Error};
 
@@ -138,12 +141,12 @@ pub(crate) struct ReviewDetail {
 }
 impl Validated<Transaction> {
     pub(super) fn route(&self) -> String {
-        format!("/transactions/{}", self.0.transaction_id)
+        format!("{TRANSACTION_PREFIX}{}", self.0.transaction_id)
     }
 }
 impl Validated<ReviewDetail> {
     pub(super) fn route(&self) -> String {
-        format!("/review/{}", self.0.proposal_id)
+        format!("{REVIEW_PREFIX}{}", self.0.proposal_id)
     }
 }
 
@@ -271,20 +274,20 @@ pub(crate) enum ReportAddress {
 impl ReportSelector {
     pub(super) fn path(&self) -> Result<String, &'static str> {
         let (route, fields) = match self {
-            Self::Catalog(state) => ("/reports", fields(state)?),
+            Self::Catalog(state) => (REPORTS, fields(state)?),
             Self::Selected(report) => match report {
                 ReportAddress::IncomeStatement(state) => {
-                    ("/reports/income-statement", fields(state)?)
+                    (ReportKind::Income.path(), fields(state)?)
                 }
-                ReportAddress::BalanceSheet(state) => ("/reports/balance-sheet", fields(state)?),
-                ReportAddress::CashFlow(state) => ("/reports/cash-flow", fields(state)?),
-                ReportAddress::Trend(state) => ("/reports/trend", fields(state)?),
-                ReportAddress::BudgetVariance(state) => {
-                    ("/reports/budget-variance", fields(state)?)
+                ReportAddress::BalanceSheet(state) => (ReportKind::Balance.path(), fields(state)?),
+                ReportAddress::CashFlow(state) => (ReportKind::Cash.path(), fields(state)?),
+                ReportAddress::Trend(state) => (ReportKind::Trend.path(), fields(state)?),
+                ReportAddress::BudgetVariance(state) => (ReportKind::Budget.path(), fields(state)?),
+                ReportAddress::ScheduleC(state) => (ReportKind::Schedule.path(), fields(state)?),
+                ReportAddress::Vendor1099(state) => (ReportKind::Vendor.path(), fields(state)?),
+                ReportAddress::Reconciliation(state) => {
+                    (ReportKind::Reconciliation.path(), fields(state)?)
                 }
-                ReportAddress::ScheduleC(state) => ("/reports/schedule-c", fields(state)?),
-                ReportAddress::Vendor1099(state) => ("/reports/1099", fields(state)?),
-                ReportAddress::Reconciliation(state) => ("/reconciliation", fields(state)?),
             },
         };
         encode_path(route.into(), fields)

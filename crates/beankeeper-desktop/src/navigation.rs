@@ -30,8 +30,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 
-use crate::pairing::{
-    self, AgentKey, BrowserSessionId, HumanSession, HumanWrite, PairingError, PairingState,
+use crate::{
+    links::{LocalViewUrl, ViewAddress},
+    pairing::{
+        self, AgentKey, BrowserSessionId, HumanSession, HumanWrite, PairingError, PairingState,
+    },
 };
 
 const TAB_LIFETIME: Duration = Duration::from_secs(3);
@@ -52,13 +55,13 @@ impl TabId {
 #[schemars(deny_unknown_fields)]
 struct Show {
     #[serde(flatten)]
-    address: crate::links::ViewAddress,
+    address: ViewAddress,
     tab_id: Option<TabId>,
 }
 
 impl Show {
-    fn url(&self) -> Result<String, &'static str> {
-        self.address.path()
+    fn url(&self) -> Result<LocalViewUrl, &'static str> {
+        self.address.local_url()
     }
 }
 
@@ -77,14 +80,102 @@ struct Status {
 
 struct Tab {
     session: BrowserSessionId,
-    url: String,
+    url: LocalViewUrl,
     title: String,
     targets: Vec<String>,
     seen: Instant,
-    pending: VecDeque<(AgentKey, Value)>,
+    pending: VecDeque<(AgentKey, UiEvent)>,
     connected: bool,
     epoch: u64,
     highlight: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum UiEvent {
+    Navigate { url: LocalViewUrl },
+    Highlight { target: String },
+    Heartbeat,
+}
+
+#[derive(Serialize)]
+struct EventFrame {
+    #[serde(flatten)]
+    event: UiEvent,
+    agent_associated: bool,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum NavigationFailure {
+    Validation,
+    ViewUnavailableOrValidation,
+    AmbiguousTab,
+    NoConnectedTab,
+    TabBusy,
+}
+
+#[derive(Clone, Copy)]
+enum NavigationTool {
+    ShowView,
+    Highlight,
+    Status,
+    GetLink,
+}
+
+impl NavigationTool {
+    const ALL: [Self; 4] = [Self::ShowView, Self::Highlight, Self::Status, Self::GetLink];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ShowView => "ui_show_view",
+            Self::Highlight => "ui_highlight",
+            Self::Status => "ui_status",
+            Self::GetLink => "ui_get_link",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    fn definition(self) -> HostTool {
+        let (description, schema, capability, effect) = match self {
+            Self::ShowView => (
+                "Queue a Desktop view with URL-restorable filters. Use ui_status to choose a tab.",
+                schemars::schema_for!(Show),
+                Capability::Navigate,
+                HostToolEffect::Mutation,
+            ),
+            Self::Highlight => (
+                "Highlight an existing DOM ID from ui_status targets. A missing target is a no-op.",
+                schemars::schema_for!(Highlight),
+                Capability::Navigate,
+                HostToolEffect::Mutation,
+            ),
+            Self::Status => (
+                "Report paired and live tabs, confirmed view URLs, highlight targets and a pairing link.",
+                schemars::schema_for!(Status),
+                Capability::Navigate,
+                HostToolEffect::ReadOnly,
+            ),
+            Self::GetLink => (
+                "Return an optional Desktop detail URL after answering in words. Does not navigate, open a browser or require pairing. Uses the same view_id/state as ui_show_view.",
+                schemars::schema_for!(ViewAddress),
+                Capability::Read,
+                HostToolEffect::ReadOnly,
+            ),
+        };
+        HostTool {
+            tool: Tool::new(
+                self.name(),
+                description,
+                schema.to_value().as_object().cloned().unwrap_or_default(),
+            ),
+            capability,
+            effect,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -109,7 +200,7 @@ impl Navigation {
     fn failure_with_link(
         &self,
         agent: &AgentKey,
-        code: &str,
+        code: NavigationFailure,
         message: &str,
     ) -> Result<CallToolResult, ErrorData> {
         let url = self
@@ -128,29 +219,27 @@ impl Navigation {
 
     fn call(
         &self,
-        name: &str,
+        tool: NavigationTool,
         arguments: Value,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
-        if name == "ui_get_link" {
-            return Ok(
-                match serde_json::from_value::<crate::links::ViewAddress>(arguments) {
-                    Ok(address) => match address.result(self.pairing.base_url()) {
-                        Ok(payload) => reply(
-                            format!(
-                                "Optional Desktop detail: {}. No browser was opened or changed.",
-                                payload["url"].as_str().unwrap_or_default()
-                            ),
-                            payload,
+        if let NavigationTool::GetLink = tool {
+            return Ok(match serde_json::from_value::<ViewAddress>(arguments) {
+                Ok(address) => match address.result(self.pairing.base_url()) {
+                    Ok(payload) => reply(
+                        format!(
+                            "Optional Desktop detail: {}. No browser was opened or changed.",
+                            payload["url"].as_str().unwrap_or_default()
                         ),
-                        Err(error) => failure("VALIDATION", &error.to_string()),
-                    },
-                    Err(_) => failure(
-                        "VALIDATION",
-                        "Invalid view or filters. Check the tool schema.",
+                        payload,
                     ),
+                    Err(error) => failure(NavigationFailure::Validation, &error.to_string()),
                 },
-            );
+                Err(_) => failure(
+                    NavigationFailure::Validation,
+                    "Invalid view or filters. Check the tool schema.",
+                ),
+            });
         }
         let agent = AgentKey::from_verified_identity(&identity);
         let sessions = self
@@ -167,34 +256,38 @@ impl Navigation {
             .filter(|(_, tab)| tab.connected && sessions.contains(&tab.session))
             .collect();
         available.sort_by(|a, b| a.0.0.cmp(&b.0.0));
-        let parsed = match name {
-            "ui_show_view" => serde_json::from_value::<Show>(arguments).map(|input| {
+        let parsed = match tool {
+            NavigationTool::ShowView => serde_json::from_value::<Show>(arguments).map(|input| {
                 input.url().map(|url| {
                     (
                         input.tab_id,
-                        json!({"kind":"navigate", "url":url}),
-                        format!("Requested view: {url}."),
+                        format!("Requested view: {}.", url.as_str()),
+                        UiEvent::Navigate { url },
                     )
                 })
             }),
-            "ui_highlight" => serde_json::from_value::<Highlight>(arguments).map(|input| {
-                if input.target.is_empty() || input.target.len() > 256 {
-                    Err("Highlight target must be a DOM ID of 1 to 256 bytes.")
-                } else {
-                    Ok((
-                        input.tab_id,
-                        json!({"kind":"highlight", "target": input.target}),
-                        format!("Requested highlight: {}.", input.target),
-                    ))
-                }
-            }),
-            "ui_status" => {
+            NavigationTool::Highlight => {
+                serde_json::from_value::<Highlight>(arguments).map(|input| {
+                    if input.target.is_empty() || input.target.len() > 256 {
+                        Err("Highlight target must be a DOM ID of 1 to 256 bytes.")
+                    } else {
+                        Ok((
+                            input.tab_id,
+                            format!("Requested highlight: {}.", input.target),
+                            UiEvent::Highlight {
+                                target: input.target,
+                            },
+                        ))
+                    }
+                })
+            }
+            NavigationTool::Status => {
                 let input: Status = match serde_json::from_value(arguments) {
                     Ok(input) => input,
                     Err(_) => {
                         return self.failure_with_link(
                             &agent,
-                            "VALIDATION",
+                            NavigationFailure::Validation,
                             "Invalid ui_status arguments.",
                         );
                     }
@@ -218,17 +311,21 @@ impl Navigation {
                     json!({"paired":!sessions.is_empty(), "tabs":states, "pairing_url":url}),
                 ));
             }
-            _ => return Err(ErrorData::invalid_params("Unknown Desktop tool", None)),
+            NavigationTool::GetLink => unreachable!("link handled before paired-tab access"),
         };
-        let (wanted, event, description) = match parsed {
+        let (wanted, description, event) = match parsed {
             Ok(Ok(value)) => value,
             Ok(Err(message)) => {
-                return self.failure_with_link(&agent, "VIEW_UNAVAILABLE_OR_VALIDATION", message);
+                return self.failure_with_link(
+                    &agent,
+                    NavigationFailure::ViewUnavailableOrValidation,
+                    message,
+                );
             }
             Err(_) => {
                 return self.failure_with_link(
                     &agent,
-                    "VALIDATION",
+                    NavigationFailure::Validation,
                     "Invalid navigation arguments. Check the tool schema.",
                 );
             }
@@ -238,14 +335,14 @@ impl Navigation {
         }
         if available.len() > 1 {
             return Ok(failure(
-                "AMBIGUOUS_TAB",
+                NavigationFailure::AmbiguousTab,
                 "Multiple tabs are connected. Call ui_status and supply tab_id.",
             ));
         }
         let Some((id, tab)) = available.into_iter().next() else {
             let mut result = self.failure_with_link(
                 &agent,
-                "NO_CONNECTED_TAB",
+                NavigationFailure::NoConnectedTab,
                 &format!("{description} No connected matching tab."),
             )?;
             if let Some(payload) = &mut result.structured_content {
@@ -253,11 +350,8 @@ impl Navigation {
             }
             return Ok(result);
         };
-        if event["kind"] == "highlight"
-            && !tab
-                .targets
-                .iter()
-                .any(|target| event["target"].as_str() == Some(target))
+        if let UiEvent::Highlight { target } = &event
+            && !tab.targets.contains(target)
         {
             return Ok(reply(
                 format!(
@@ -268,7 +362,7 @@ impl Navigation {
         }
         if tab.pending.len() >= MAX_PENDING {
             return Ok(failure(
-                "TAB_BUSY",
+                NavigationFailure::TabBusy,
                 "Tab event queue is full. Wait for the browser to catch up.",
             ));
         }
@@ -289,7 +383,7 @@ fn reply(text: String, payload: Value) -> CallToolResult {
     result
 }
 
-fn failure(code: &str, message: &str) -> CallToolResult {
+fn failure(code: NavigationFailure, message: &str) -> CallToolResult {
     let mut result = reply(message.into(), json!({"code":code,"message":message}));
     result.is_error = Some(true);
     result
@@ -297,12 +391,10 @@ fn failure(code: &str, message: &str) -> CallToolResult {
 
 impl HostToolHandler for Navigation {
     fn tools(&self) -> Vec<HostTool> {
-        let mut tools: Vec<_> = [("ui_show_view", "Queue a real Desktop view with URL-restorable filters, including financial reports, tax summaries and reconciliation. Use a stable report view_id or reports with state.report_kind. No ledger data is returned. Use ui_status to choose among tabs.", schemars::schema_for!(Show).to_value(), HostToolEffect::Mutation),
-         ("ui_highlight", "Highlight an existing DOM ID from ui_status targets. A missing target is a no-op.", schemars::schema_for!(Highlight).to_value(), HostToolEffect::Mutation),
-         ("ui_status", "Report paired and live tabs, confirmed view URLs, highlight targets and pairing link. Requires ui/navigate.", schemars::schema_for!(Status).to_value(), HostToolEffect::ReadOnly)]
-        .into_iter().map(|(name, description, schema, effect)| HostTool { tool: Tool::new(name, description, schema.as_object().cloned().unwrap_or_default()), capability: Capability::Navigate, effect }).collect();
-        tools.push(HostTool { tool: Tool::new("ui_get_link", "Return an optional Desktop detail URL after answering in words. Does not navigate, open a browser or require pairing. Uses the same view_id/state as ui_show_view. Requires ledger/read.", schemars::schema_for!(crate::links::ViewAddress).to_value().as_object().cloned().unwrap_or_default()), capability: Capability::Read, effect: HostToolEffect::ReadOnly });
-        tools
+        NavigationTool::ALL
+            .into_iter()
+            .map(NavigationTool::definition)
+            .collect()
     }
 
     fn call_tool(
@@ -310,11 +402,14 @@ impl HostToolHandler for Navigation {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send {
-        std::future::ready(self.call(
-            &request.name,
-            Value::Object(request.arguments.unwrap_or_default()),
-            identity,
-        ))
+        std::future::ready(match NavigationTool::parse(&request.name) {
+            Some(tool) => self.call(
+                tool,
+                Value::Object(request.arguments.unwrap_or_default()),
+                identity,
+            ),
+            None => Err(ErrorData::invalid_params("Unknown Desktop tool", None)),
+        })
     }
 }
 
@@ -356,37 +451,16 @@ pub(crate) fn router(navigation: Navigation, pairing: PairingState) -> Router {
         )
 }
 
-fn local_view(url: &str) -> bool {
-    let Some(path) = url.split('?').next() else {
-        return false;
-    };
-    url.len() <= 4096
-        && !url.contains(['#', '\\', '\r', '\n'])
-        && (matches!(
-            path,
-            "/" | "/accounts"
-                | "/transactions"
-                | "/review"
-                | "/reports"
-                | "/reconciliation"
-                | "/settings"
-        ) || path
-            .strip_prefix("/reports/")
-            .is_some_and(|id| crate::reports::VIEW_IDS.contains(&id))
-            || ["/transactions/", "/review/"].iter().any(|prefix| {
-                path.strip_prefix(prefix).is_some_and(|id| {
-                    !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                })
-            }))
-}
-
 async fn update(
     write: HumanWrite,
     State(state): State<Navigation>,
     Form(input): Form<TabUpdate>,
 ) -> Response {
     let session_id = write.session().id();
-    if !local_view(&input.url) || input.targets.len() > 4096 {
+    let Ok(url) = LocalViewUrl::try_from(input.url) else {
+        return (StatusCode::BAD_REQUEST, "Invalid tab state").into_response();
+    };
+    if input.targets.len() > 4096 {
         return (StatusCode::BAD_REQUEST, "Invalid tab state").into_response();
     }
     let Ok(mut tabs) = state.tabs.lock() else {
@@ -402,7 +476,7 @@ async fn update(
     }
     let tab = tabs.entry(id.clone()).or_insert_with(|| Tab {
         session: session_id.clone(),
-        url: String::new(),
+        url: url.clone(),
         title: String::new(),
         targets: Vec::new(),
         seen: Instant::now(),
@@ -411,7 +485,7 @@ async fn update(
         epoch: 0,
         highlight: None,
     });
-    tab.url = input.url;
+    tab.url = url;
     tab.title = input.title.chars().take(256).collect();
     tab.targets = input
         .targets
@@ -478,23 +552,24 @@ async fn events(
                 .get_mut(&input.tab_id)
                 .filter(|tab| &tab.session == live.id() && tab.epoch == lease.epoch)?;
             tab.seen = Instant::now();
-            let mut event = next_event(&mut tab.pending, live.agent());
-            event["agent_associated"] = json!(live.agent().is_some());
+            let frame = EventFrame {
+                event: next_event(&mut tab.pending, live.agent()),
+                agent_associated: live.agent().is_some(),
+            };
             let _keep_lease = &lease;
-            Some(Ok::<_, Infallible>(
-                Event::default().event("ui").data(event.to_string()),
-            ))
+            let event = Event::default().event("ui").json_data(frame).ok()?;
+            Some(Ok::<_, Infallible>(event))
         })
         .take_while(Option::is_some)
         .map(|event| event.unwrap_or_else(|| Ok(Event::default())));
     Ok(Sse::new(stream).into_response())
 }
 
-fn next_event(pending: &mut VecDeque<(AgentKey, Value)>, agent: Option<&AgentKey>) -> Value {
+fn next_event(pending: &mut VecDeque<(AgentKey, UiEvent)>, agent: Option<&AgentKey>) -> UiEvent {
     std::iter::from_fn(|| pending.pop_front())
         .find(|(owner, _)| agent == Some(owner))
         .map(|(_, event)| event)
-        .unwrap_or_else(|| json!({"kind":"heartbeat"}))
+        .unwrap_or(UiEvent::Heartbeat)
 }
 
 #[cfg(test)]
@@ -502,21 +577,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reassociation_discards_pending_events_from_the_previous_agent() {
+    fn reassociation_discards_pending_events_from_the_previous_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
         let old = AgentKey::for_test("old");
         let current = AgentKey::for_test("current");
         let mut pending = VecDeque::from([
-            (old, json!({"kind":"navigate","url":"/review"})),
-            (current.clone(), json!({"kind":"highlight","target":"main"})),
+            (
+                old,
+                UiEvent::Navigate {
+                    url: "/review".to_owned().try_into()?,
+                },
+            ),
+            (
+                current.clone(),
+                UiEvent::Highlight {
+                    target: "main".to_owned(),
+                },
+            ),
         ]);
         assert_eq!(
-            next_event(&mut pending, Some(&current))["kind"],
-            "highlight"
+            next_event(&mut pending, Some(&current)),
+            UiEvent::Highlight {
+                target: "main".to_owned()
+            }
         );
         assert!(pending.is_empty());
-        pending.push_back((current, json!({"kind":"navigate","url":"/accounts"})));
-        assert_eq!(next_event(&mut pending, None)["kind"], "heartbeat");
+        pending.push_back((
+            current,
+            UiEvent::Navigate {
+                url: "/accounts".to_owned().try_into()?,
+            },
+        ));
+        assert_eq!(next_event(&mut pending, None), UiEvent::Heartbeat);
         assert!(pending.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -534,7 +628,7 @@ mod tests {
         }
         let input = json!({"view_id":"accounts","tab_id":"tab_01h455vb4pex5vsknk084sn02q"});
         let show: Show = serde_json::from_value(input)?;
-        assert_eq!(show.url()?, "/accounts");
+        assert_eq!(show.url()?.as_str(), "/accounts");
         assert!(
             serde_json::from_value::<Show>(json!({"view_id":"accounts","injected":true})).is_err()
         );
@@ -560,8 +654,8 @@ mod tests {
             ),
         ] {
             let show: Show = serde_json::from_value(input)?;
-            assert_eq!(show.url()?, expected);
-            assert!(local_view(expected));
+            assert_eq!(show.url()?.as_str(), expected);
+            assert!(LocalViewUrl::try_from(expected.to_owned()).is_ok());
         }
         for id in [
             "../approve",

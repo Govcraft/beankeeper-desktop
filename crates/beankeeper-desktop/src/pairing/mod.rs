@@ -3,6 +3,9 @@
 mod agent_key;
 mod browser_session_id;
 mod routes;
+
+pub(crate) const PAIR_ROUTE: &str = "/pair";
+
 mod secret;
 
 pub use agent_key::AgentKey;

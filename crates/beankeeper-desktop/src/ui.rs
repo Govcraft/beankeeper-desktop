@@ -11,6 +11,10 @@ use axum::{
 use beankeeper_cli::db::Db;
 
 use crate::{
+    links::{
+        ACCOUNTS, HOME, REPORT_ROUTE, REPORTS, ReportKind, SETTINGS, TRANSACTION_ROUTE,
+        TRANSACTIONS,
+    },
     markup::{Attribute, Markup, markup, write_markup},
     pairing::{self, HumanSession, PairingState},
     reports::{self, ReportQuery, ReportResponse},
@@ -67,9 +71,9 @@ struct ViewState {
 
 pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> Router {
     let data = Router::new()
-        .route("/", get(view))
+        .route(HOME, get(view))
         .route(
-            "/settings",
+            SETTINGS,
             get(|session: HumanSession| async move {
                 let status = tokio::task::spawn_blocking(crate::product::status_text)
                     .await
@@ -82,12 +86,12 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
                 )
             }),
         )
-        .route("/accounts", get(view))
-        .route("/transactions", get(view))
-        .route("/transactions/{id}", get(view))
-        .route("/reports", get(report))
-        .route("/reports/{id}", get(report))
-        .route("/reconciliation", get(report))
+        .route(ACCOUNTS, get(view))
+        .route(TRANSACTIONS, get(view))
+        .route(TRANSACTION_ROUTE, get(view))
+        .route(REPORTS, get(report))
+        .route(REPORT_ROUTE, get(report))
+        .route(ReportKind::Reconciliation.path(), get(report))
         .with_state(ViewState {
             db: Arc::new(Mutex::new(db)),
             company,

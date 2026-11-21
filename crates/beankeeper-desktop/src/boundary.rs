@@ -89,7 +89,7 @@ pub(crate) async fn guard(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let pairing_url = request.uri().path() == "/pair";
+    let pairing_url = request.uri().path() == crate::pairing::PAIR_ROUTE;
     let mut response = if let Some(origin) = boundary.check(request.headers()) {
         if let LocalOrigin::Same(proof) = origin {
             request.extensions_mut().insert(proof);
