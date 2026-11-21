@@ -167,6 +167,7 @@ def main():
             restarted = wait(lambda s: s["running"] and s["pid"] != first["pid"])
             assert restarted["version"] == version
             command("service", "stop")
+            command("service", "stop")  # Persistent stop is idempotent.
             stopped = status()
             assert stopped["installed"] and not stopped["running"]
             time.sleep(3)

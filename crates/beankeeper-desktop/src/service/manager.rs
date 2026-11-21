@@ -139,6 +139,19 @@ fn text(path: &Path) -> Result<&str, ServiceError> {
     path.to_str()
         .ok_or(ServiceError::Configuration("service paths must be Unicode"))
 }
+fn manager_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Lifecycle calls from GUI/stdio clients must not flash console windows.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.stdin(Stdio::null());
+    command
+}
+
 fn checked(program: &str, args: &[&str]) -> Result<(), ServiceError> {
     if success(program, args)? {
         Ok(())
@@ -149,7 +162,7 @@ fn checked(program: &str, args: &[&str]) -> Result<(), ServiceError> {
     }
 }
 fn success(program: &str, args: &[&str]) -> Result<bool, ServiceError> {
-    Ok(Command::new(program)
+    Ok(manager_command(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -158,7 +171,7 @@ fn success(program: &str, args: &[&str]) -> Result<bool, ServiceError> {
         .success())
 }
 fn output(program: &str, args: &[&str]) -> Result<String, ServiceError> {
-    let output = Command::new(program)
+    let output = manager_command(program)
         .args(args)
         .stdin(Stdio::null())
         .output()?;
@@ -281,7 +294,7 @@ fn windows_runner(paths: &Paths, config: &Config) -> Result<String, ServiceError
         script.push_str(&format!("$env:{key} = {}\n", ps(text(path)?)?));
     }
     script.push_str(&format!(
-        "$process = Start-Process -FilePath {} -ArgumentList 'service','run' -NoNewWindow -Wait -PassThru -RedirectStandardOutput {} -RedirectStandardError {}\nexit $process.ExitCode\n",
+        "$process = Start-Process -FilePath {} -ArgumentList 'service','run' -NoNewWindow -Wait -PassThru -RedirectStandardOutput {} -RedirectStandardError {}\n# Start-Process may return a null ExitCode with redirected streams. Any\n# return of the long-running host is unexpected; stop disables the task\n# before terminating this runner. Report failure so Task Scheduler retries.\nexit 1\n",
         ps(text(&config.executable)?)?,
         ps(text(&paths.logs.join("service-stdout.log"))?)?,
         ps(text(&paths.log())?)?
@@ -292,7 +305,7 @@ fn windows_task(paths: &Paths) -> Result<String, ServiceError> {
     let runner = text(&paths.state.join("service-run.ps1"))?.to_owned();
     // Windows paths cannot contain double quotes. PowerShell's literal handles apostrophes.
     let arguments = ps(&format!(
-        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{runner}\""
+        "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{runner}\""
     ))?;
     let script = format!(
         r#"param([ValidateSet('install','start','stop','uninstall','running')][string]$Operation)
@@ -310,7 +323,7 @@ switch ($Operation) {{
         Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     }}
     'start' {{ Enable-ScheduledTask -TaskName $name | Out-Null; Start-ScheduledTask -TaskName $name }}
-    'stop' {{ if ($task) {{ Disable-ScheduledTask -TaskName $name | Out-Null; Stop-ScheduledTask -TaskName $name }} }}
+    'stop' {{ if ($task) {{ Disable-ScheduledTask -TaskName $name | Out-Null; if ($task.State -eq 'Running' -or $task.State -eq 'Queued') {{ Stop-ScheduledTask -TaskName $name }} }} }}
     'uninstall' {{ if ($task) {{ Unregister-ScheduledTask -TaskName $name -Confirm:$false }} }}
     'running' {{ if (-not $task -or $task.State -ne 'Running') {{ exit 1 }} }}
 }}
@@ -387,6 +400,9 @@ mod tests {
         assert!(runner.contains("Start-Process"));
         assert!(runner.contains("-RedirectStandardError"));
         assert!(!runner.contains("*>>"));
+        assert!(runner.ends_with("exit 1\n"));
+        assert!(!runner.contains("exit $process.ExitCode"));
+        assert!(windows_task(&paths)?.contains("-WindowStyle Hidden"));
         Ok(())
     }
 
