@@ -11,6 +11,8 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::markup::markup;
+
 use super::{AgentKey, PairingError, PairingState, secret::Secret};
 
 impl IntoResponse for PairingError {
@@ -74,10 +76,7 @@ async fn pair(
                 .ok_or(PairingError::InvalidLink)?;
             // Displaying a link must never consume it: browsers and link handlers
             // may issue speculative or duplicate GETs before the human sees it.
-            Ok(crate::ui::message("Pair this browser", &format!(
-                "<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>",
-                link.secret.expose()
-            )).into_response())
+            Ok(crate::ui::message("Pair this browser", markup!("<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>", link.secret.expose())).into_response())
         }
         (None, Some(invite)) => {
             let now = Instant::now();
@@ -96,16 +95,12 @@ async fn pair(
                     // to continue, without weakening its cookie policy.
                     return Ok((StatusCode::UNAUTHORIZED, crate::ui::message(
                         "Connect your agent",
-                        &format!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise open the terminal's one-time pairing URL first, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
+                        markup!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise open the terminal's one-time pairing URL first, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
                     )).into_response());
                 }
                 Err(error) => return Err(error),
             };
-            // Only generated hex strings are interpolated, never query input.
-            Ok(crate::ui::message("Connect your agent", &format!(
-                "<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>",
-                session.csrf.expose(), link.secret.expose()
-            )).into_response())
+            Ok(crate::ui::message("Connect your agent", markup!("<p>Confirm that the agent which gave you this link may navigate this browser workspace. This grants no approval rights to the agent.</p><form method=\"post\" action=\"/api/session/associate\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"invite\" value=\"{}\"><button type=\"submit\">Connect agent to this browser</button></form>", session.csrf.expose(), link.secret.expose())).into_response())
         }
         _ => Err(PairingError::InvalidLink),
     }
@@ -203,12 +198,12 @@ pub(crate) async fn human_guard(
         Ok(request) => next.run(request).await,
         Err(PairingError::Unauthorized) => {
             let content = destination.as_ref().map_or_else(
-                || "<p>Open the one-time pairing URL printed by <code>bk serve</code>. Use a fresh link if it has expired or was already used.</p>".into(),
-                |path| format!("<p>Open the one-time pairing URL printed in the terminal by <code>bk serve</code>, then select <strong>Pair this browser</strong>. Your requested view will open automatically. Pairing links expire after five minutes; use a fresh link if needed.</p><p>If already paired, <a href=\"{}\">continue to your requested view</a>.</p>", crate::ui::escape(path)),
+                || markup!("<p>Open the one-time pairing URL printed by <code>bk serve</code>. Use a fresh link if it has expired or was already used.</p>"),
+                |path| markup!("<p>Open the one-time pairing URL printed in the terminal by <code>bk serve</code>, then select <strong>Pair this browser</strong>. Your requested view will open automatically. Pairing links expire after five minutes; use a fresh link if needed.</p><p>If already paired, <a href=\"{}\">continue to your requested view</a>.</p>", path),
             );
             let mut response = (
                 StatusCode::UNAUTHORIZED,
-                crate::ui::message("Pair this browser", &content),
+                crate::ui::message("Pair this browser", content),
             )
                 .into_response();
             if let Some(path) = destination {
@@ -253,8 +248,10 @@ async fn new_link(State(state): State<PairingState>) -> Result<Html<String>, Pai
     let url = state.browser_link(Instant::now())?;
     Ok(crate::ui::message(
         "Pair another browser",
-        &format!(
-            "<p>This one-time link expires in five minutes. Open it in the browser you want to pair. Keep it private.</p><p><a href=\"{url}\">{url}</a></p><p><a href=\"/\">Return to workspace</a></p>"
+        markup!(
+            "<p>This one-time link expires in five minutes. Open it in the browser you want to pair. Keep it private.</p><p><a href=\"{}\">{}</a></p><p><a href=\"/\">Return to workspace</a></p>",
+            url,
+            url
         ),
     ))
 }
