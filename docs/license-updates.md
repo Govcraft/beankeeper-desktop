@@ -39,6 +39,17 @@ activation if validation fails. Inspecting the entitlement re-verifies it
 offline. The result reports the license ID, perpetual use, and inclusive update
 deadline, without printing purchaser information.
 
+Successful activation and status checks begin with `License status: active and
+valid.` The paired browser's `/settings` page uses the same status. Missing
+activations are labeled `not activated`, and verification or configuration
+failures report their specific reason instead of an active status.
+
+The update window is displayed separately as `open` or `ended`, using the local
+clock and an inclusive deadline. This display is informational: an ended update
+window leaves perpetual Desktop use active, and self-update eligibility still
+compares the signed release date with the deadline. Older eligible releases
+remain covered even after the window ends.
+
 The private activated file is `license.json` inside the per-user Desktop state
 directory:
 

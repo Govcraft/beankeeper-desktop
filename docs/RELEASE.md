@@ -9,7 +9,7 @@ required to build or merge this work.
 
 ## Artifacts and versions
 
-Desktop uses its own workspace version, currently `0.1.0-rc.1`, rather than upstream's
+Desktop uses its own workspace version, currently `0.1.0-rc.3`, rather than upstream's
 CLI version. Keep the upstream tag convention `beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.

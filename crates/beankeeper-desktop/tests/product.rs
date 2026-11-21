@@ -29,6 +29,7 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
         String::from_utf8_lossy(&initial.stderr)
     );
     assert!(String::from_utf8_lossy(&initial.stdout).contains("No Desktop license"));
+    assert!(String::from_utf8_lossy(&initial.stdout).contains("License status: not activated."));
     let activated = command(directory)
         .args(["license", "activate"])
         .arg(directory.join("input.json"))
@@ -39,9 +40,13 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
         String::from_utf8_lossy(&activated.stderr)
     );
     assert!(String::from_utf8_lossy(&activated.stdout).contains("perpetual Desktop use"));
+    assert!(
+        String::from_utf8_lossy(&activated.stdout).contains("License status: active and valid.")
+    );
     let status = command(directory).arg("license").output()?;
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("2027-11-20T12:00:00+00:00"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("License status: active and valid."));
     let original = fs::read(directory.join("state/license.json"))?;
     let tampered = String::from_utf8(original.clone())?.replace("AHHH0LU", "BHHH0LU");
     fs::write(directory.join("input.json"), tampered)?;
@@ -52,6 +57,55 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("signature"));
     assert_eq!(fs::read(directory.join("state/license.json"))?, original);
+    assert!(!directory.join("state/updates.json").exists());
+    Ok(())
+}
+
+#[test]
+fn stored_license_verification_failures_never_report_active_status() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let directory = dir.path();
+    fs::write(
+        directory.join("keys.json"),
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    fs::write(
+        directory.join("input.json"),
+        include_bytes!("fixtures/license.json"),
+    )?;
+    assert!(
+        command(directory)
+            .args(["license", "activate"])
+            .arg(directory.join("input.json"))
+            .status()?
+            .success()
+    );
+    let stored_path = directory.join("state/license.json");
+    let original = fs::read_to_string(&stored_path)?;
+    for (stored, keys, reason) in [
+        (
+            original.replace("AHHH0LU", "BHHH0LU"),
+            include_str!("fixtures/license-public-keys.json"),
+            "invalid license signature",
+        ),
+        (
+            original.clone(),
+            r#"{"unknown":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"}"#,
+            "license issuer is not in the trusted public-key store",
+        ),
+        (
+            original,
+            "{}",
+            "license issuer public keys are not configured",
+        ),
+    ] {
+        fs::write(&stored_path, stored)?;
+        fs::write(directory.join("keys.json"), keys)?;
+        let output = command(directory).arg("license").output()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("active and valid"));
+    }
     assert!(!directory.join("state/updates.json").exists());
     Ok(())
 }

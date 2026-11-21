@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.3] - 2026-11-20
+
+### Fixed
+
+- Explicit active/valid, missing and unavailable license status in the CLI and
+  paired browser settings. Display the update window separately from perpetual
+  use, retaining signed release dates for update eligibility.
+
 ## [0.1.0-rc.2] - 2026-11-20
 
 ### Fixed
