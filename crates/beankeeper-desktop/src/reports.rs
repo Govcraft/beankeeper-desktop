@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::{
     links::{
-        LinkError,
+        LinkError, ReportKind as Kind,
         values::{BudgetWindow, Date, DecimalAmount, Threshold, Year},
     },
     markup::{Attribute, Markup, markup, write_markup},
@@ -33,46 +33,7 @@ use crate::{
     },
 };
 
-/// Stable view IDs for agent navigation. Financial/tax IDs use `/reports/ID`;
-/// reconciliation uses `/reconciliation`. All filters are query parameters.
-pub const VIEW_IDS: &[&str] = &[
-    "income-statement",
-    "balance-sheet",
-    "cash-flow",
-    "trend",
-    "budget-variance",
-    "schedule-c",
-    "1099",
-    "reconciliation",
-];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Income,
-    Balance,
-    Cash,
-    Trend,
-    Budget,
-    Schedule,
-    Vendor,
-    Reconciliation,
-}
-
 impl Kind {
-    fn parse(path: &str) -> Result<Self, ViewError> {
-        match path {
-            "/reports/income-statement" => Ok(Self::Income),
-            "/reports/balance-sheet" => Ok(Self::Balance),
-            "/reports/cash-flow" => Ok(Self::Cash),
-            "/reports/trend" => Ok(Self::Trend),
-            "/reports/budget-variance" => Ok(Self::Budget),
-            "/reports/schedule-c" => Ok(Self::Schedule),
-            "/reports/1099" => Ok(Self::Vendor),
-            "/reports/reconciliation" | "/reconciliation" => Ok(Self::Reconciliation),
-            _ => Err(ViewError::NotFound),
-        }
-    }
-
     fn title(self) -> &'static str {
         match self {
             Self::Income => "Income statement",
@@ -171,7 +132,7 @@ impl ReportQuery {
         let kind = if path == "/reports" {
             None
         } else {
-            Some(Kind::parse(path)?)
+            Some(Kind::parse(path).ok_or(ViewError::NotFound)?)
         };
         let filters = self.filters.parse()?;
         if filters.category.is_some() || filters.payee.is_some() {
@@ -412,13 +373,9 @@ pub(crate) fn render(
     let Some(kind) = kind else {
         html = form(db, &companies, company, path, None, query)?;
         write_markup!(html, "<section><h2>Choose a report</h2><ul>");
-        for id in VIEW_IDS {
-            let path = if *id == "reconciliation" {
-                "/reconciliation".into()
-            } else {
-                format!("/reports/{id}")
-            };
-            let title = Kind::parse(&path)?.title();
+        for report in Kind::ALL {
+            let path = report.path();
+            let title = report.title();
             write_markup!(
                 html,
                 "<li><a href=\"{}?company={}\">{}</a></li>",

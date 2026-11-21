@@ -12,6 +12,7 @@ use beankeeper_cli::{
 
 use crate::{
     links::values::{Currency, SCAN_LIMIT},
+    links::{ACCOUNTS, HOME, LedgerRoute, TRANSACTIONS},
     markup::{Attribute, Markup, markup, write_markup},
     money,
 };
@@ -222,33 +223,35 @@ fn company_form(
 }
 
 pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, ViewError> {
-    if path == "/transactions" && matches!(query.comparison, Some(Comparison::AsOf(_))) {
+    let route = LedgerRoute::parse(path).map_err(|_| ViewError::NotFound)?;
+    if matches!(route, LedgerRoute::Register)
+        && matches!(query.comparison, Some(Comparison::AsOf(_)))
+    {
         return Err(ViewError::Invalid(
             "Register comparison requires compare_from and compare_to.",
         ));
     }
-    let (title, description, nav) = match path {
-        "/" => (
+    let (title, description, nav) = match route {
+        LedgerRoute::Home => (
             "Dashboard",
             "Your balances, recent activity and next steps.",
-            "/",
+            HOME,
         ),
-        "/accounts" => (
+        LedgerRoute::Accounts => (
             "Accounts",
             "Browse companies and their complete chart of accounts.",
-            "/accounts",
+            ACCOUNTS,
         ),
-        "/transactions" => (
+        LedgerRoute::Register => (
             "Transactions",
             "Filter your register. Entry amounts are shown in their transaction currency.",
-            "/transactions",
+            TRANSACTIONS,
         ),
-        path if path.starts_with("/transactions/") => (
+        LedgerRoute::Transaction(_) => (
             "Transaction detail",
             "Entries, metadata and recorded audit history.",
-            "/transactions",
+            TRANSACTIONS,
         ),
-        _ => return Err(ViewError::NotFound),
     };
     let companies = db::list_companies(db.conn())?;
     let selected = query
@@ -272,10 +275,10 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         db::get_account(db.conn(), company, account)?;
     }
     let mut content = company_form(&companies, company, query, path);
-    match path {
-        "/" => dashboard(db, company, query, &mut content)?,
-        "/accounts" => accounts(db, company, query, &mut content)?,
-        "/transactions" => {
+    match route {
+        LedgerRoute::Home => dashboard(db, company, query, &mut content)?,
+        LedgerRoute::Accounts => accounts(db, company, query, &mut content)?,
+        LedgerRoute::Register => {
             register(db, company, query, RegisterSection::Primary, &mut content)?;
             if let Some(comparison) = query.comparison_filters() {
                 write_markup!(
@@ -302,13 +305,8 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
                 write_markup!(content, "</section>");
             }
         }
-        _ => {
-            let id = path
-                .trim_start_matches("/transactions/")
-                .parse::<i64>()
-                .ok()
-                .filter(|id| *id > 0)
-                .ok_or(ViewError::NotFound)?;
+        LedgerRoute::Transaction(id) => {
+            let id = i64::from(id);
             detail(db, company, query, id, &mut content)?;
         }
     }
