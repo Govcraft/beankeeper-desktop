@@ -56,7 +56,7 @@ def main():
 
         def command(*arguments):
             result = subprocess.run([str(binary), *arguments], env=env, text=True,
-                                    capture_output=True, timeout=100)
+                                    capture_output=True, encoding="utf-8", timeout=100)
             if result.returncode:
                 log = root / "logs/service.log"
                 # Failure logs must never include recovery or credential files.
@@ -107,14 +107,14 @@ def main():
                         "$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; "
                         "$user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
                         "if ($owner -ne $user) { throw 'Credential owner is not the current user' }"],
-                        env={**env, "BK_TEST_CREDENTIAL": str(path)}, capture_output=True, text=True, timeout=15)
+                        env={**env, "BK_TEST_CREDENTIAL": str(path)}, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
                     assert checked.returncode == 0, checked.stderr
             # Add recognizable ledger content through the public ledger CLI, then
             # verify both data and credentials survive replacement and reinstall.
             added = subprocess.run([str(binary), "--db", str(books), "company", "create",
                                     "service-persistence", "Service persistence"],
                                    env={**env, "BK_AGENT_TOKEN": owner.read_text().strip()},
-                                   capture_output=True, text=True, timeout=30)
+                                   capture_output=True, text=True, encoding="utf-8", timeout=30)
             assert added.returncode == 0, added.stderr
             if os.name == "nt":
                 subprocess.run(["taskkill", "/F", "/PID", str(first["pid"])], check=True, capture_output=True)
@@ -138,7 +138,7 @@ def main():
                 assert fingerprint(path) == digest, f"reinstall rotated {path.name}"
             listed = subprocess.run([str(binary), "--db", str(books), "company", "list"],
                                     env={**env, "BK_AGENT_TOKEN": agent.read_text().strip()},
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, encoding="utf-8", timeout=30)
             assert listed.returncode == 0 and "service-persistence" in listed.stdout, listed.stderr
             command("service", "stop")
             command("service", "start")
