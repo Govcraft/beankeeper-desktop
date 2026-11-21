@@ -164,18 +164,36 @@ existing preset. Capability changes and token renewal use upstream commands
 under the human owner's control. A token is secret and expires after one year.
 New companies need owner-configured spend limits before agent use.
 
-Start a setup conversation with `setup_status` over MCP, or `bk setup status
---json`. Use its `next_step` and ask only for information the books still need.
-Ask whether the owner keeps personal books, business books, or both, then
-confirm their reporting currency and when their financial year begins.
-Confirm the names of their real accounts, the dates and amounts of any starting
-balances, and whether they want to import older bank statements. If the books
-already contain transactions, confirm what has been entered before proposing
-additional work. Status can show currencies in existing transactions. The
-current ledger does not store a default currency or fiscal-year start, and
-existing transactions may lack import provenance. Ask the owner when a setting
-or a statement's status is unclear. Summarize what is already set up and which
-decisions or statements are still needed.
+## Guide the owner through book setup
+
+Start with `setup_status` over MCP or `bk setup status --json`. Use `next_step`
+and the recorded facts to skip questions the owner has already answered.
+
+1. Ask whether the owner keeps personal books, business books, or both. Confirm
+   the reporting currency and the start of the financial year for each book.
+2. Ask for the names of their real accounts and the dates and amounts of any
+   opening balances. Confirm which balances are already recorded.
+3. Ask which statements they want to import and which have already been
+   entered. Transaction currencies and existing postings alone leave those
+   settings and import history unconfirmed.
+
+Summarize what is already recorded, what the owner has confirmed, and what
+still needs an answer or a statement. Only begin a setup session when the
+installed ledger exposes a scoped write tool for the next confirmed step.
+
+The owner can authorize a session through `ledger_setup_begin` or `bk setup
+begin`, using their own `ledger/admin` access on the selected encrypted ledger.
+Give the owner the setup agent's Ed25519 public key. Have the owner deliver the
+returned short-lived `ledger/setup` credential through their local secret
+store. Keep the agent's private key and bearer token out of chat and logs.
+Keep the returned setup generation for the session's writes. Use the same
+request reference when retrying a step, and stop if the tool reports a conflict.
+
+After summarizing the outcome, have the owner finish the session or revoke it
+if they want to cancel access. Both actions deactivate the setup grant. Posted
+entries are corrected through normal ledger reversals. See the
+[ledger setup session commands](https://github.com/Govcraft/beankeeper/blob/2399d1566ce3730368ca53e044e47ba3cf72610f/docs/beankeeper/references/commands.md#setup-sessions)
+for the CLI flags and MCP arguments.
 
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from
 the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
