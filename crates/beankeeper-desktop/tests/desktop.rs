@@ -709,7 +709,13 @@ fn raw_origin_and_bearer_tokens_cannot_grant_a_browser_session() -> TestResult {
     for path in ["/", "/transactions", "/reports", "/review", "/settings"] {
         let response = server.client.get(format!("{}{path}", server.base)).send()?;
         assert_eq!(response.status(), 401);
-        assert!(response.headers().get("set-cookie").is_none());
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()?
+                .split('=')
+                .next()
+                .is_some_and(|name| name.ends_with("_return"))
+        );
         let html = response.text()?;
         assert!(html.contains("<h1>Pair this browser</h1>"));
         assert!(!html.contains("name=\"csrf\""));

@@ -172,6 +172,24 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
         for bearer in [reader, token(&ledger.writer)?, nav] {
             let tools = rpc(server.request("tools/list", json!({}), Some(bearer))?)?;
             let tools = tools["result"]["tools"].as_array().ok_or("tools")?;
+            assert_eq!(
+                tools.iter().any(|tool| tool["name"] == "ui_get_link"),
+                bearer != nav
+            );
+            let link = call(
+                &server,
+                bearer,
+                "ui_get_link",
+                json!({"view_id":"accounts","state":{"company":"acme"}}),
+            )?;
+            if bearer == nav {
+                assert_eq!(content(&link)["code"], "FORBIDDEN");
+            } else {
+                assert_eq!(
+                    content(&link)["url"],
+                    format!("{}/accounts?company=acme", server.base)
+                );
+            }
             for name in ["ui_show_view", "ui_highlight", "ui_status"] {
                 assert_eq!(tools.iter().any(|tool| tool["name"] == name), bearer == nav);
                 let arguments = match name {
@@ -807,5 +825,39 @@ fn closed_tabs_are_removed_and_another_browser_cannot_claim_their_stream() -> Te
             "Error view lost its navigation session"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn generating_a_link_does_not_queue_navigation_or_change_a_connected_tab() -> TestResult {
+    let ledger = Ledger::new()?;
+    let navigator = issue(&ledger, "link_observer")?;
+    let nav = token(&navigator)?;
+    let reader = token(&ledger.reader)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    server.initialize(Some(nav))?;
+    let csrf = csrf(&server)?;
+    associate(&server, nav, &csrf)?;
+    let id = update(&server, &csrf, None, "/accounts?company=acme", "main")?;
+    let mut stream = stream(&server, &id)?;
+    event(&mut stream, "heartbeat")?;
+    let before = content(&call(&server, nav, "ui_status", json!({}))?)["tabs"].clone();
+    let result = call(
+        &server,
+        reader,
+        "ui_get_link",
+        json!({"view_id":"transactions","state":{"company":"acme","search":"rent"}}),
+    )?;
+    assert_ne!(result["result"]["isError"], true);
+    assert_eq!(
+        content(&result)["url"],
+        format!("{}/transactions?company=acme&search=rent", server.base)
+    );
+    event(&mut stream, "heartbeat")?;
+    assert_eq!(
+        content(&call(&server, nav, "ui_status", json!({}))?)["tabs"],
+        before
+    );
     Ok(())
 }

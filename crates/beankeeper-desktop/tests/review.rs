@@ -544,3 +544,23 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
     verify::execute_json(&db)?;
     Ok(())
 }
+
+#[test]
+fn generated_proposal_link_opens_the_exact_pending_review() -> TestResult {
+    let fixture = ReviewFixture::new()?;
+    let id = fixture.propose("deep-linked-proposal")?;
+    let reader = token(&fixture.proposer)?;
+    let mut server = Server::start(&fixture.ledger, &["serve"], None)?;
+    server.initialize(Some(reader))?;
+    let response = common::rpc(server.request("tools/call", serde_json::json!({"name":"ui_get_link","arguments":{"view_id":"review_detail","state":{"company":"acme","proposal_id":id}}}), Some(reader))?)?;
+    assert_ne!(response["result"]["isError"], true);
+    let url = response["result"]["structuredContent"]["url"]
+        .as_str()
+        .ok_or("URL")?;
+    assert_eq!(url, format!("{}/review/{id}?company=acme", server.base));
+    server.pair()?;
+    let html = server.client.get(url).send()?.error_for_status()?.text()?;
+    assert!(html.contains(&id));
+    assert!(html.contains("deep-linked-proposal"));
+    Ok(())
+}

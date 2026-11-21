@@ -879,3 +879,113 @@ fn reports_show_empty_states_defaults_company_scope_and_actionable_errors() -> T
     assert_eq!(explicit["lines"][0]["net"], 987_654);
     Ok(())
 }
+
+#[test]
+fn deep_links_apply_exact_category_payee_and_both_reporting_periods() -> TestResult {
+    let ledger = fixture()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.pair()?;
+    let url = reqwest::Url::parse_with_params(
+        &format!("{}/transactions", server.base),
+        &[
+            ("company", "acme"),
+            ("account", "5000"),
+            ("category", "sched-c:18"),
+            ("payee", "Vendor, \"quoted\"\n<script>"),
+            ("currency", "USD"),
+            ("from", "2026-02-01"),
+            ("to", "2026-02-28"),
+            ("compare_from", "2026-03-01"),
+            ("compare_to", "2026-03-31"),
+        ],
+    )?;
+    let html = server
+        .client
+        .get(url.clone())
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(html.contains("1 matching transactions shown"));
+    assert!(html.contains("Comparison period: 2026-03-01 through 2026-03-31"));
+    assert!(html.contains("0 matching transactions shown"));
+    assert!(!html.contains("<script>"));
+    let wrong_payee = reqwest::Url::parse_with_params(
+        &format!("{}/transactions", server.base),
+        &[
+            ("company", "acme"),
+            ("payee", "Vendor"),
+            ("currency", "USD"),
+        ],
+    )?;
+    assert!(
+        server
+            .client
+            .get(wrong_payee)
+            .send()?
+            .text()?
+            .contains("0 matching transactions shown")
+    );
+    for view in [
+        "income-statement",
+        "cash-flow",
+        "trend",
+        "budget-variance",
+        "schedule-c",
+        "1099",
+    ] {
+        let url = format!(
+            "{}/reports/{view}?company=acme&currency=USD&from=2026-02-01&to=2026-02-28&compare_from=2026-03-01&compare_to=2026-03-31",
+            server.base
+        );
+        let html = server.client.get(&url).send()?.error_for_status()?.text()?;
+        assert!(html.contains("id=\"comparison-results\""), "{view}");
+        assert!(html.contains("Comparison period: 2026-03-01 through 2026-03-31"));
+        let data: Value = server
+            .client
+            .get(format!("{url}&format=json"))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        assert!(data["current"].is_object());
+        assert!(data["comparison"].is_object());
+        assert_eq!(data["compare_from"], "2026-03-01");
+        assert_eq!(data["compare_to"], "2026-03-31");
+        if view == "income-statement" {
+            assert_eq!(data["current"]["total_expenses"], 65_000);
+            assert_eq!(data["comparison"]["total_expenses"], 4_321);
+        }
+    }
+    let balance_url = format!(
+        "{}/reports/balance-sheet?company=acme&currency=USD&to=2026-03-31&compare_to=2026-01-31",
+        server.base
+    );
+    let html = server
+        .client
+        .get(&balance_url)
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(html.contains("Comparison as of 2026-01-31"));
+    let data: Value = server
+        .client
+        .get(format!("{balance_url}&format=json"))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    assert_ne!(data["current"], data["comparison"]);
+    for path in [
+        "/reports/1099?compare_from=2026-02-01&compare_to=2026-02-28&format=csv",
+        "/reports/income-statement?compare_from=2026-02-01",
+        "/reports/balance-sheet?compare_from=2026-02-01&compare_to=2026-02-28",
+    ] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}{path}&company=acme&currency=USD", server.base))
+                .send()?
+                .status(),
+            400
+        );
+    }
+    Ok(())
+}
