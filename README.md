@@ -158,6 +158,39 @@ rejected because they are outside the UI Host allowlist. A wildcard listener acc
 connections; a specific remote-interface listener needs a client supplying an
 allowed Host and network access to that interface.
 
+## Optional detail links
+
+Answer in words first. Agents can then offer a matching Desktop view with
+`ui_get_link`, available to the ordinary `ledger/read` credential, including
+under `--read-only`. It returns a credential-free absolute URL and structured
+view/filter identifiers without opening or changing a browser. No pairing,
+association or live tab is needed to generate a link. Browser access still
+requires human pairing.
+
+The CLI uses the same contract without starting or contacting Desktop:
+
+```sh
+bk ui link --view-id transactions --company acme --account 5000 \
+  --from 2026-10-01 --to 2026-10-31
+bk --json ui link --view-id income-statement --company acme \
+  --from 2026-10-01 --to 2026-10-31 \
+  --compare-from 2026-09-01 --compare-to 2026-09-30
+```
+
+Use `--bind 127.0.0.1:PORT` for a nondefault listener. All current views, including
+`settings` and record details, have stable IDs. `ui_get_link` and `ui_show_view`
+share validation; unsupported filters return `VALIDATION` rather than being
+silently omitted. Include the company, currency and explicit dates from the
+financial answer to make its link reproducible.
+
+An unpaired browser remembers the requested view while the human opens the
+terminal's one-time pairing URL in that same browser. Confirming **Pair this
+browser** then opens the original destination with its filters. An already
+paired browser arriving from an external site can use **continue to your
+requested view** if its Strict cookie was withheld. See the
+[deep-link contract](docs/deep-links.md) for filter mappings, comparisons,
+pairing lifetime and examples.
+
 ## Agent navigation
 
 The `ui_show_view`, `ui_highlight` and `ui_status` MCP tools require a separate

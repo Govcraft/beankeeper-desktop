@@ -109,3 +109,33 @@ separate invites. Each associated browser has one current agent identity; a
 human confirmation can replace it. Pending events from the previous identity
 are discarded. See [navigation](navigation.md) for tool arguments, SSE delivery,
 tab selection and acknowledgement behavior.
+
+## Returning to an optional detail link
+
+An anonymous GET/HEAD to a valid view shows the pairing explanation and saves
+its canonical local destination in a separate bounded registry. A short-lived,
+HttpOnly, SameSite=Strict `bk_desktop_PORT_return` cookie holds only a random
+lookup value, never the URL, bearer token, pairing secret or session credential.
+It does not authorize any browser read or write. The registry has at most 64
+entries and expires each entry five minutes after its first creation. Repeated
+visits in the same browser replace that browser's pending destination; the most
+recent view wins. A server restart clears the registry.
+
+The human opens the existing terminal pairing URL in the same browser and
+confirms its form. Only a valid, exact-Origin pairing POST creates the session,
+consumes the pending destination and redirects there with HTTP 303. The response
+clears the return cookie. Failed pairing attempts leave the destination intact.
+Expired or forged lookup values fall back to `/`; reopening the original detail
+URL saves a fresh destination. No anonymous request can mint a pairing link.
+
+Destinations use the shared view selector: only known local HTML views with
+valid, supported filters are accepted. Absolute URLs, protocol-relative paths,
+backslashes, fragments, controls, route traversal, unknown fields and duplicate
+query keys cannot become redirect destinations. Browser writes and requests
+carrying bearer credentials never set a return destination.
+
+When an external navigation withholds an existing Strict session cookie, the
+pairing explanation offers an ordinary same-origin continuation link. That
+follow-up can send the existing cookie and open the requested view without
+pairing again. This flow needs no JavaScript and grants no navigation or approval
+rights to the agent which generated the detail link.

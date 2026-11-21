@@ -1,11 +1,17 @@
 # Agent navigation
 
-Desktop composes `ui_show_view`, `ui_highlight` and `ui_status` with the upstream
+Desktop composes `ui_get_link`, `ui_show_view`, `ui_highlight` and `ui_status` with the upstream
 ledger MCP server at `/mcp`. It uses upstream `http_router_with_host_tools` and
 `HostToolHandler`, pinned to `a81ed93` or later. Upstream authenticates each
 request, filters discovery by signed grants, checks live expiry/revocation and
 passes the request's verified identity to the Desktop callback. Desktop has no
 parallel authentication or ledger tool implementation.
+
+`ui_get_link` is read-only and requires `ledger/read`, so default agent setup
+can offer optional links without a UI token or live tab. It does not associate
+an agent or enqueue events. It shares the stable view/filter contract below
+with navigation. See [deep links](deep-links.md) for the CLI equivalent, pairing
+return flow and exact upstream identifier mappings.
 
 ## Grant and client setup
 
@@ -74,6 +80,7 @@ are retained. A full queue produces a useful busy error.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
+| `ui_get_link` | `view_id`, optional `state` | Absolute `url`, relative `path`, `view_id` and `state`. No browser side effects. Requires `ledger/read`. |
 | `ui_show_view` | `view_id`, optional `state`, optional `tab_id` | Queues an addressable view, or describes invalid filters / the no-tab fallback. |
 | `ui_highlight` | `target`, optional `tab_id` | Queues a highlight by exact DOM ID. Missing targets are a successful no-op. |
 | `ui_status` | Optional `tab_id` | Pairing state, connected tabs, confirmed URLs/titles, highlighted IDs, available targets, pending event counts and an association URL. |
@@ -82,6 +89,7 @@ View IDs map to the real server-rendered pages:
 
 | `view_id` | Route | Detail state |
 | --- | --- | --- |
+| `settings` | `/settings` | No filters. |
 | `dashboard` | `/` | Optional company/currency. |
 | `accounts` | `/accounts` | Optional company. |
 | `transactions` | `/transactions` | Company, account and register filters. |
@@ -93,18 +101,25 @@ View IDs map to the real server-rendered pages:
 | `reconciliation` | `/reconciliation` | Company/currency, account and reconciliation filters. |
 
 `state` accepts `company`, `account`, `from`, `to`, `min_amount`, `max_amount`,
-`search`, `status`, `offset`, `currency`, `transaction_id`, `proposal_id`,
+`search`, `status`, `offset`, `currency`, `category`, `payee`, `compare_from`,
+`compare_to`, `transaction_id`, `proposal_id`,
 `report_kind`, `period`, `metric`, `year`, `threshold`, `cash_account`, `mode`,
 `statement`, `statement_balance`, and `link_key`. Date, amount, clearance and
 offset validation reuses the real view validator. Amount bounds are strings containing nonnegative whole
-minor units. Reports accept the stable [report IDs and URL filters](reports.md),
+minor units. `category` is an exact entry tax-category tag and `payee` matches
+`metadata.payee` exactly; both apply only to the register. Account, tax category,
+amount and clearance must match the same entry. `compare_from` and `compare_to`
+are paired, inclusive bounds for a second register or period-report section.
+Balance sheets instead accept `compare_to` alone for an as-of comparison.
+Comparisons are not supported by the report catalog or reconciliation.
+Reports accept the stable [report IDs and URL filters](reports.md),
 either directly as `view_id` or through `view_id: "reports"` with `report_kind`.
 `period` and `metric` apply to trends, `year` to budget variance, `threshold` to
 1099, and `cash_account` to cash flow. Reconciliation accepts `account`, `to`,
 `mode`, `statement`, `statement_balance` and `link_key`. These values restore
 through the view's ordinary GET form. Unsupported filter/view combinations fail
 rather than dropping filters. Report option validation reuses the report query
-contract without reading ledger data. Initial budget and reconciliation pages
+contract without reading ledger data. The comparison bounds must also obey the report rules. Initial budget and reconciliation pages
 can open without a year or account. Navigation opens HTML views; download formats
 remain in the browser's download links. Register periods use inclusive
 `from`/`to` dates. Review views accept company and
