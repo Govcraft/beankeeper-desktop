@@ -12,7 +12,7 @@ use beankeeper_cli::db::Db;
 
 use crate::{
     links::{
-        ACCOUNTS, HOME, REPORT_ROUTE, REPORTS, ReportKind, SETTINGS, TRANSACTION_ROUTE,
+        ACCOUNTS, HOME, REPORT_ROUTE, REPORTS, ReportKind, SETTINGS, SUMMARY, TRANSACTION_ROUTE,
         TRANSACTIONS,
     },
     markup::{Attribute, Markup, markup, write_markup},
@@ -72,6 +72,7 @@ struct ViewState {
 pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> Router {
     let data = Router::new()
         .route(HOME, get(view))
+        .route(SUMMARY, get(view))
         .route(
             SETTINGS,
             get(|session: HumanSession| async move {

@@ -74,6 +74,10 @@ balance-sheet snapshot comparison; see supported views and all
 identifiers in the [deep-link contract](docs/deep-links.md). Do not substitute a
 category's display name for its identifier or a fuzzy text search for a payee.
 
+For a financial summary, pass `desktop_view.link` to `ui_get_link` when it is
+present. Preserve the date bounds and complete account selections in summary and
+cash-flow chart links. See [summary and chart link fields](docs/deep-links.md#shared-upstream-identifiers).
+
 Example after answering an October spending question:
 
 ```json

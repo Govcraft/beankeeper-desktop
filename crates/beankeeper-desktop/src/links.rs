@@ -86,6 +86,7 @@ macro_rules! desktop_views {
 
 desktop_views! {
     Dashboard as "dashboard" => #[serde(default)] Validated<Dashboard>,
+    FinancialSummary as "financial-summary" => #[serde(default)] Validated<Summary>,
     Accounts as "accounts" => #[serde(default)] Validated<Company>,
     Transactions as "transactions" => #[serde(default)] Validated<Transactions>,
     Transaction as "transaction" => Validated<Transaction>,
@@ -104,6 +105,7 @@ desktop_views! {
 }
 
 pub(crate) const HOME: &str = "/";
+pub(crate) const SUMMARY: &str = "/summary";
 pub(crate) const ACCOUNTS: &str = "/accounts";
 pub(crate) const TRANSACTIONS: &str = "/transactions";
 pub(crate) const TRANSACTION_ROUTE: &str = "/transactions/{id}";
@@ -118,6 +120,7 @@ const REVIEW_PREFIX: &str = "/review/";
 
 pub(crate) enum LedgerRoute {
     Home,
+    Summary,
     Accounts,
     Register,
     Transaction(values::TransactionId),
@@ -127,6 +130,7 @@ impl LedgerRoute {
     pub(crate) fn parse(path: &str) -> Result<Self, &'static str> {
         match path {
             HOME => Ok(Self::Home),
+            SUMMARY => Ok(Self::Summary),
             ACCOUNTS => Ok(Self::Accounts),
             TRANSACTIONS => Ok(Self::Register),
             path => path
@@ -157,6 +161,7 @@ fn parse_view_segment(
             } else {
                 match LedgerRoute::parse(path)? {
                     LedgerRoute::Home => View::Dashboard,
+                    LedgerRoute::Summary => View::FinancialSummary,
                     LedgerRoute::Accounts => View::Accounts,
                     LedgerRoute::Register => View::Transactions,
                     LedgerRoute::Transaction(id) => {
@@ -208,6 +213,7 @@ impl ViewAddress {
     pub(crate) fn path(&self) -> Result<String, &'static str> {
         let (route, fields) = match self {
             Self::Dashboard { state } => (HOME.into(), fields(state)?),
+            Self::FinancialSummary { state } => (SUMMARY.into(), fields(state)?),
             Self::Accounts { state } => (ACCOUNTS.into(), fields(state)?),
             Self::Transactions { state } => (TRANSACTIONS.into(), fields(state)?),
             Self::Transaction { state } => (state.route(), fields(state)?),
@@ -264,6 +270,8 @@ fn encode_path(mut route: String, fields: serde_json::Value) -> Result<String, &
         "year",
         "threshold",
         "cash_account",
+        "receivable_account",
+        "payable_account",
         "mode",
         "statement",
         "statement_balance",
@@ -275,10 +283,20 @@ fn encode_path(mut route: String, fields: serde_json::Value) -> Result<String, &
         if value.is_null() {
             continue;
         }
-        let value = value
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| value.to_string());
+        let value = if let Some(accounts) = value.as_array() {
+            if accounts.is_empty() {
+                continue;
+            }
+            accounts
+                .iter()
+                .map(|account| account.as_str().ok_or("Invalid account selection."))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",")
+        } else {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned)
+        };
         route.push(if route.contains('?') { '&' } else { '?' });
         route.push_str(key);
         route.push('=');
@@ -315,10 +333,14 @@ pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
         {
             return Err("Duplicate or unsupported address field.");
         }
-        let value = if key == "offset" {
-            serde_json::json!(value.parse::<i64>().map_err(|_| "Invalid offset.")?)
-        } else {
-            serde_json::json!(value)
+        let value = match key.as_ref() {
+            "offset" => serde_json::json!(value.parse::<i64>().map_err(|_| "Invalid offset.")?),
+            "cash_account" | "receivable_account" | "payable_account" => {
+                let accounts: values::AccountSelection =
+                    value.parse().map_err(|_| "Invalid account selection.")?;
+                serde_json::json!(accounts)
+            }
+            _ => serde_json::json!(value),
         };
         fields.insert(key.into_owned(), value);
     }
@@ -413,7 +435,13 @@ pub(crate) struct RawLinkFlags {
     threshold: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[arg(long)]
-    cash_account: Option<String>,
+    cash_account: Option<values::AccountSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    receivable_account: Option<values::AccountSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    payable_account: Option<values::AccountSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     mode: Option<String>,
@@ -486,6 +514,10 @@ mod tests {
     {
         for (view, state) in [
             ("dashboard", json!({"company":"a & b", "currency":"USD"})),
+            (
+                "financial-summary",
+                json!({"company":"acme","currency":"USD","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30","cash_account":["1000","1100"],"receivable_account":"1210","payable_account":"2010"}),
+            ),
             ("accounts", json!({"company":"acme"})),
             (
                 "transactions",
@@ -507,6 +539,10 @@ mod tests {
             (
                 "cash-flow",
                 json!({"cash_account":"1000","from":"2026-10-01","to":"2026-10-31"}),
+            ),
+            (
+                "cash-flow",
+                json!({"cash_account":["1000","1100"],"from":"2026-10-01","to":"2026-10-31"}),
             ),
             (
                 "trend",
@@ -586,7 +622,7 @@ mod tests {
         let schema = schemars::schema_for!(ViewAddress).to_value();
         assert_eq!(schema["type"], "object");
         let variants = schema["oneOf"].as_array().ok_or("view alternatives")?;
-        assert_eq!(variants.len(), 16);
+        assert_eq!(variants.len(), 17);
         for (view, expected, required) in [
             ("settings", vec![], None),
             ("accounts", vec!["company"], None),
