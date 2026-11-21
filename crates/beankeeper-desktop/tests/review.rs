@@ -158,9 +158,9 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
     for expected in [
         &id,
         "Supplies &lt;script&gt;",
-        "2500 USD minor units",
-        "max per posting 100",
-        "daily cap 200",
+        "$25.00",
+        "max per posting $1.00",
+        "daily cap $2.00",
         fixture.proposer["agent_uri"]
             .as_str()
             .ok_or("proposer URI")?,
@@ -177,6 +177,9 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
         .text()?;
     for expected in [
         "Full proposed posting",
+        "Approve and post $25.00",
+        "class=\"amount\">$25.00</td>",
+        "raw minor units",
         "5000",
         "1000",
         "office",

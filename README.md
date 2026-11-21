@@ -204,6 +204,12 @@ Host/Origin checks. After pairing, reopen a saved view URL to restore its filter
 - **Reconciliation** (`/reconciliation`): account and statement clearance balances,
   outstanding items and bank or settlement mode. This view is read-only.
 
+Browser amounts use currency symbols, comma grouping and currency-specific
+precision, such as `$55,620.00`, `MX$40,324.70`, `¥1,234` and `BHD 1.234`.
+Report HTML uses upstream decimal display fields in place of raw amount columns.
+Register amount filters still accept integer minor units. JSON/CSV downloads,
+raw audit snapshots and the full proposed posting retain their original units.
+
 Choose a company in each view. Without a URL company filter, `--company` or
 `BEANKEEPER_COMPANY` supplies the default; otherwise the first listed company is
 selected visibly. No company data is combined silently. These pages never edit
@@ -224,7 +230,7 @@ missing records and read failures have explicit states.
 
 Open `/review?company=acme` to see pending proposals created through `bk txn
 propose` or MCP. Each item links to `/review/PROPOSAL_ID?company=acme`, showing
-proposer identity, debit total in currency minor units, posting description,
+proposer identity, formatted debit total, posting description,
 current spend caps, every entry and the complete frozen payload. Upstream does
 not store a separate proposal rationale or creation-time cap snapshot, so the
 posting description supplies the purpose and caps are labeled as current.

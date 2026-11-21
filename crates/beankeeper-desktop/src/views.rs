@@ -10,6 +10,8 @@ use beankeeper_cli::{
 };
 use serde::Deserialize;
 
+use crate::money;
+
 const PAGE_SIZE: usize = 50;
 const SCAN_LIMIT: usize = 1_000;
 
@@ -312,7 +314,7 @@ pub(crate) fn render(db: &Db, path: &str, query: &ViewQuery) -> Result<ViewPage,
         ),
         "/transactions" => (
             "Transactions",
-            "Filter your register. All amounts are in minor units.",
+            "Filter your register. Entry amounts are shown in their transaction currency.",
             "/transactions",
         ),
         path if path.starts_with("/transactions/") => (
@@ -367,12 +369,12 @@ fn dashboard(
     match resolve_report_currency(db.conn(), company, nonempty(&query.currency)) {
         Ok(currency) => {
             let code = currency.code();
-            let _ = write!(html, "<p>Currency: {}. Totals and net balances in minor units. Net is debits minus credits; negative balances are credit balances.</p><div class=\"table-scroll\"><table><caption>Balances for {}</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Debit</th><th scope=\"col\">Credit</th><th scope=\"col\">Net balance</th></tr></thead><tbody>", escape(code), escape(company));
+            let _ = write!(html, "<p>Currency: {}. Amounts are shown in the selected currency. Net is debits minus credits; negative balances are credit balances.</p><div class=\"table-scroll\"><table><caption>Balances for {}</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Debit</th><th scope=\"col\">Credit</th><th scope=\"col\">Net balance</th></tr></thead><tbody>", escape(code), escape(company));
             let balances = db::compute_trial_balance(db.conn(), company, None, None, None, Some(code))?;
             if balances.is_empty() { html.push_str("<tr><td colspan=\"4\">No accounts yet. Ask your agent to set up your chart of accounts.</td></tr>"); }
             for row in balances {
                 let account_query = ViewQuery { company: Some(company.into()), account: Some(row.code.clone()), currency: Some(code.into()), ..Default::default() };
-                let _ = write!(html, "<tr><th scope=\"row\"><a href=\"{}\">{} · {}</a></th><td class=\"amount\">{}</td><td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>", account_query.url("/transactions", company, 0), escape(&row.code), escape(&row.name), row.debit_total, row.credit_total, i128::from(row.debit_total) - i128::from(row.credit_total));
+                let _ = write!(html, "<tr><th scope=\"row\"><a href=\"{}\">{} · {}</a></th><td class=\"amount\">{}</td><td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>", account_query.url("/transactions", company, 0), escape(&row.code), escape(&row.name), money::minor(row.debit_total, code), money::minor(row.credit_total, code), money::minor(i128::from(row.debit_total) - i128::from(row.credit_total), code));
             }
             html.push_str("</tbody></table></div>");
         }
@@ -459,7 +461,7 @@ fn transaction_table(
         html.push_str("<p class=\"empty\">No transactions to show.</p>");
         return Ok(());
     }
-    html.push_str("<div class=\"table-scroll\"><table><caption>Transaction register</caption><thead><tr><th scope=\"col\">Date</th><th scope=\"col\">Payee / description</th><th scope=\"col\">Reference</th><th scope=\"col\">Currency</th><th scope=\"col\">Entries (minor units)</th></tr></thead><tbody>");
+    html.push_str("<div class=\"table-scroll\"><table><caption>Transaction register</caption><thead><tr><th scope=\"col\">Date</th><th scope=\"col\">Payee / description</th><th scope=\"col\">Reference</th><th scope=\"col\">Currency</th><th scope=\"col\">Entries</th></tr></thead><tbody>");
     for row in rows {
         let _ = write!(
             html,
@@ -479,7 +481,7 @@ fn transaction_table(
                 "<li>{}: {} {} ({})</li>",
                 escape(&entry.account_code),
                 escape(&entry.direction),
-                entry.amount,
+                escape(&money::minor(entry.amount, &row.currency)),
                 escape(&entry.status)
             );
         }
@@ -623,14 +625,14 @@ fn detail(
     html.push_str(&escape(
         txn.metadata.as_deref().unwrap_or("No metadata recorded."),
     ));
-    html.push_str("</pre></section><section><h2>Entries</h2><div class=\"table-scroll\"><table><caption>Amounts in minor units</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Clearance</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>");
+    html.push_str("</pre></section><section><h2>Entries</h2><div class=\"table-scroll\"><table><caption>Entry amounts in transaction currency</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Clearance</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>");
     for entry in &entries {
         let _ = write!(
             html,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             escape(&entry.account_code),
             escape(&entry.direction),
-            entry.amount,
+            escape(&money::minor(entry.amount, &txn.currency)),
             escape(&entry.status),
             escape(entry.memo.as_deref().unwrap_or("Not recorded")),
             escape(entry.tax_category.as_deref().unwrap_or("Not recorded"))
@@ -879,9 +881,9 @@ mod tests {
             ..Default::default()
         };
         let dashboard = render(&db, "/", &query)?;
-        assert!(dashboard.content.contains("12345"));
+        assert!(dashboard.content.contains("$123.45"));
         assert!(dashboard.content.contains("Net balance"));
-        assert!(dashboard.content.contains("class=\"amount\">-12345</td>"));
+        assert!(dashboard.content.contains("class=\"amount\">-$123.45</td>"));
         assert!(dashboard.content.contains("Recent activity"));
         assert!(
             dashboard
@@ -969,6 +971,55 @@ mod tests {
                 .content
                 .contains("0 matching transactions shown")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_currency_register_and_details_use_each_transactions_scale() -> TestResult {
+        let db = fixture()?;
+        for (code, amount, formatted) in [
+            ("USD", 5_562_000, "$55,620.00"),
+            ("JPY", 123_456, "¥123,456"),
+            ("BHD", 1234, "BHD 1.234"),
+            ("MXN", 4_032_470, "MX$40,324.70"),
+        ] {
+            let id = post(&db, code, code, amount, code, &Actor::new("owner"))?;
+            let query = ViewQuery {
+                company: Some("acme".into()),
+                ..Default::default()
+            };
+            let register = render(&db, "/transactions", &query)?;
+            assert!(register.content.contains(formatted));
+            let detail = render(&db, &format!("/transactions/{id}"), &query)?;
+            assert!(
+                detail
+                    .content
+                    .contains(&format!("class=\"amount\">{formatted}</td>"))
+            );
+            let dashboard = render(
+                &db,
+                "/",
+                &ViewQuery {
+                    currency: Some(code.into()),
+                    ..query
+                },
+            )?;
+            assert!(
+                dashboard
+                    .content
+                    .contains(&format!("class=\"amount\">{formatted}</td>"))
+            );
+            assert!(
+                dashboard
+                    .content
+                    .contains(&format!("class=\"amount\">-{formatted}</td>"))
+            );
+            assert!(
+                !dashboard
+                    .content
+                    .contains("Totals and net balances in minor units")
+            );
+        }
         Ok(())
     }
 
@@ -1100,8 +1151,8 @@ mod tests {
             },
         )?;
         assert!(selected.content.contains("Currency: USD"));
-        assert!(selected.content.contains("class=\"amount\">100</td>"));
-        assert!(!selected.content.contains("class=\"amount\">300</td>"));
+        assert!(selected.content.contains("class=\"amount\">$1.00</td>"));
+        assert!(!selected.content.contains("class=\"amount\">$3.00</td>"));
         Ok(())
     }
 

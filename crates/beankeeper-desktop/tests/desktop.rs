@@ -1013,6 +1013,7 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
     );
     let html = server.client.get(&url).send()?.error_for_status()?.text()?;
     assert!(html.contains("Coffee &lt;shop&gt;"));
+    assert!(html.contains("debit $25.00 (uncleared)"));
     assert!(html.contains(&format!("/transactions/{id}?company=acme")));
     assert_eq!(html, server.client.get(&url).send()?.text()?);
     let detail = server
@@ -1030,6 +1031,7 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
     ] {
         assert!(detail.contains(content), "{content}");
     }
+    assert!(detail.contains("class=\"amount\">$25.00</td>"));
     assert!(!detail.contains(token(&ledger.writer)?));
     assert!(!detail.contains("<shop>"));
     let dashboard = server
@@ -1038,6 +1040,6 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
         .send()?
         .error_for_status()?
         .text()?;
-    assert!(dashboard.contains("2500"));
+    assert!(dashboard.contains("class=\"amount\">$25.00</td>"));
     Ok(())
 }

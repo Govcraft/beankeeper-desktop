@@ -27,6 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::{
+    money,
     pairing::{self, PairingState, Session},
     ui,
     views::{encode, escape},
@@ -402,10 +403,9 @@ fn render(
 fn summary(review: &Review, proposal: &Proposal, html: &mut String) -> Result<(), CliError> {
     let _ = write!(
         html,
-        "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{} {} minor units</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
+        "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{}</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
         escape(&proposal.company_slug),
-        proposal.debit_total,
-        escape(&proposal.currency),
+        escape(&money::minor(proposal.debit_total, &proposal.currency)),
         escape(&proposal.proposer_uri),
         escape(&proposal.proposer_jti),
         escape(&proposal.created_at),
@@ -424,15 +424,14 @@ fn summary(review: &Review, proposal: &Proposal, html: &mut String) -> Result<()
     {
         let cap = |value: Option<i64>| {
             value
-                .map(|value| value.to_string())
+                .map(|value| escape(&money::minor(value, &limit.currency)))
                 .unwrap_or_else(|| "uncapped".into())
         };
         let _ = write!(
             html,
-            "max per posting {}, daily cap {} ({} minor units).",
+            "max per posting {}, daily cap {}.",
             cap(limit.max_post),
-            cap(limit.daily_limit),
-            escape(&limit.currency)
+            cap(limit.daily_limit)
         );
     } else if limits.is_empty() {
         html.push_str("no caps configured for this agent and company.");
@@ -461,7 +460,7 @@ fn proposal_detail(
     let posting = &proposal.payload;
     let _ = write!(
         html,
-        "<h3>Proposed posting</h3><dl><dt>Date</dt><dd>{}</dd><dt>Currency</dt><dd>{}</dd><dt>Reference</dt><dd>{}</dd></dl><div class=\"table-scroll\"><table><caption>Proposed entries, amounts in minor units</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>",
+        "<h3>Proposed posting</h3><dl><dt>Date</dt><dd>{}</dd><dt>Currency</dt><dd>{}</dd><dt>Reference</dt><dd>{}</dd></dl><div class=\"table-scroll\"><table><caption>Proposed entries in transaction currency</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>",
         escape(&posting.date),
         escape(&posting.currency),
         escape(posting.reference.as_deref().unwrap_or("Not recorded"))
@@ -472,7 +471,7 @@ fn proposal_detail(
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td></tr>",
             escape(&entry.account_code),
             escape(&entry.direction),
-            entry.amount,
+            escape(&money::minor(entry.amount, &posting.currency)),
             escape(entry.memo.as_deref().unwrap_or("Not recorded")),
             escape(entry.tax_category.as_deref().unwrap_or("Not recorded"))
         );
@@ -482,18 +481,17 @@ fn proposal_detail(
         .map_err(|error| CliError::General(error.to_string()))?;
     let _ = write!(
         html,
-        "<details><summary>Full proposed posting, including metadata and retry policy</summary><pre>{}</pre></details>",
+        "<details><summary>Full proposed posting, including metadata and retry policy (raw minor units)</summary><pre>{}</pre></details>",
         escape(&payload)
     );
     if proposal.status == "pending" {
         let _ = write!(
             html,
-            "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {} {} minor units</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
+            "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {}</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
             proposal.id,
             session.csrf.expose(),
             escape(&proposal.company_slug),
-            proposal.debit_total,
-            escape(&proposal.currency),
+            escape(&money::minor(proposal.debit_total, &proposal.currency)),
             proposal.id,
             session.csrf.expose(),
             escape(&proposal.company_slug)
