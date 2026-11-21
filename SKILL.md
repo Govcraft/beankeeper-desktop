@@ -21,9 +21,10 @@ processor using the commands below.
 
 Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
 if `cosign` is missing. Install it through the owner's trusted package channel
-or stop and explain what is missing. The commands select Desktop `0.1.0-rc.11`,
-the first release with managed hosting and agent registration. To select a
-newer signed release, set `BK_VERSION` to its version without the tag prefix.
+or stop and explain what is missing. Guided setup requires Desktop `0.1.0-rc.12`
+or a newer signed release. The commands select `0.1.0-rc.12` by default. If that
+release is still pending, report it and stop. To select a newer release, set
+`BK_VERSION` to its version without the tag prefix.
 
 ### Linux and macOS
 
@@ -33,13 +34,14 @@ detects Linux versus macOS and x86-64 versus Arm64.
 ```sh
 (
     set -eu
-    export BK_VERSION="${BK_VERSION:-0.1.0-rc.11}"
+    export BK_VERSION="${BK_VERSION:-0.1.0-rc.12}"
     bk_bin="$HOME/.local/bin"
     bk_download="$(mktemp -d)"
     trap 'rm -rf "$bk_download"' EXIT
     mkdir -p "$bk_bin"
     curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh -o "$bk_download/install.sh"
-    BK_REQUIRE_SIGNATURES=1 BK_INSTALL="$bk_bin" BK_NO_SERVICE=1 sh "$bk_download/install.sh"
+    BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$bk_bin" BK_NO_SERVICE=1 \
+        sh "$bk_download/install.sh"
     "$bk_bin/bk" service install --no-agents
     "$bk_bin/bk" agents connect --all --json
     "$bk_bin/bk" service status --json
@@ -54,12 +56,12 @@ for x64 Windows before downloading the release.
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'
-    $bkVersion = if ($env:BK_VERSION) { $env:BK_VERSION } else { '0.1.0-rc.11' }
+    $bkVersion = if ($env:BK_VERSION) { $env:BK_VERSION } else { '0.1.0-rc.12' }
     $bkDir = Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
     $bkSetup = Join-Path ([IO.Path]::GetTempPath()) ("bk-install-" + [guid]::NewGuid() + ".ps1")
     try {
         Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1' -OutFile $bkSetup
-        & $bkSetup -Version $bkVersion -RequireSignatures -NoService -InstallDir $bkDir
+        & $bkSetup -Version $bkVersion -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir
         $bk = Join-Path $bkDir 'bk.exe'
         & $bk service install --no-agents
         if ($LASTEXITCODE -ne 0) { throw 'Beankeeper service installation failed' }

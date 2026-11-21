@@ -11,7 +11,7 @@ $guideAst = [System.Management.Automation.Language.Parser]::ParseInput($fence.Gr
 if ($guideErrors.Count -gt 0) { throw "Invalid PowerShell install commands: $guideErrors" }
 $guideCommands = $guideAst.FindAll({ param($ast) $ast -is [System.Management.Automation.Language.CommandAst] }, $true)
 foreach ($required in @(
-    '& $bkSetup -Version $bkVersion -RequireSignatures -NoService -InstallDir $bkDir',
+    '& $bkSetup -Version $bkVersion -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir',
     '& $bk service install --no-agents',
     '& $bk agents connect --all --json',
     '& $bk service status --json'
