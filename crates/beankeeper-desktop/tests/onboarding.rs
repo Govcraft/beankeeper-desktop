@@ -342,6 +342,7 @@ fn assert_inactive(server: &Server, scoped: &str) -> TestResult {
 
 fn verify_scoped_stdio(server: &Server, scoped: &str) -> TestResult {
     let mut token_file = tempfile::NamedTempFile::new()?;
+    beankeeper_desktop::setup::keychain::restrict_file(token_file.path())?;
     token_file.write_all(scoped.as_bytes())?;
     token_file.flush()?;
     let input = [
