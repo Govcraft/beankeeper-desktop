@@ -2,7 +2,12 @@
 
 Start `bk serve` and open the one-time URL it prints to the terminal. The URL
 contains a fresh 256-bit secret from the operating system. It expires after five
-minutes, can be redeemed only once, and redirects to `/` after issuing a cookie.
+minutes and can be redeemed only once. Opening or refreshing the URL displays
+a confirmation page without consuming the secret or issuing a cookie. Select
+**Pair this browser** before the link expires to submit its token by POST.
+Only a successful POST consumes the token, issues a cookie and redirects to `/`.
+Duplicate or speculative GET/HEAD requests leave the link usable; confirmation
+requires an explicit click and is never submitted automatically.
 Opening `/` directly, including through `bk open`, displays a pairing screen
 until the browser has paired. Health and static CSS remain public; ledger tools
 remain available through authenticated MCP even before any browser pairs.
@@ -13,8 +18,10 @@ five minutes. If all links expire and no browser is paired, restart `bk serve`.
 Pairing links are secrets: keep terminal output private. No pairing secret,
 cookie credential or agent bearer token is stored on disk or placed in the
 public shell. Secrets are redacted from Debug output. A link necessarily appears
-in the address used to redeem it; the server redirects immediately, disables
-caching and referrers, and installs no request URL logger. Do not put a proxy or
+in the confirmation page's address and hidden form field. The server disables
+caching, restricts referrers to the same origin on the confirmation page so the
+form can send its Origin, and disables referrers on errors and the redirect after
+redemption. It installs no request URL logger. Do not put a proxy or
 access logger in front of this local listener.
 
 ## Human session boundary
@@ -44,6 +51,12 @@ Every cookie-authenticated write must pass the shared human-session middleware:
   URL-encoded `csrf` form field. Forms without a header are limited to 8 KiB.
 - No Authorization header. Bearer credentials cannot act as human credentials,
   including when a request also carries a valid cookie and CSRF token.
+
+The initial `POST /pair` has no session yet. It requires the unpredictable
+one-use token in a URL-encoded form, exactly one Origin matching the validated
+Host and port, and no Authorization header. Missing, null, cross-origin or
+duplicate Origins cannot redeem a link. Expired or consumed tokens return 410
+without issuing a cookie, including when they expire after the page was opened.
 
 The server uses an Origin check plus a synchronizer token as described by the
 [OWASP CSRF guidance](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).

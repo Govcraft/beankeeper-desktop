@@ -622,6 +622,87 @@ fn human_post(server: &Server, path: &str, body: String) -> reqwest::blocking::R
 }
 
 #[test]
+fn pairing_gets_are_repeatable_and_only_a_same_origin_post_consumes_the_token() -> TestResult {
+    let ledger = Ledger::new()?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    let url = server
+        .pairing_url
+        .as_deref()
+        .ok_or("pairing URL")?
+        .to_owned();
+    let pairing_token = url.split_once('=').ok_or("pairing token")?.1;
+    for _ in 0..2 {
+        let response = server.client.get(&url).send()?;
+        assert_eq!(response.status(), 200);
+        assert!(response.headers().get("set-cookie").is_none());
+        assert!(response.headers().get("location").is_none());
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        // The form needs the real Origin; no-referrer would produce Origin: null.
+        assert_eq!(response.headers()["referrer-policy"], "same-origin");
+        assert!(
+            response.headers()["content-security-policy"]
+                .to_str()?
+                .contains("form-action 'self'")
+        );
+        let html = response.text()?;
+        assert!(html.contains("<form method=\"post\" action=\"/pair\">"));
+        assert!(html.contains(&format!("name=\"token\" value=\"{pairing_token}\"")));
+        assert!(html.contains("<button type=\"submit\">Pair this browser</button>"));
+        assert!(!html.contains("http-equiv=\"refresh\""));
+    }
+    let response = server.client.head(&url).send()?;
+    assert_eq!(response.status(), 200);
+    assert!(response.headers().get("set-cookie").is_none());
+    assert_eq!(server.client.get(&server.base).send()?.status(), 401);
+
+    for (origin, expected) in [
+        (None, 401),
+        (Some("null"), 403),
+        (Some("https://evil.example"), 403),
+        (Some("http://127.0.0.1:1"), 403),
+    ] {
+        let mut request = server
+            .client
+            .post(format!("{}/pair", server.base))
+            .form(&[("token", pairing_token)]);
+        if let Some(origin) = origin {
+            request = request.header("Origin", origin);
+        }
+        let response = request.send()?;
+        assert_eq!(response.status(), expected);
+        assert!(response.headers().get("set-cookie").is_none());
+    }
+    let response = human_post(&server, "/pair", format!("token={pairing_token}"))
+        .header("Origin", &server.base)
+        .send()?;
+    assert_eq!(response.status(), 403);
+    assert!(response.headers().get("set-cookie").is_none());
+    let response = human_post(&server, "/pair", format!("token={pairing_token}"))
+        .bearer_auth(token(&ledger.writer)?)
+        .send()?;
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("set-cookie").is_none());
+    for (body, expected) in [
+        (String::new(), 422),
+        ("token=unknown".to_owned(), 410),
+        (format!("token={pairing_token}&token={pairing_token}"), 422),
+    ] {
+        let response = human_post(&server, "/pair", body).send()?;
+        assert_eq!(response.status(), expected);
+        assert!(response.headers().get("set-cookie").is_none());
+    }
+    // Failed writes and speculative reads have left the original link usable.
+    server.pair()?;
+    assert_eq!(server.client.get(&server.base).send()?.status(), 200);
+    let response = human_post(&server, "/pair", format!("token={pairing_token}")).send()?;
+    assert_eq!(response.status(), 410);
+    assert!(response.headers().get("set-cookie").is_none());
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert!(!response.text()?.contains(pairing_token));
+    Ok(())
+}
+
+#[test]
 fn raw_origin_and_bearer_tokens_cannot_grant_a_browser_session() -> TestResult {
     let ledger = Ledger::new()?;
     let mut server = Server::start(&ledger, &["serve"], Some(token(&ledger.writer)?))?;
@@ -731,7 +812,13 @@ fn browser_writes_require_origin_and_csrf_and_logout_revokes_the_cookie() -> Tes
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = other.get(&link).send()?;
+    assert_eq!(other.get(&link).send()?.status(), 200);
+    let pairing_token = link.split_once('=').ok_or("pairing token")?.1;
+    let response = other
+        .post(format!("{}/pair", server.base))
+        .header("Origin", &server.base)
+        .form(&[("token", pairing_token)])
+        .send()?;
     assert_eq!(response.status(), 303);
     assert!(response.headers().get("set-cookie").is_some());
     assert_eq!(other.get(&link).send()?.status(), 410);
@@ -785,6 +872,10 @@ fn authenticated_mcp_invites_require_human_confirmation_and_keep_agents_isolated
             .status(),
         410
     );
+    let invite_token = invite.split_once('=').ok_or("invite")?.1;
+    let response = human_post(&server, "/pair", format!("token={invite_token}")).send()?;
+    assert_eq!(response.status(), 410);
+    assert!(response.headers().get("set-cookie").is_none());
     server.pair()?;
     // Cookie authentication alone cannot call the ledger MCP endpoint.
     assert_eq!(server.request("tools/list", json!({}), None)?.status(), 401);

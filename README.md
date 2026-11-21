@@ -129,7 +129,9 @@ These checks complement MCP credentials and the separate browser session.
 
 ## Pair the browser and connect your agent
 
-Open the one-time URL printed by `bk serve` within five minutes. It exchanges a
+Open the one-time URL printed by `bk serve` and select **Pair this browser**
+within five minutes. Opening or refreshing the page leaves the link usable.
+The button submits a same-origin POST that exchanges the
 256-bit launch secret for an `HttpOnly`, `SameSite=Strict` cookie, then redirects
 to the workspace. The URL cannot be reused. Opening the raw origin or `bk open`
 without a valid cookie shows a pairing screen. Sessions expire after 12 hours

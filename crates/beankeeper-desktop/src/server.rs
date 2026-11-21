@@ -127,6 +127,7 @@ pub fn serve(cli: &Cli, options: ServeOptions) -> Result<(), DesktopError> {
         );
     }
     eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
+    eprintln!("Open the link, then select Pair this browser to confirm.");
     eprintln!(
         "Beankeeper Desktop listening on {} (MCP: /mcp)",
         local_url(bound)

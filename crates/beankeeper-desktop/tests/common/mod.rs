@@ -183,6 +183,19 @@ impl Server {
             .client
             .get(self.pairing_url.as_deref().ok_or("missing pairing URL")?)
             .send()?;
+        assert_eq!(response.status(), 200);
+        assert!(response.headers().get("set-cookie").is_none());
+        let html = response.text()?;
+        let token = html
+            .split_once("name=\"token\" value=\"")
+            .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value))
+            .ok_or("missing pairing token")?;
+        let response = self
+            .client
+            .post(format!("{}/pair", self.base))
+            .header("Origin", &self.base)
+            .form(&[("token", token)])
+            .send()?;
         assert_eq!(response.status(), 303);
         let attributes = response
             .headers()

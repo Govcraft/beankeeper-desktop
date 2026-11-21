@@ -76,7 +76,7 @@ pub(crate) async fn guard(
             .into_response()
     };
     // Hide the pairing secret on redemption redirects and error responses.
-    // Successful invite confirmation pages contain a same-origin POST form;
+    // Successful pairing and invite pages contain a same-origin POST form;
     // no-referrer would cause browsers to send Origin: null for that form.
     let referrer_policy = if pairing_url && response.status() != StatusCode::OK {
         "no-referrer"
