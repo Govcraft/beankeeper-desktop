@@ -21,6 +21,7 @@ use reqwest::{
     redirect::Policy,
 };
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
@@ -59,6 +60,8 @@ pub enum BridgeError {
     Rejected(StatusCode),
     /// The client or server sent malformed or oversized JSON-RPC.
     Protocol,
+    /// The managed service rejected the read-only diagnostic call.
+    ToolFailed,
 }
 
 impl fmt::Display for BridgeError {
@@ -71,6 +74,7 @@ impl fmt::Display for BridgeError {
             Self::Http(error) => write!(f, "MCP bridge cannot reach Desktop; start `bk serve` first: {error}"),
             Self::Rejected(status) => write!(f, "Desktop rejected the MCP bridge request (HTTP {status}); check the running server and agent token"),
             Self::Protocol => f.write_str("MCP bridge received malformed or oversized JSON-RPC"),
+            Self::ToolFailed => f.write_str("Desktop rejected the read-only MCP diagnostic. Check the agent's ledger read access."),
         }
     }
 }
@@ -128,6 +132,68 @@ fn run_connected(
     token_file: &Path,
     instructions: Option<&'static str>,
 ) -> Result<(), BridgeError> {
+    let mut transport =
+        connected_transport(url, token_file, instructions, Duration::from_secs(120))?;
+    let result = transport.forward(io::stdin().lock(), &mut io::stdout().lock());
+    transport.close();
+    result
+}
+
+/// Check a fixed read-only tool through the same protocol transport as clients.
+/// No tool result or credential is printed.
+pub(crate) fn probe_service_tool(url: &str, token_file: &Path) -> Result<(), BridgeError> {
+    use rmcp::model::CallToolResult;
+    use serde_json::json;
+
+    let mut transport = connected_transport(url, token_file, None, Duration::from_secs(5))?;
+    let mut requests = Vec::new();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{
+                "name":"bk agents doctor", "version":env!("CARGO_PKG_VERSION")
+            }
+        }}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"company_list", "arguments":{}
+        }}),
+    ] {
+        serde_json::to_writer(&mut requests, &request).map_err(|_| BridgeError::Protocol)?;
+        requests.push(b'\n');
+    }
+    let mut replies = Vec::new();
+    let result = transport.forward(requests.as_slice(), &mut replies);
+    transport.close();
+    result?;
+    if transport.session.is_none() || transport.protocol.is_none() {
+        return Err(BridgeError::Protocol);
+    }
+    for line in replies.lines() {
+        let reply: Value = serde_json::from_str(&line?).map_err(|_| BridgeError::Protocol)?;
+        if reply.get("id").and_then(Value::as_u64) != Some(2) {
+            continue;
+        }
+        let result = reply.get("result").ok_or(BridgeError::ToolFailed)?;
+        let result = CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)?;
+        // A list can travel as text content when the negotiated MCP version
+        // does not support array-shaped structured content.
+        return if result.is_error != Some(true)
+            && (result.structured_content.is_some() || !result.content.is_empty())
+        {
+            Ok(())
+        } else {
+            Err(BridgeError::ToolFailed)
+        };
+    }
+    Err(BridgeError::Protocol)
+}
+
+fn connected_transport(
+    url: &str,
+    token_file: &Path,
+    instructions: Option<&'static str>,
+    timeout: Duration,
+) -> Result<Transport, BridgeError> {
     let url = local_url(url)?;
     let secret = PrivateFile::open(token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
@@ -145,19 +211,16 @@ fn run_connected(
         .no_proxy()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(120))
+        .timeout(timeout)
         .default_headers(headers)
         .build()?;
-    let mut transport = Transport {
+    Ok(Transport {
         client,
         url,
         session: None,
         protocol: None,
         instructions,
-    };
-    let result = transport.forward(io::stdin().lock(), &mut io::stdout().lock());
-    transport.close();
-    result
+    })
 }
 
 fn local_url(input: &str) -> Result<Url, BridgeError> {
