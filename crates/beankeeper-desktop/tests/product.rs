@@ -130,6 +130,7 @@ fn update_check_cli_displays_cached_outcome_and_readable_utc_attempt() -> TestRe
     fs::create_dir(&state)?;
     let now = beankeeper_desktop::updates::now();
     let cache = serde_json::to_vec(&serde_json::json!({
+        "desktop_version": env!("CARGO_PKG_VERSION"),
         "last_attempt": now,
         "manifest": null,
         "message": "update download failed; check connectivity and retry after the daily interval"

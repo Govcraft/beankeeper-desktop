@@ -82,6 +82,9 @@ Ledger, library and schema work belongs in Govcraft/beankeeper.
 Desktop license and update state is available to the human at `/settings` in a
 paired browser. Cached update results show readable UTC attempt times and
 explain failed or incomplete checks; reading Settings does not contact the feed.
+Results are tied to the running Desktop version. A version change, or a legacy
+cache without a version, hides stale results until the next check refreshes them.
+The daily retry limit, including failures, applies within each version.
 The human can activate a downloaded file with `bk license activate FILE`,
 inspect it with `bk license`, check the signed release feed with
 `bk update-check`, and explicitly install an eligible release with
