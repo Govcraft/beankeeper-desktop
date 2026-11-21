@@ -6,6 +6,7 @@ pub mod browser;
 pub mod cli;
 pub mod license;
 pub mod links;
+mod markup;
 mod money;
 mod navigation;
 pub mod pairing;

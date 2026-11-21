@@ -1,7 +1,6 @@
 //! Browser-only proposal review using the upstream atomic ledger operations.
 
 use std::{
-    fmt::Write,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -27,10 +26,11 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::{
+    markup::{Attribute, Markup, markup, write_markup},
     money,
     pairing::{self, PairingState, Session},
     ui,
-    views::{encode, escape},
+    views::encode,
 };
 
 #[derive(Clone)]
@@ -163,7 +163,7 @@ fn failure(error: CliError, session: Option<&Session>) -> Response {
             "Review unavailable",
             message,
             "/review",
-            &format!(
+            markup!(
                 "<p><a href=\"/review\">Return to review queue</a></p>{}",
                 session.map(ui::session_controls).unwrap_or_default()
             ),
@@ -297,88 +297,96 @@ fn render(
     let actor = review.actor()?;
     let _snapshot = review.db.conn().unchecked_transaction()?;
     let companies = db::list_companies(review.db.conn())?;
-    let selected = query
+    let selected_company = query
         .company
         .as_deref()
         .filter(|value| !value.is_empty())
         .or(review.company.as_deref())
         .or_else(|| companies.first().map(|company| company.slug.as_str()));
-    let mut html = String::new();
+    let mut html = Markup::default();
     if let Some(verification) = &review.verification {
-        let _ = write!(
+        write_markup!(
             html,
             "<section aria-labelledby=\"verification\"><h2 id=\"verification\">Ledger verification</h2><p>Last checked: <time>{}</time>. This is a snapshot; re-run after changes made outside this browser.</p>",
-            escape(&verification.checked_at)
+            &verification.checked_at
         );
         if let Some(error) = &verification.error {
-            let _ = write!(
+            write_markup!(
                 html,
                 "<p role=\"alert\"><strong>Verification failed. Ledger integrity is not confirmed.</strong> {}</p>",
-                escape(error)
+                error
             );
         } else {
-            html.push_str(
-                "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>",
+            write_markup!(
+                html,
+                "<p><strong>Intact: hash chain and all bk verify checks passed.</strong></p>"
             );
         }
-        let _ = write!(
+        write_markup!(
             html,
             "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
             session.csrf.expose(),
-            escape(selected.unwrap_or_default())
+            selected_company.unwrap_or_default()
         );
     }
-    let panel_length = html.len();
+    let mut proposal_html = Markup::default();
     let result = (|| -> Result<(), CliError> {
-        if let Some(company) = selected {
+        let html = &mut proposal_html;
+        if let Some(company) = selected_company {
             if !companies.iter().any(|item| item.slug == company) {
                 return Err(CliError::NotFound("company not found".into()));
             }
-            html.push_str(
-                "<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">",
+            write_markup!(
+                html,
+                "<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">"
             );
             for item in &companies {
-                let _ = write!(
+                write_markup!(
                     html,
                     "<option value=\"{}\"{}>{} ({})</option>",
-                    escape(&item.slug),
-                    if item.slug == company {
-                        " selected"
-                    } else {
-                        ""
-                    },
-                    escape(&item.name),
-                    escape(&item.slug)
+                    &item.slug,
+                    Attribute::Selected(item.slug == company),
+                    &item.name,
+                    &item.slug
                 );
             }
-            html.push_str("</select></label><button type=\"submit\">Show queue</button></form>");
+            write_markup!(
+                html,
+                "</select></label><button type=\"submit\">Show queue</button></form>"
+            );
             if let Some(id) = id {
                 let id: ProposalId = id
                     .parse()
                     .map_err(|_| CliError::NotFound("proposal not found".into()))?;
                 let proposal = proposals::get(review.db.conn(), company, id.as_str())?;
-                proposal_detail(review, &proposal, session, &mut html)?;
+                proposal_detail(review, &proposal, session, html)?;
             } else {
                 let pending = proposals::list(review.db.conn(), company, &actor, false)?;
-                html.push_str("<section><h2>Pending proposals</h2>");
+                write_markup!(html, "<section><h2>Pending proposals</h2>");
                 if pending.is_empty() {
-                    html.push_str("<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>");
+                    write_markup!(
+                        html,
+                        "<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>"
+                    );
                 }
                 for proposal in &pending {
-                    let _ = write!(
+                    write_markup!(
                         html,
                         "<article><h3><a href=\"/review/{}?company={}\">{}</a></h3>",
                         proposal.id,
                         encode(company),
-                        escape(&proposal.payload.description)
+                        &proposal.payload.description
                     );
-                    summary(review, proposal, &mut html)?;
-                    html.push_str("</article>");
+                    summary(review, proposal, html)?;
+                    write_markup!(html, "</article>");
                 }
-                html.push_str("</section>");
+                write_markup!(html, "</section>");
             }
         } else {
-            html.push_str("<p>No companies yet. Ask your agent to create your books.</p>");
+            write_markup!(
+                html,
+                "<p>No companies yet. Ask your agent to create your books.</p>"
+            );
         }
         Ok(())
     })();
@@ -387,60 +395,68 @@ fn render(
             return Err(error);
         }
         eprintln!("Browser proposal data failed: {error}");
-        html.truncate(panel_length);
-        html.push_str("<section><h2>Proposal data unavailable</h2><p>The ledger could not supply trustworthy proposal data. Review the verification result above, then check the server log and repair the ledger before deciding.</p></section>");
+        write_markup!(
+            html,
+            "<section><h2>Proposal data unavailable</h2><p>The ledger could not supply trustworthy proposal data. Review the verification result above, then check the server log and repair the ledger before deciding.</p></section>"
+        );
+    } else {
+        html.append(&proposal_html);
     }
-    html.push_str(&ui::session_controls(session));
+    html.append(&ui::session_controls(session));
     Ok(ui::page(
         "Review queue",
         "Your agent proposes. You review the full posting and decide.",
         "/review",
-        &html,
+        html,
     )
     .into_response())
 }
 
-fn summary(review: &Review, proposal: &Proposal, html: &mut String) -> Result<(), CliError> {
-    let _ = write!(
+fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<(), CliError> {
+    write_markup!(
         html,
         "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{}</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
-        escape(&proposal.company_slug),
-        escape(&money::minor(proposal.debit_total, &proposal.currency)),
-        escape(&proposal.proposer_uri),
-        escape(&proposal.proposer_jti),
-        escape(&proposal.created_at),
-        escape(&proposal.status),
-        escape(&proposal.payload.description)
+        &proposal.company_slug,
+        &money::minor(proposal.debit_total, &proposal.currency),
+        &proposal.proposer_uri,
+        &proposal.proposer_jti,
+        &proposal.created_at,
+        &proposal.status,
+        &proposal.payload.description
     );
     let limits = db::spend_limits::list(
         review.db.conn(),
         &proposal.proposer_uri,
         Some(&proposal.company_slug),
     )?;
-    html.push_str("<p>Current spend-limit context: ");
+    write_markup!(html, "<p>Current spend-limit context: ");
     if let Some(limit) = limits
         .iter()
         .find(|limit| limit.currency == proposal.currency)
     {
         let cap = |value: Option<i64>| {
             value
-                .map(|value| escape(&money::minor(value, &limit.currency)))
+                .map(|value| money::minor(value, &limit.currency))
                 .unwrap_or_else(|| "uncapped".into())
         };
-        let _ = write!(
+        write_markup!(
             html,
             "max per posting {}, daily cap {}.",
             cap(limit.max_post),
             cap(limit.daily_limit)
         );
     } else if limits.is_empty() {
-        html.push_str("no caps configured for this agent and company.");
+        write_markup!(html, "no caps configured for this agent and company.");
     } else {
-        html.push_str(
-            "no cap configured for this currency; direct agent posting would be blocked.",
+        write_markup!(
+            html,
+            "no cap configured for this currency; direct agent posting would be blocked."
         );
     }
-    html.push_str(" These are current caps, not historical usage or the reason the agent proposed. Human approval can override caps; the amount still counts toward the proposer’s spend.</p>");
+    write_markup!(
+        html,
+        " These are current caps, not historical usage or the reason the agent proposed. Human approval can override caps; the amount still counts toward the proposer’s spend.</p>"
+    );
     Ok(())
 }
 
@@ -448,73 +464,74 @@ fn proposal_detail(
     review: &Review,
     proposal: &Proposal,
     session: &Session,
-    html: &mut String,
+    html: &mut Markup,
 ) -> Result<(), CliError> {
-    let _ = write!(
+    write_markup!(
         html,
         "<section><h2>{}</h2><p>Proposal <code>{}</code></p>",
-        escape(&proposal.payload.description),
+        &proposal.payload.description,
         proposal.id
     );
     summary(review, proposal, html)?;
     let posting = &proposal.payload;
-    let _ = write!(
+    write_markup!(
         html,
         "<h3>Proposed posting</h3><dl><dt>Date</dt><dd>{}</dd><dt>Currency</dt><dd>{}</dd><dt>Reference</dt><dd>{}</dd></dl><div class=\"table-scroll\"><table><caption>Proposed entries in transaction currency</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>",
-        escape(&posting.date),
-        escape(&posting.currency),
-        escape(posting.reference.as_deref().unwrap_or("Not recorded"))
+        &posting.date,
+        &posting.currency,
+        posting.reference.as_deref().unwrap_or("Not recorded")
     );
     for entry in &posting.entries {
-        let _ = write!(
+        write_markup!(
             html,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td></tr>",
-            escape(&entry.account_code),
-            escape(&entry.direction),
-            escape(&money::minor(entry.amount, &posting.currency)),
-            escape(entry.memo.as_deref().unwrap_or("Not recorded")),
-            escape(entry.tax_category.as_deref().unwrap_or("Not recorded"))
+            &entry.account_code,
+            &entry.direction,
+            &money::minor(entry.amount, &posting.currency),
+            entry.memo.as_deref().unwrap_or("Not recorded"),
+            entry.tax_category.as_deref().unwrap_or("Not recorded")
         );
     }
-    html.push_str("</tbody></table></div>");
+    write_markup!(html, "</tbody></table></div>");
     let payload = serde_json::to_string_pretty(&proposal.payload)
         .map_err(|error| CliError::General(error.to_string()))?;
-    let _ = write!(
+    write_markup!(
         html,
         "<details><summary>Full proposed posting, including metadata and retry policy (raw minor units)</summary><pre>{}</pre></details>",
-        escape(&payload)
+        &payload
     );
     if proposal.status == "pending" {
-        let _ = write!(
+        write_markup!(
             html,
             "<p>Approve posts this exact request as the local human. Reject records your decision without posting. Approval cannot be undone from this queue.</p><form method=\"post\" action=\"/review/{}/approve\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Approve and post {}</button></form><form method=\"post\" action=\"/review/{}/reject\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><label>Rejection reason (optional)<input name=\"reason\" maxlength=\"2000\"></label><button type=\"submit\">Reject proposal</button></form>",
             proposal.id,
             session.csrf.expose(),
-            escape(&proposal.company_slug),
-            escape(&money::minor(proposal.debit_total, &proposal.currency)),
+            &proposal.company_slug,
+            &money::minor(proposal.debit_total, &proposal.currency),
             proposal.id,
             session.csrf.expose(),
-            escape(&proposal.company_slug)
+            &proposal.company_slug
         );
     } else {
-        let _ = write!(
+        write_markup!(
             html,
             "<p>Resolved at {} by {}.</p>",
-            escape(proposal.resolved_at.as_deref().unwrap_or("not recorded")),
-            escape(proposal.resolved_by_uri.as_deref().unwrap_or("local human"))
+            proposal.resolved_at.as_deref().unwrap_or("not recorded"),
+            proposal.resolved_by_uri.as_deref().unwrap_or("local human")
         );
         if let Some(reason) = &proposal.reason {
-            let _ = write!(html, "<p>Decision reason: {}</p>", escape(reason));
+            write_markup!(html, "<p>Decision reason: {}</p>", reason);
         }
         if let Some(id) = proposal.transaction_id {
-            let _ = write!(
+            write_markup!(
                 html,
-                "<p><a href=\"/transactions/{id}?company={}\">View posted transaction</a></p>",
+                "<p><a href=\"/transactions/{}?company={}\">View posted transaction</a></p>",
+                id,
                 encode(&proposal.company_slug)
             );
         }
     }
-    let _ = write!(
+    write_markup!(
         html,
         "<p><a href=\"/review?company={}\">Back to pending proposals</a></p></section>",
         encode(&proposal.company_slug)

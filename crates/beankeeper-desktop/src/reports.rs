@@ -19,8 +19,11 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::money;
-use crate::views::{ViewError, ViewPage, ViewQuery, encode, escape, input, nonempty, valid_date};
+use crate::views::{ViewError, ViewPage, ViewQuery, encode, input, nonempty, valid_date};
+use crate::{
+    markup::{Attribute, Markup, markup, write_markup},
+    money,
+};
 
 /// Stable view IDs for agent navigation. Financial/tax IDs use `/reports/ID`;
 /// reconciliation uses `/reconciliation`. All filters are query parameters.
@@ -290,7 +293,7 @@ impl ReportQuery {
             }
         }
         let _ = write!(url, "&format={format}");
-        escape(&url)
+        url
     }
 }
 
@@ -323,18 +326,17 @@ pub(crate) fn render(
         })
     };
     let Some(company) = company else {
-        return Ok(page(
+        return Ok(page(markup!(
             "<p class=\"empty\">No companies yet. Ask your agent to initialize your books.</p>"
-                .into(),
-        ));
+        )));
     };
     if !companies.iter().any(|c| c.slug == company) {
         return Err(ViewError::NotFound);
     }
-    let mut html = String::new();
+    let mut html = Markup::default();
     let Some(kind) = kind else {
         html = form(db, &companies, company, path, None, query)?;
-        html.push_str("<section><h2>Choose a report</h2><ul>");
+        write_markup!(html, "<section><h2>Choose a report</h2><ul>");
         for id in VIEW_IDS {
             let path = if *id == "reconciliation" {
                 "/reconciliation".into()
@@ -342,22 +344,28 @@ pub(crate) fn render(
                 format!("/reports/{id}")
             };
             let title = Kind::parse(&path)?.title();
-            let _ = write!(
+            write_markup!(
                 html,
-                "<li><a href=\"{path}?company={}\">{title}</a></li>",
-                encode(company)
+                "<li><a href=\"{}?company={}\">{}</a></li>",
+                path,
+                encode(company),
+                title
             );
         }
-        html.push_str("</ul></section>");
+        write_markup!(html, "</ul></section>");
         return Ok(page(html));
     };
     if kind.tax() {
-        html.push_str(
-            "<p class=\"note\">Bookkeeping summary only. Not tax advice; not a filed form.</p>",
+        write_markup!(
+            html,
+            "<p class=\"note\">Bookkeeping summary only. Not tax advice; not a filed form.</p>"
         );
     }
     if kind == Kind::Reconciliation {
-        html.push_str("<p>Read-only clearance and settlement state. No clear, reconcile or approval actions are available here. Statement balance is in major units.</p>");
+        write_markup!(
+            html,
+            "<p>Read-only clearance and settlement state. No clear, reconcile or approval actions are available here. Statement balance is in major units.</p>"
+        );
     }
     let format = nonempty(&query.format).unwrap_or("html");
     if !["html", "json", "csv"].contains(&format) || (format == "csv" && !kind.tax()) {
@@ -371,9 +379,12 @@ pub(crate) fn render(
                 && nonempty(&query.year).is_none()
                 && nonempty(&query.filters.from).is_none()))
     {
-        html.insert_str(0, &form(db, &companies, company, path, Some(kind), query)?);
-        html.push_str(
-            "<p class=\"empty\">Choose the report filters above, then apply to see results.</p>",
+        let mut body = form(db, &companies, company, path, Some(kind), query)?;
+        body.append(&html);
+        html = body;
+        write_markup!(
+            html,
+            "<p class=\"empty\">Choose the report filters above, then apply to see results.</p>"
         );
         return Ok(page(html));
     }
@@ -421,49 +432,52 @@ pub(crate) fn render(
         query.filters.from = data["from"].as_str().map(str::to_owned);
         query.filters.to = data["to"].as_str().map(str::to_owned);
     }
-    html.insert_str(0, &form(db, &companies, company, path, Some(kind), &query)?);
+    let mut body = form(db, &companies, company, path, Some(kind), &query)?;
+    body.append(&html);
+    let mut html = body;
     let currency = resolve_report_currency(db.conn(), company, nonempty(&query.filters.currency))
         .map_err(report_error)?;
-    let _ = write!(html, "<p>Report currency: {}.</p>", escape(currency.code()));
+    write_markup!(html, "<p>Report currency: {}.</p>", currency.code());
     if kind == Kind::Income {
-        html.push_str(&income_context(db, company, &data, currency.code())?);
+        html.append(&income_context(db, company, &data, currency.code())?);
     }
-    let _ = write!(
+    write_markup!(
         html,
         "<p><a download href=\"{}\">Download JSON</a>",
         query.url(path, company, "json")
     );
     if kind.tax() && comparison.is_none() {
-        let _ = write!(
+        write_markup!(
             html,
             " · <a download href=\"{}\">Download CSV</a>",
             query.url(path, company, "csv")
         );
     }
-    html.push_str(
-        "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>",
+    write_markup!(
+        html,
+        "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>"
     );
     value_html(&data, Some(currency.code()), &mut html);
-    html.push_str("</section>");
+    write_markup!(html, "</section>");
     if let Some((q, data)) = comparison {
-        let _ = write!(
+        write_markup!(
             html,
             "<section id=\"comparison-results\" class=\"report-results\"><h2>{}</h2>",
             if kind == Kind::Balance {
                 format!(
                     "Comparison as of {}",
-                    escape(q.filters.to.as_deref().unwrap_or_default())
+                    q.filters.to.as_deref().unwrap_or_default()
                 )
             } else {
                 format!(
                     "Comparison period: {} through {}",
-                    escape(q.filters.from.as_deref().unwrap_or_default()),
-                    escape(q.filters.to.as_deref().unwrap_or_default())
+                    q.filters.from.as_deref().unwrap_or_default(),
+                    q.filters.to.as_deref().unwrap_or_default()
                 )
             }
         );
         value_html(&data, Some(currency.code()), &mut html);
-        html.push_str("</section>");
+        write_markup!(html, "</section>");
     }
     Ok(page(html))
 }
@@ -473,16 +487,16 @@ fn income_context(
     company: &str,
     data: &Value,
     currency: &str,
-) -> Result<String, ViewError> {
+) -> Result<Markup, ViewError> {
     let (Some(from), Some(to)) = (data["from"].as_str(), data["to"].as_str()) else {
         return Err(ViewError::Invalid(
             "The income statement did not include a reporting period.",
         ));
     };
-    let mut html = format!(
+    let mut html = markup!(
         "<p>Reporting period: {} through {} (inclusive).</p>",
-        escape(from),
-        escape(to)
+        from,
+        to
     );
     if data["total_revenue"].as_i64() != Some(0) || data["total_expenses"].as_i64() != Some(0) {
         return Ok(html);
@@ -505,10 +519,10 @@ fn income_context(
             return Ok(html);
         }
     }
-    let _ = write!(
+    write_markup!(
         html,
         "<p class=\"empty\">No revenue or expense activity in this range for {}. Choose different dates above to see another period, or <a href=\"/transactions?company={}&amp;currency={}\">view company transactions across all dates</a>.</p>",
-        escape(currency),
+        currency,
         encode(company),
         encode(currency)
     );
@@ -525,23 +539,19 @@ fn report_error(error: CliError) -> ViewError {
 }
 
 fn select(
-    html: &mut String,
+    html: &mut Markup,
     name: &str,
     label: &str,
     value: &Option<String>,
     default: &str,
     options: &[&str],
 ) {
-    let _ = write!(html, "<label>{label}<select name=\"{name}\">");
+    write_markup!(html, "<label>{}<select name=\"{}\">", label, name);
     for choice in options {
-        let selected = if nonempty(value).unwrap_or(default) == *choice {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(html, "<option{selected}>{choice}</option>");
+        let selected = Attribute::Selected(nonempty(value).unwrap_or(default) == *choice);
+        write_markup!(html, "<option{}>{}</option>", selected, choice);
     }
-    html.push_str("</select></label>");
+    write_markup!(html, "</select></label>");
 }
 
 fn form(
@@ -551,50 +561,51 @@ fn form(
     path: &str,
     kind: Option<Kind>,
     q: &ReportQuery,
-) -> Result<String, ViewError> {
-    let mut html = format!(
+) -> Result<Markup, ViewError> {
+    let mut html = markup!(
         "<form id=\"report-filters\" method=\"get\" action=\"{}\" class=\"filters\"><label>Company<select name=\"company\">",
-        escape(path)
+        path
     );
     for c in companies {
-        let _ = write!(
+        write_markup!(
             html,
             "<option value=\"{}\"{}>{} ({})</option>",
-            escape(&c.slug),
-            if c.slug == company { " selected" } else { "" },
-            escape(&c.name),
-            escape(&c.slug)
+            &c.slug,
+            Attribute::Selected(c.slug == company),
+            &c.name,
+            &c.slug
         );
     }
-    html.push_str("</select></label>");
+    write_markup!(html, "</select></label>");
     for (name, value) in [
         ("compare_from", &q.filters.compare_from),
         ("compare_to", &q.filters.compare_to),
     ] {
         if let Some(value) = value {
-            let _ = write!(
+            write_markup!(
                 html,
-                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
-                escape(value)
+                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+                name,
+                value
             );
         }
     }
     if let Some(kind) = kind {
         if !matches!(kind, Kind::Balance | Kind::Reconciliation) {
-            html.push_str(&input(
+            html.append(&input(
                 "from",
                 "From date (inclusive)",
                 "date",
                 &q.filters.from,
             ));
         }
-        html.push_str(&input(
+        html.append(&input(
             "to",
             "Through date (inclusive)",
             "date",
             &q.filters.to,
         ));
-        html.push_str(&input(
+        html.append(&input(
             "currency",
             "Currency (required for multi-currency books)",
             "text",
@@ -620,27 +631,30 @@ fn form(
                 );
             }
             Kind::Budget => {
-                html.push_str(&input(
+                html.append(&input(
                     "year",
                     "Budget year (or use a whole-month date range)",
                     "number",
                     &q.year,
                 ));
             }
-            Kind::Vendor => html.push_str(&input(
+            Kind::Vendor => html.append(&input(
                 "threshold",
                 "Minimum payee total (major units; default 600)",
                 "text",
                 &q.threshold,
             )),
-            Kind::Cash => html.push_str(&input(
+            Kind::Cash => html.append(&input(
                 "cash_account",
                 "Cash account (optional; inferred by name)",
                 "text",
                 &q.cash_account,
             )),
             Kind::Reconciliation => {
-                html.push_str("<label>Account<select name=\"account\"><option value=\"\">Choose account</option>");
+                write_markup!(
+                    html,
+                    "<label>Account<select name=\"account\"><option value=\"\">Choose account</option>"
+                );
                 for account in db::list_accounts(
                     db.conn(),
                     &db::ListAccountParams {
@@ -649,20 +663,16 @@ fn form(
                         name_filter: None,
                     },
                 )? {
-                    let _ = write!(
+                    write_markup!(
                         html,
                         "<option value=\"{}\"{}>{} · {}</option>",
-                        escape(&account.code),
-                        if nonempty(&q.filters.account) == Some(&account.code) {
-                            " selected"
-                        } else {
-                            ""
-                        },
-                        escape(&account.code),
-                        escape(&account.name)
+                        &account.code,
+                        Attribute::Selected(nonempty(&q.filters.account) == Some(&account.code)),
+                        &account.code,
+                        &account.name
                     );
                 }
-                html.push_str("</select></label>");
+                write_markup!(html, "</select></label>");
                 select(
                     &mut html,
                     "mode",
@@ -671,19 +681,19 @@ fn form(
                     "bank",
                     &["bank", "settlement"],
                 );
-                html.push_str(&input(
+                html.append(&input(
                     "statement",
                     "Statement ID (required for settlement)",
                     "text",
                     &q.statement,
                 ));
-                html.push_str(&input(
+                html.append(&input(
                     "statement_balance",
                     "Statement balance (major units)",
                     "text",
                     &q.statement_balance,
                 ));
-                html.push_str(&input(
+                html.append(&input(
                     "link_key",
                     "Settlement link key (default applies_to)",
                     "text",
@@ -693,9 +703,12 @@ fn form(
             _ => {}
         }
     }
-    html.push_str("<button type=\"submit\">Apply</button></form>");
+    write_markup!(html, "<button type=\"submit\">Apply</button></form>");
     if kind == Some(Kind::Budget) {
-        html.push_str("<p class=\"note\">Budget variance covers whole calendar months within one year. Use both date bounds, starting on the first day and ending on the last day of a month, or enter a year for the full year. Includes accounts without a budget.</p>");
+        write_markup!(
+            html,
+            "<p class=\"note\">Budget variance covers whole calendar months within one year. Use both date bounds, starting on the first day and ending on the last day of a month, or enter a year for the full year. Includes accounts without a budget.</p>"
+        );
     }
     Ok(html)
 }
@@ -709,7 +722,7 @@ fn text(value: &Value) -> String {
 }
 
 fn label(key: &str) -> String {
-    escape(&key.replace('_', " "))
+    key.replace('_', " ")
 }
 
 fn currency<'a>(value: &'a Value, inherited: Option<&'a str>) -> Option<&'a str> {
@@ -726,7 +739,7 @@ fn visible_field(map: &serde_json::Map<String, Value>, key: &str) -> bool {
 
 // Upstream identifies monetary fields with display companions. Counts, IDs,
 // percentages and user metadata must never be scaled just because they are numbers.
-fn field_html(row: &Value, key: &str, inherited: Option<&str>, html: &mut String) {
+fn field_html(row: &Value, key: &str, inherited: Option<&str>, html: &mut Markup) {
     let code = currency(row, inherited);
     if let Some(display) = row.get(format!("{key}_display")) {
         display_html(&row[key], display, code, html);
@@ -735,45 +748,45 @@ fn field_html(row: &Value, key: &str, inherited: Option<&str>, html: &mut String
     }
 }
 
-fn display_html(raw: &Value, display: &Value, code: Option<&str>, html: &mut String) {
+fn display_html(raw: &Value, display: &Value, code: Option<&str>, html: &mut Markup) {
     if let (Some(value), Some(code)) = (display.as_str(), code)
         && let Some(formatted) = money::decimal(value, code)
     {
-        let _ = write!(html, "<span class=\"amount\">{}</span>", escape(&formatted));
+        write_markup!(html, "<span class=\"amount\">{}</span>", &formatted);
     } else if let (Some(raw), Some(displays)) = (raw.as_array(), display.as_array())
         && raw.len() == displays.len()
     {
-        html.push_str("<ol>");
+        write_markup!(html, "<ol>");
         for (raw, display) in raw.iter().zip(displays) {
-            html.push_str("<li>");
+            write_markup!(html, "<li>");
             display_html(raw, display, code, html);
-            html.push_str("</li>");
+            write_markup!(html, "</li>");
         }
-        html.push_str("</ol>");
+        write_markup!(html, "</ol>");
     } else {
         value_html(raw, code, html);
         if !raw.is_null() {
-            html.push_str(" (minor units; currency format unavailable)");
+            write_markup!(html, " (minor units; currency format unavailable)");
         }
     }
 }
 
 // Preserve nested report details while presenting each monetary field once,
 // using its upstream decimal companion as the primary human-readable value.
-fn value_html(value: &Value, inherited: Option<&str>, html: &mut String) {
+fn value_html(value: &Value, inherited: Option<&str>, html: &mut Markup) {
     let code = currency(value, inherited);
     match value {
         Value::Object(map) => {
-            html.push_str("<dl>");
+            write_markup!(html, "<dl>");
             for key in map.keys().filter(|key| visible_field(map, key)) {
-                let _ = write!(html, "<dt>{}</dt><dd>", label(key));
+                write_markup!(html, "<dt>{}</dt><dd>", label(key));
                 field_html(value, key, code, html);
-                html.push_str("</dd>");
+                write_markup!(html, "</dd>");
             }
-            html.push_str("</dl>");
+            write_markup!(html, "</dl>");
         }
         Value::Array(rows) if rows.is_empty() => {
-            html.push_str("<p class=\"empty\">No matching rows.</p>")
+            write_markup!(html, "<p class=\"empty\">No matching rows.</p>")
         }
         Value::Array(rows) => {
             if rows.iter().all(|row| {
@@ -787,36 +800,39 @@ fn value_html(value: &Value, inherited: Option<&str>, html: &mut String) {
                     .filter_map(Value::as_object)
                     .flat_map(|map| map.keys().filter(|key| visible_field(map, key)))
                     .collect();
-                html.push_str("<div class=\"table-scroll\" tabindex=\"0\" role=\"region\" aria-label=\"Report table\"><table><caption>Report rows</caption><thead><tr>");
+                write_markup!(
+                    html,
+                    "<div class=\"table-scroll\" tabindex=\"0\" role=\"region\" aria-label=\"Report table\"><table><caption>Report rows</caption><thead><tr>"
+                );
                 for key in &columns {
-                    let _ = write!(html, "<th scope=\"col\">{}</th>", label(key));
+                    write_markup!(html, "<th scope=\"col\">{}</th>", label(key));
                 }
-                html.push_str("</tr></thead><tbody>");
+                write_markup!(html, "</tr></thead><tbody>");
                 for row in rows {
-                    html.push_str("<tr>");
+                    write_markup!(html, "<tr>");
                     for key in &columns {
-                        html.push_str("<td>");
+                        write_markup!(html, "<td>");
                         field_html(row, key, code, html);
-                        html.push_str("</td>");
+                        write_markup!(html, "</td>");
                     }
-                    html.push_str("</tr>");
+                    write_markup!(html, "</tr>");
                 }
-                html.push_str("</tbody></table></div>");
+                write_markup!(html, "</tbody></table></div>");
             } else {
-                html.push_str("<ol class=\"report-items\">");
+                write_markup!(html, "<ol class=\"report-items\">");
                 for row in rows {
-                    html.push_str("<li>");
+                    write_markup!(html, "<li>");
                     value_html(row, code, html);
-                    html.push_str("</li>");
+                    write_markup!(html, "</li>");
                 }
-                html.push_str("</ol>");
+                write_markup!(html, "</ol>");
             }
         }
         Value::Number(_) => {
-            let _ = write!(html, "<span class=\"number\">{value}</span>");
+            write_markup!(html, "<span class=\"number\">{}</span>", value);
         }
-        Value::Null => html.push_str("Not recorded"),
-        _ => html.push_str(&escape(&text(value))),
+        Value::Null => write_markup!(html, "Not recorded"),
+        _ => html.push_text(&text(value)),
     }
 }
 
@@ -907,7 +923,7 @@ mod tests {
             let ReportResponse::Page(page) = render(&db, path, &ReportQuery::default())? else {
                 return Err("expected HTML".into());
             };
-            assert!(page.content.contains("No companies yet"));
+            assert!(page.content.as_str().contains("No companies yet"));
         }
         db.conn().execute("DROP TABLE companies", [])?;
         let error = render(&db, "/reports", &ReportQuery::default())
@@ -967,8 +983,9 @@ mod tests {
     #[test]
     fn nested_report_tables_preserve_optional_columns_and_escape_all_text() {
         let value = json!([{"name":"<script> & \"payee\"", "amount":123}, {"name":"second", "later_field":"<private>"}]);
-        let mut html = String::new();
+        let mut html = Markup::default();
         value_html(&value, None, &mut html);
+        let html = html.as_str();
         assert!(html.contains("later field"));
         assert!(html.contains("&lt;private&gt;"));
         assert!(html.contains("&lt;script&gt; &amp; &quot;payee&quot;"));
@@ -988,8 +1005,9 @@ mod tests {
             "metadata": {"amount": 777}
         });
         let original = value.clone();
-        let mut html = String::new();
+        let mut html = Markup::default();
         value_html(&value, None, &mut html);
+        let html = html.as_str();
         for expected in [
             "$55,620.00",
             "$40,324.70",
@@ -1023,8 +1041,9 @@ mod tests {
             {"currency": "XYZ<script>", "amount": 1234, "amount_display": null},
             {"amount": 5, "amount_display": "<script>"}
         ]);
-        let mut html = String::new();
+        let mut html = Markup::default();
         value_html(&value, Some("USD"), &mut html);
+        let html = html.as_str();
         for expected in [
             "$12.34",
             "¥1,234",
@@ -1058,7 +1077,10 @@ mod tests {
             threshold: Some("0".into()),
             ..Default::default()
         };
-        let link = q.url("/reports/1099", "a&b", "csv");
+        let url = q.url("/reports/1099", "a&b", "csv");
+        assert!(url.ends_with("&format=csv"));
+        let link = markup!("<a href=\"{}\">Download</a>", url);
+        let link = link.as_str();
         for expected in [
             "company=a%26b",
             "&amp;from=2026-01-01",

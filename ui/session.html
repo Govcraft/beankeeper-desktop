@@ -1,12 +1,12 @@
 <section aria-labelledby="session">
   <h2 id="session">Paired browser</h2>
-  <p data-agent-connection>{{connection}}</p>
+  <p data-agent-connection>{}</p>
   <form method="post" action="/api/session/pairing">
-    <input type="hidden" name="csrf" value="{{csrf}}">
+    <input type="hidden" name="csrf" value="{}">
     <button type="submit">Pair another browser</button>
   </form>
   <form method="post" action="/api/session/logout">
-    <input type="hidden" name="csrf" value="{{csrf}}">
+    <input type="hidden" name="csrf" value="{}">
     <button type="submit">Unpair this browser</button>
   </form>
 </section>
