@@ -237,6 +237,9 @@ fn environment(paths: &Paths) -> Vec<(&'static str, &Path)> {
 }
 
 pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceError> {
+    // systemd restricts characters in the first executable token, even when
+    // quoted. env accepts the owner's full path as an argument and execs it
+    // in the same process, preserving the PID tracked by systemd.
     let executable = systemd_word(text(&config.executable)?)?;
     let mut env = String::new();
     for (key, path) in environment(paths) {
@@ -253,7 +256,7 @@ pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceE
     }
     let log = systemd_word(&format!("append:{}", paths.log().display()))?.replace("$$", "$");
     Ok(format!(
-        "[Unit]\nDescription=Beankeeper Desktop local agent service\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart={executable} service run\n{env}Restart=on-failure\nRestartSec=2\nTimeoutStopSec=20\nUMask=0077\nStandardOutput={log}\nStandardError={log}\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Beankeeper Desktop local agent service\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {executable} service run\n{env}Restart=on-failure\nRestartSec=2\nTimeoutStopSec=20\nUMask=0077\nStandardOutput={log}\nStandardError={log}\n\n[Install]\nWantedBy=default.target\n"
     ))
 }
 
@@ -320,6 +323,48 @@ switch ($Operation) {{
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn generated_systemd_unit_passes_the_native_parser_when_available() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        if Command::new("systemd-analyze")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return Ok(());
+        }
+        let root = tempfile::Builder::new()
+            .prefix("bk service café 's-")
+            .tempdir()?;
+        let executable = root.path().join("bk");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let paths = Paths {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            state: root.path().join("state"),
+            logs: root.path().join("logs"),
+            definition: root.path().join(UNIT),
+        };
+        let config = Config {
+            executable,
+            books: paths.data.join("books.db"),
+            port: 8750,
+        };
+        std::fs::write(&paths.definition, systemd(&paths, &config)?)?;
+        let result = Command::new("systemd-analyze")
+            .args(["verify", "--man=no"])
+            .arg(&paths.definition)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        Ok(())
+    }
+
     #[test]
     fn windows_scripts_preserve_unicode_owner_paths_with_utf8_bom() -> TestResult {
         let paths = Paths {
