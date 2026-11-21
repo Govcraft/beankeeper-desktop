@@ -264,6 +264,36 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert_eq!(status["running"], true);
     assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(status["mcp_endpoint"], format!("{}/mcp", server.base));
+    let agent_command = || {
+        let mut command = configured();
+        command
+            .env("HOME", &home)
+            .env("CODEX_HOME", home.join("managed-codex"));
+        command
+    };
+    let output = agent_command()
+        .args(["agents", "connect", "codex", "--json"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let output = agent_command()
+        .args(["agents", "doctor", "codex", "--json"])
+        .output()?;
+    let diagnostic: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        output.status.success(),
+        "{diagnostic}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(diagnostic["data"]["agents"][0]["state"], "configured");
+    assert_eq!(diagnostic["data"]["service"]["state"], "ready");
+    assert_eq!(
+        diagnostic["data"]["service"]["endpoint"],
+        status["mcp_endpoint"]
+    );
     let duplicate = configured().args(["service", "run"]).output()?;
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
@@ -278,6 +308,15 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout)?["running"],
         false
+    );
+    let output = agent_command()
+        .args(["agents", "doctor", "codex", "--json"])
+        .output()?;
+    let diagnostic: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(!output.status.success());
+    assert_eq!(
+        diagnostic["data"]["service"]["error"]["code"],
+        "SERVICE_NOT_READY"
     );
     fs::write(&runtime_path, &runtime)?;
     // Both stdio launchers discover the same running service. The extension

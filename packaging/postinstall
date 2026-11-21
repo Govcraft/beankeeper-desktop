@@ -9,7 +9,13 @@ case "$owner" in root|loginwindow|_mbsetupuser|'')
 esac
 uid="$(id -u "$owner")"
 user_home="$(dscl . -read "/Users/$owner" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
-launchctl asuser "$uid" sudo -u "$owner" env HOME="$user_home" \
-    /usr/local/bin/bk service install || {
-    echo 'Background setup needs attention. As the desktop user, run: bk service install' >&2
+run_as_owner() {
+    launchctl asuser "$uid" sudo -u "$owner" env HOME="$user_home" /usr/local/bin/bk "$@"
 }
+if run_as_owner service install --no-agents; then
+    if [ "${BK_NO_AGENTS:-0}" != 1 ]; then
+        run_as_owner agents connect --all || echo 'Agent registration needs attention. As the desktop user, run: bk agents doctor' >&2
+    fi
+else
+    echo 'Background setup needs attention. As the desktop user, run: bk service install --no-agents' >&2
+fi

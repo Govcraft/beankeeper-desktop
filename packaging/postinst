@@ -18,7 +18,14 @@ if [ ! -S "/run/user/$uid/bus" ]; then
     echo 'No desktop user bus is available. After login, run: bk service install' >&2
     exit 0
 fi
-runuser -u "$owner" -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$uid" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" /usr/bin/bk service install || {
-    echo 'Background setup needs attention. As the desktop user, run: bk service install' >&2
+run_as_owner() {
+    runuser -u "$owner" -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" /usr/bin/bk "$@"
 }
+if run_as_owner service install --no-agents; then
+    if [ "${BK_NO_AGENTS:-0}" != 1 ]; then
+        run_as_owner agents connect --all || echo 'Agent registration needs attention. As the desktop user, run: bk agents doctor' >&2
+    fi
+else
+    echo 'Background setup needs attention. As the desktop user, run: bk service install --no-agents' >&2
+fi

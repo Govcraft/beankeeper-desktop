@@ -6,7 +6,7 @@ use beankeeper_cli::{
     error::CliError,
 };
 use beankeeper_desktop::{
-    DesktopError, bridge, browser,
+    DesktopError, agents, bridge, browser,
     cli::{self, OpenOptions, ServeOptions},
     links, onboarding, product, server, service, setup, updates,
 };
@@ -26,6 +26,16 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|error| error.exit());
             let json = ledger.is_json();
             links::run(options, ledger.company, json).map_err(DesktopError::Link)
+        }
+        Some(("agents", options)) => {
+            let options = agents::AgentOptions::from_arg_matches(options)
+                .unwrap_or_else(|error| error.exit());
+            let json = matches.get_flag("json")
+                || matches!(
+                    matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
+                    Some(beankeeper_cli::cli::OutputFormat::Json)
+                );
+            return agents::run(options, json, matches.get_flag("quiet"));
         }
         Some(("service", options)) => {
             let options = service::ServiceOptions::from_arg_matches(options)
