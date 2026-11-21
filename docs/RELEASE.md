@@ -32,6 +32,11 @@ Inspect the compiled-in values with `bk license trust --json`; the release smoke
 | `aarch64-apple-darwin` | `bk-VERSION-aarch64-apple-darwin.tar.gz`, `bk-VERSION-aarch64-apple-darwin.pkg` |
 | `x86_64-pc-windows-msvc` | `bk-VERSION-x86_64-pc-windows-msvc.zip`, `bk-VERSION-x86_64-pc-windows-msvc-setup.exe` |
 
+Each target also produces `bk-VERSION-TARGET.mcpb` for Claude Desktop. These
+bundles contain the final native binary, manifest, icon, license, and agent
+skill. They use the same SHA-256, Sigstore bundle and provenance as the other
+release assets. Verify and install using the [Claude Desktop guide](claude-desktop.md).
+
 Linux binaries are built natively on Ubuntu 24.04 (glibc 2.39 or newer). Debian
 packages use `amd64` / `arm64`, install `/usr/bin/bk`, and conflict with the
 upstream CLI packages that own that path. macOS packages are architecture
@@ -49,7 +54,7 @@ Encrypted startup uses upstream's resolved-passphrase router factory on all
 three platforms. The service retrieves its stored credential without prompting.
 No Unix-only passphrase descriptor is required for Windows hosting.
 
-`checksums-sha256.txt` contains every final archive and installer. The tag-release
+`checksums-sha256.txt` contains every final archive, installer and MCP bundle. The tag-release
 job uses the existing [D13 approach](https://github.com/Govcraft/beankeeper/pull/108):
 `cosign sign-blob` creates `ARTIFACT.sigstore` for every asset and the checksum
 manifest, and `actions/attest-build-provenance` attests all those same files.
@@ -80,6 +85,7 @@ cargo build --release --locked
 python3 scripts/release.py stage --target x86_64-unknown-linux-gnu --binary target/release/bk
 python3 scripts/release.py installer --target x86_64-unknown-linux-gnu
 python3 scripts/release.py archive --target x86_64-unknown-linux-gnu
+python3 scripts/release.py mcpb --target x86_64-unknown-linux-gnu
 python3 scripts/release.py checksums
 dpkg-deb --info dist/bk-0.1.0-x86_64-unknown-linux-gnu.deb
 (cd dist && sha256sum --check checksums-sha256.txt)

@@ -98,6 +98,9 @@ fn main() -> ExitCode {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             setup::run(&mut ledger, &options).map_err(|error| DesktopError::Setup(Box::new(error)))
         }
+        Some(("mcp", mcp)) if mcp.subcommand_name() == Some("extension") => {
+            bridge::run_extension().map_err(DesktopError::Bridge)
+        }
         Some(("mcp", mcp)) if mcp.subcommand_name() == Some("bridge") => {
             let options = bridge::BridgeOptions::from_arg_matches(
                 mcp.subcommand_matches("bridge")
