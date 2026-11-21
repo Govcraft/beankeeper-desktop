@@ -39,14 +39,15 @@ specific, install `/usr/local/bin/bk`, and replace an existing binary at that
 path. Windows uses Inno Setup 6 on the Windows runner to create an x64, per-user
 installer in `%LOCALAPPDATA%\Programs\Beankeeper Desktop`, with an uninstaller.
 The installer does not change PATH. Windows ARM64 is not yet supported.
-Installers do not start a server, register services or access accounting data.
+Installers register per-user background hosting by default, creating encrypted
+local books only for an identifiable logged-in owner. Use `BK_NO_SERVICE=1`, the
+shell `--no-service`, PowerShell `-NoService`, or EXE `/NOSERVICE=1` to opt out.
+Package hooks never create root-owned books. Without a suitable login session,
+they leave setup for `bk service install` after login. See [service lifecycle](service.md).
 
-Desktop main currently uses Unix passphrase FDs for encrypted startup. Windows
-packages build and include the CLI/UI host, but encrypted `bk serve` remains
-unsupported by this Desktop integration. Upstream added a resolved-passphrase
-router factory in [beankeeper#111](https://github.com/Govcraft/beankeeper/pull/111),
-closing #109; Desktop has not yet integrated it. Packaging does not change that
-boundary. See [the frontend integration notes](frontend.md).
+Encrypted startup uses upstream's resolved-passphrase router factory on all
+three platforms. The service retrieves its stored credential without prompting.
+No Unix-only passphrase descriptor is required for Windows hosting.
 
 `checksums-sha256.txt` contains every final archive and installer. The tag-release
 job uses the existing [D13 approach](https://github.com/Govcraft/beankeeper/pull/108):
@@ -167,8 +168,9 @@ curl -fsSLO https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/i
 BK_VERSION=0.1.0 BK_INSTALL="$HOME/.local/bin" sh install.sh
 ```
 
-The shell install directory must already exist. Its default is `/usr/local/bin`
-and installation uses sudo when needed. On Windows, download `install.ps1`,
+The shell installer creates its destination directory, defaulting to
+`~/.local/bin`. A custom system directory can require sudo for binary placement;
+service setup still runs as the invoking desktop user. On Windows, download `install.ps1`,
 inspect it, then use:
 
 ```powershell
