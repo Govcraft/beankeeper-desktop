@@ -71,7 +71,12 @@ unpaired browser instructs the human to pair from the terminal first, then reope
 the invite. If Strict cookies were withheld when following a link from an
 external site, **Continue in this browser** starts a same-origin navigation and
 shows the confirmation form. An agent cannot exchange its own invite for a
-human session.
+human session. A paired browser with an open event stream still needs this
+confirmation before agent navigation is available. Its live notice asks for the
+agent connection link until association, and updates in already-open tabs when
+the connection is confirmed. Navigation and highlight calls without a matching
+live associated tab return an explicit `NO_CONNECTED_TAB` tool error with a
+message and association link; `ui_status` remains available for checking readiness.
 
 Desktop keys associations by SHA-256 of the upstream-verified identity URI and
 token ID, never by a client-supplied MCP session ID or agent name. This lets the

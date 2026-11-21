@@ -441,16 +441,15 @@ impl Navigation {
             ));
         }
         let Some((id, tab)) = available.into_iter().next() else {
-            let url = self
-                .pairing
-                .agent_pairing_url(agent, Instant::now())
-                .map_err(|_| ErrorData::internal_error("Pairing link unavailable", None))?;
-            return Ok(reply(
-                format!(
-                    "{description} No connected matching tab; nothing was displayed. Open this association link in a paired browser: {url}"
-                ),
-                json!({"queued":false,"pairing_url":url}),
-            ));
+            let mut result = self.failure_with_link(
+                &agent,
+                "NO_CONNECTED_TAB",
+                &format!("{description} No connected matching tab."),
+            )?;
+            if let Some(payload) = &mut result.structured_content {
+                payload["queued"] = json!(false);
+            }
+            return Ok(result);
         };
         if event["kind"] == "highlight"
             && !tab
@@ -670,7 +669,8 @@ async fn events(
                 .get_mut(&input.tab_id)
                 .filter(|tab| tab.session == live.id && tab.epoch == lease.epoch)?;
             tab.seen = Instant::now();
-            let event = next_event(&mut tab.pending, live.agent.as_ref());
+            let mut event = next_event(&mut tab.pending, live.agent.as_ref());
+            event["agent_associated"] = json!(live.agent.is_some());
             let _keep_lease = &lease;
             Some(Ok::<_, Infallible>(
                 Event::default().event("ui").data(event.to_string()),

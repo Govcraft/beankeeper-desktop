@@ -159,11 +159,31 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(launch)
-            page.get_by_text("Agent navigation connected.", exact=True).wait_for()
-            invitation = call("ui_status")["pairing_url"]
+            unassociated = "Browser paired. Open your agent's connection link to enable navigation."
+            page.get_by_text(unassociated, exact=True).wait_for()
+            assert page.get_by_text("Agent navigation connected.", exact=True).count() == 0
+            before = call("ui_status")
+            assert before["paired"] is False and before["tabs"] == [], before
+            for name, arguments in [
+                ("ui_show_view", {"view_id": "accounts"}),
+                ("ui_highlight", {"target": "main"}),
+            ]:
+                result = rpc("tools/call", {"name": name, "arguments": arguments})["result"]
+                assert result["isError"] is True, result
+                payload = result["structuredContent"]
+                assert payload["code"] == "NO_CONNECTED_TAB", result
+                assert payload["queued"] is False and payload["pairing_url"], result
+            # Association must also update a tab whose stream is already open.
+            waiting = context.new_page()
+            waiting.goto(base)
+            waiting.get_by_text(unassociated, exact=True).wait_for()
+            invitation = before["pairing_url"]
             page.goto(invitation)
             page.get_by_role("button", name="Connect agent to this browser").click()
-            page.get_by_text("Agent navigation connected.", exact=True).wait_for()
+            page.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
+            waiting.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
+            assert waiting.locator("[data-agent-connection]").inner_text() == "Your agent is connected to this browser."
+            waiting.close()
 
             def wait_status(count=1):
                 for _ in range(50):
@@ -183,7 +203,7 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
                 },
             )["queued"]
             page.wait_for_url("**/transactions?**")
-            page.get_by_text("Agent navigation connected.", exact=True).wait_for()
+            page.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
             assert page.get_by_role(
                 "heading", name="Transactions", exact=True
             ).is_visible()
@@ -193,6 +213,10 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
             assert "rent%20%26%20fees" in status["tabs"][0]["url"], status
             assert call("ui_highlight", {"target": "main"})["queued"]
             page.locator("main.agent-highlight").wait_for()
+            page.get_by_text("Your agent highlighted main.", exact=True).wait_for()
+            # Repeated heartbeat events must preserve the action acknowledgement.
+            page.wait_for_timeout(750)
+            assert page.get_by_text("Your agent highlighted main.", exact=True).is_visible()
             for _ in range(50):
                 if call("ui_status")["tabs"][0]["highlight"] == "main":
                     break
@@ -202,7 +226,7 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
             # A new page shares D3's cookie while retaining its own tab identity.
             second = context.new_page()
             second.goto(base + "/accounts?company=" + company)
-            second.get_by_text("Agent navigation connected.", exact=True).wait_for()
+            second.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
             status = wait_status(2)
             ids = {tab["tab_id"] for tab in status["tabs"]}
             assert len(ids) == 2
@@ -212,7 +236,7 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
                 {"view_id": "review", "state": {"company": company}, "tab_id": other},
             )["queued"]
             second.wait_for_url("**/review?**")
-            second.get_by_text("Agent navigation connected.", exact=True).wait_for()
+            second.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
             assert page.get_by_role(
                 "heading", name="Transactions", exact=True
             ).is_visible()
@@ -226,7 +250,7 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
                 },
             )["queued"]
             page.wait_for_url("**/transactions/99999999?**")
-            page.get_by_text("Agent navigation connected.", exact=True).wait_for()
+            page.get_by_text("Agent linked. Browser navigation ready.", exact=True).wait_for()
             assert page.get_by_role(
                 "heading", name="Unable to display this view"
             ).is_visible()
@@ -237,7 +261,7 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
             assert not errors, errors
             browser.close()
         print(
-            "Chromium passed: pairing, credential association, SSE navigation and filters, stable tab ID across loads, acknowledged highlight, two-tab isolation, and error-view reconnect."
+            "Chromium passed: unassociated browser status and navigation errors, live credential association, SSE navigation and filters, stable tab ID across loads, acknowledged highlight, two-tab isolation, and error-view reconnect."
         )
     finally:
         server.terminate()

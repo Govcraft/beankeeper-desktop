@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.7] - 2026-11-21
+
+### Fixed
+
+- Distinguish browser channel readiness from agent association in the live
+  navigation notice, including association changes in already-open tabs.
+- Return explicit `NO_CONNECTED_TAB` errors with recovery links when navigation
+  or highlights have no matching live associated tab. Status queries and missing
+  highlight targets in connected tabs retain their existing behavior.
+
 ## [0.1.0-rc.6] - 2026-11-20
 
 ### Fixed
