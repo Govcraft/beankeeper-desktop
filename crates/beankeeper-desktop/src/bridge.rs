@@ -7,7 +7,7 @@
 
 use std::{
     error::Error,
-    fmt, fs,
+    fmt,
     io::{self, BufRead, Write},
     path::PathBuf,
     time::Duration,
@@ -20,7 +20,10 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
     redirect::Policy,
 };
+use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde_json::Value;
+
+use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -107,26 +110,15 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
         )
     };
     let url = local_url(&url)?;
-    crate::setup::keychain::validate_private_file(&token_file)
+    let secret = PrivateFile::open(&token_file)
+        .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
-    let metadata = fs::metadata(&token_file)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(BridgeError::InvalidToken);
-        }
-    }
-    if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return Err(BridgeError::InvalidToken);
-    }
-    let token = fs::read_to_string(&token_file)?;
-    let token = token.trim();
+    let token = secret.expose_secret().trim();
     if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return Err(BridgeError::InvalidToken);
     }
-    let mut authorization =
-        HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| BridgeError::InvalidToken)?;
+    let value = Zeroizing::new(format!("Bearer {token}"));
+    let mut authorization = HeaderValue::from_str(&value).map_err(|_| BridgeError::InvalidToken)?;
     authorization.set_sensitive(true);
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, authorization);
@@ -470,7 +462,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn token_with_public_permissions_is_rejected_before_network_access() -> TestResult {
-        use std::os::unix::fs::PermissionsExt;
+        use std::{fs, os::unix::fs::PermissionsExt};
         let dir = tempfile::tempdir()?;
         let token_file = dir.path().join("token");
         fs::write(&token_file, "agent://private-secret")?;

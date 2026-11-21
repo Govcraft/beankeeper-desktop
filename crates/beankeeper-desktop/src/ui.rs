@@ -11,6 +11,7 @@ use axum::{
 use beankeeper_cli::db::Db;
 
 use crate::{
+    markup::{Attribute, Markup, markup, write_markup},
     pairing::{self, PairingState, Session},
     reports::{self, ReportQuery, ReportResponse},
     views::{self, ViewQuery},
@@ -21,46 +22,41 @@ const STYLE: &str = include_str!("../../../ui/style.css");
 const SESSION_CONTROLS: &str = include_str!("../../../ui/session.html");
 pub(crate) const HEALTH: &str = "beankeeper-desktop-v1";
 
-pub(crate) fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+pub(crate) fn page(title: &str, description: &str, path: &str, content: Markup) -> Html<String> {
+    let mut navigation = Markup::default();
+    for (href, label) in [
+        ("/", "Dashboard"),
+        ("/accounts", "Accounts"),
+        ("/transactions", "Transactions"),
+        ("/reports", "Reports"),
+        ("/reconciliation", "Reconciliation"),
+        ("/review", "Review queue"),
+        ("/settings", "License and updates"),
+    ] {
+        write_markup!(
+            navigation,
+            "      <a href=\"{}\" {}>{}</a>\n",
+            href,
+            Attribute::CurrentPage(path == href),
+            label,
+        );
+    }
+    let title = Markup::escaped(title);
+    markup!(SHELL, title, navigation, title, description, content).into_html()
 }
 
-pub(crate) fn page(title: &str, description: &str, path: &str, content: &str) -> Html<String> {
-    Html(
-        SHELL
-            .replace("{{title}}", &escape(title))
-            .replace("{{description}}", &escape(description))
-            .replace(
-                &format!("href=\"{path}\" data-view"),
-                &format!("href=\"{path}\" aria-current=\"page\""),
-            )
-            .replace("{{content}}", content),
-    )
-}
-
-pub(crate) fn session_controls(session: &Session) -> String {
+pub(crate) fn session_controls(session: &Session) -> Markup {
     let connection = if session.agent.is_some() {
         "Your agent is connected to this browser."
     } else {
         "Your browser session is active. Open your agent's connection link here to let it navigate this workspace."
     };
-    SESSION_CONTROLS
-        .replace("{{csrf}}", session.csrf.expose())
-        .replace("{{connection}}", connection)
+    let csrf = session.csrf.expose();
+    markup!(SESSION_CONTROLS, connection, csrf, csrf)
 }
 
-pub(crate) fn message(title: &str, content: &str) -> Html<String> {
-    Html(
-        SHELL
-            .replace("{{title}}", title)
-            .replace("{{description}}", "")
-            .replace("{{content}}", content),
-    )
+pub(crate) fn message(title: &str, content: Markup) -> Html<String> {
+    page(title, "", "", content)
 }
 
 #[derive(Clone)]
@@ -82,11 +78,7 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
                     "License and updates",
                     "Offline license and last update check",
                     "/settings",
-                    &format!(
-                        "<pre>{}</pre>{}",
-                        escape(&status),
-                        session_controls(&session)
-                    ),
+                    markup!("<pre>{}</pre>{}", status, session_controls(&session)),
                 )
             }),
         )
@@ -141,7 +133,7 @@ async fn report(
                     "Invalid report filters",
                     "Check the URL filters and try again.",
                     "/reports",
-                    "<p><a href=\"/reports\">Choose a report</a></p>",
+                    markup!("<p><a href=\"/reports\">Choose a report</a></p>"),
                 ),
             )
                 .into_response();
@@ -161,7 +153,7 @@ async fn report(
             view.title,
             view.description,
             view.nav,
-            &format!("{}{}", view.content, session_controls(&session)),
+            with_session(view.content, &session),
         )
         .into_response(),
         Ok(Ok(Ok(ReportResponse::Download {
@@ -189,7 +181,9 @@ async fn report(
                     "Unable to display this report",
                     &error.to_string(),
                     "/reports",
-                    "<p><a href=\"/reports\">Choose a report</a> and check your filters.</p>",
+                    markup!(
+                        "<p><a href=\"/reports\">Choose a report</a> and check your filters.</p>"
+                    ),
                 ),
             )
                 .into_response()
@@ -200,7 +194,7 @@ async fn report(
                 "Ledger unavailable",
                 "The ledger could not be read. Check the server terminal and try again.",
                 "/reports",
-                "",
+                Markup::default(),
             ),
         )
             .into_response(),
@@ -222,7 +216,7 @@ async fn view(
                     "Invalid filters",
                     "Check your URL filters and try again.",
                     "",
-                    &format!(
+                    markup!(
                         "<p><a href=\"/transactions\">Reset register filters</a></p>{}",
                         session_controls(&session)
                     ),
@@ -248,14 +242,14 @@ async fn view(
             view.title,
             view.description,
             view.nav,
-            &format!("{}{}", view.content, session_controls(&session)),
+            with_session(view.content, &session),
         )
         .into_response(),
         Ok(Ok(Err(error))) => {
             if error.status().is_server_error() {
                 eprintln!("Ledger view failed: {error:?}");
             }
-            (error.status(), page("Unable to display this view", &error.to_string(), "", &format!("<p><a href=\"/\">Return to dashboard</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
+            (error.status(), page("Unable to display this view", &error.to_string(), "", markup!("<p><a href=\"/\">Return to dashboard</a> or <a href=\"/transactions\">reset register filters</a>.</p>{}", session_controls(&session)))).into_response()
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -263,9 +257,33 @@ async fn view(
                 "Ledger unavailable",
                 "The ledger could not be read. Try again or check the server terminal.",
                 "",
-                &session_controls(&session),
+                session_controls(&session),
             ),
         )
             .into_response(),
+    }
+}
+
+fn with_session(mut content: Markup, session: &Session) -> Markup {
+    content.append(&session_controls(session));
+    content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_text_cannot_replace_template_slots() {
+        let Html(body) = page(
+            "Title {{description}}",
+            "Café & bread {{content}}",
+            "/reports",
+            markup!("<p>{}</p>", "Daily summary"),
+        );
+        assert!(body.contains("<h1>Title {{description}}</h1>"));
+        assert!(body.contains("<p class=\"intro\">Café &amp; bread {{content}}</p>"));
+        assert!(body.contains("<a href=\"/reports\" aria-current=\"page\">"));
+        assert!(body.contains("<p>Daily summary</p>"));
     }
 }

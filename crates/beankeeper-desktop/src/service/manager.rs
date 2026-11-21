@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::{Config, Paths, ServiceError, private_write, remove_if_exists};
+use crate::private_file::PrivateFile;
 
 const UNIT: &str = "beankeeper-desktop.service";
 const LABEL: &str = "ai.govcraft.beankeeper-desktop";
@@ -24,7 +25,7 @@ pub(super) fn install(paths: &Paths, config: &Config) -> Result<(), ServiceError
     if !paths.log().try_exists()? {
         private_write(&paths.log(), b"")?;
     } else {
-        crate::setup::keychain::validate_private_file(&paths.log())?;
+        PrivateFile::open(&paths.log())?;
     }
     if cfg!(target_os = "linux") {
         private_write(&linux_artifact(paths), systemd(paths, config)?.as_bytes())?;

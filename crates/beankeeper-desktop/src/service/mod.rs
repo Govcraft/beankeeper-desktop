@@ -14,14 +14,17 @@ use std::{
 
 use beankeeper_cli::cli::Cli;
 use clap::{Args, Subcommand};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     cli::ServeOptions,
+    private_file::{BEARER_FILE_LIMIT, PrivateFile},
     setup::{self, keychain},
 };
 
 const DEFAULT_PORT: u16 = 8750;
+const SERVICE_STATE_LIMIT: usize = 64 * 1024;
 
 /// Lifecycle controls run with the current OS user's authority.
 #[derive(Args, Debug)]
@@ -299,8 +302,7 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
     }
     result.message = "Beankeeper is registered but is not ready. Inspect the service log; an expired or revoked agent token needs owner renewal.".into();
     let token_file = result.books.with_extension("agent-token");
-    keychain::validate_private_file(&token_file)?;
-    let token = fs::read_to_string(&token_file)?;
+    let token = PrivateFile::open(&token_file)?.read_secret(BEARER_FILE_LIMIT)?;
     if setup::running_for_ledger(runtime.bind, &token).unwrap_or(false) {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -531,8 +533,8 @@ fn lock(path: &Path) -> Result<fs::File, ServiceError> {
     Ok(file)
 }
 fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ServiceError> {
-    keychain::validate_private_file(path)?;
-    serde_json::from_slice(&fs::read(path)?).map_err(|_| {
+    let bytes = PrivateFile::open(path)?.read_bytes(SERVICE_STATE_LIMIT)?;
+    serde_json::from_slice(bytes.expose_secret()).map_err(|_| {
         ServiceError::Configuration(
             "invalid private service state; inspect service.json and service-runtime.json",
         )
@@ -548,8 +550,10 @@ pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceErro
         "service file needs a parent directory",
     ))?;
     fs::create_dir_all(parent)?;
-    if path.try_exists()? {
-        keychain::validate_private_file(path)?;
+    match PrivateFile::open(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let mut pending = tempfile::NamedTempFile::new_in(parent)?;
     keychain::restrict_file(pending.path())?;
@@ -569,6 +573,21 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn Error>>;
+
+    #[test]
+    fn private_service_state_reads_allow_valid_json_and_reject_oversized_input() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("service.json");
+        private_write(&path, br#"{"port":8750}"#)?;
+        let valid: serde_json::Value = read_private(&path)?;
+        assert_eq!(valid["port"], 8750);
+        private_write(&path, &vec![b' '; SERVICE_STATE_LIMIT + 1])?;
+        assert!(matches!(
+            read_private::<serde_json::Value>(&path),
+            Err(ServiceError::Io(error)) if error.kind() == io::ErrorKind::FileTooLarge
+        ));
+        Ok(())
+    }
 
     #[test]
     fn occupied_port_falls_back_to_ipv4_loopback_without_losing_the_listener() -> TestResult {
