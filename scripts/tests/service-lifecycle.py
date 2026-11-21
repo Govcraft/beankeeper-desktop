@@ -67,16 +67,60 @@ def main():
         def status():
             return json.loads(command("service", "status", "--json"))
 
+        def diagnostics():
+            log = root / "logs/service.log"
+            details = log.read_text(encoding="utf-8", errors="replace")[-8000:] if log.exists() else "no log"
+            if os.name == "nt":
+                task = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+                    "$name = 'Beankeeper-Desktop-' + $sid; "
+                    "Get-ScheduledTask -TaskName $name | Select-Object State | ConvertTo-Json -Compress; "
+                    "Get-ScheduledTaskInfo -TaskName $name | Select-Object LastTaskResult,LastRunTime,NextRunTime | ConvertTo-Json -Compress"],
+                    capture_output=True, encoding="utf-8", errors="replace", timeout=15)
+                details += "\nTask Scheduler: " + task.stdout + task.stderr
+            return details
+
+        def windows_task_diagnostics():
+            script = """
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                $name = "Beankeeper-Desktop-$sid"
+                Get-ScheduledTask -TaskName $name | Select-Object State | Format-List
+                Get-ScheduledTaskInfo -TaskName $name |
+                    Select-Object LastRunTime, NextRunTime, LastTaskResult, NumberOfMissedRuns |
+                    Format-List
+                Get-WinEvent -FilterHashtable @{
+                    LogName = 'Microsoft-Windows-TaskScheduler/Operational'
+                    StartTime = (Get-Date).AddMinutes(-10)
+                } -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Message -like "*$name*" } |
+                    Select-Object -First 20 TimeCreated, Id, Message | Format-List
+            """
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                env=env, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
+            )
+            return result.stdout + result.stderr
+
         def wait(predicate, seconds=100):
             deadline = time.monotonic() + seconds
+            state = None
             while time.monotonic() < deadline:
                 state = status()
                 if predicate(state):
                     return state
                 time.sleep(0.5)
-            raise AssertionError(f"service did not reach expected state: {state}")
+            details = windows_task_diagnostics() if os.name == "nt" else ""
+            log = root / "logs/service.log"
+            if log.exists():
+                details += log.read_text(encoding="utf-8", errors="replace")[-8000:]
+            raise AssertionError(f"service did not reach expected state: {state}\n{details}")
 
         try:
+            if os.name == "nt":
+                # Hosted runners may leave Task Scheduler history disabled.
+                subprocess.run(["wevtutil.exe", "sl", "Microsoft-Windows-TaskScheduler/Operational",
+                                "/e:true"], capture_output=True, timeout=15)
             assert not status()["installed"]
             # Native keychains are not available on all hosted runners. The explicit
             # file seam exercises protected Windows DACLs as well as Unix modes.
