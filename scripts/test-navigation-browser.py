@@ -159,6 +159,9 @@ with tempfile.TemporaryDirectory(dir=repo / "target") as directory:
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(launch)
+            assert not context.cookies(), "GET paired the browser without confirmation"
+            page.reload()
+            page.get_by_role("button", name="Pair this browser", exact=True).click()
             unassociated = "Browser paired. Open your agent's connection link to enable navigation."
             page.get_by_text(unassociated, exact=True).wait_for()
             assert page.get_by_text("Agent navigation connected.", exact=True).count() == 0

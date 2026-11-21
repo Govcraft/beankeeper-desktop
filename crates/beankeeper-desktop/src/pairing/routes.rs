@@ -32,6 +32,11 @@ struct PairQuery {
 }
 
 #[derive(Deserialize)]
+struct BrowserPairing {
+    token: String,
+}
+
+#[derive(Deserialize)]
 struct Csrf {
     csrf: String,
 }
@@ -47,7 +52,7 @@ pub(crate) fn router(state: PairingState) -> Router {
         .route("/api/session/pairing", post(new_link))
         .route("/api/session/associate", post(associate))
         .route_layer(middleware::from_fn_with_state(state.clone(), human_guard))
-        .route("/pair", get(pair))
+        .route("/pair", get(pair).post(pair_browser))
         .with_state(state)
 }
 
@@ -61,17 +66,18 @@ async fn pair(
     }
     match (query.token, query.invite) {
         (Some(token), None) => {
-            let authority = headers
-                .get(header::HOST)
-                .and_then(|host| host.to_str().ok())
-                .ok_or(PairingError::Unauthorized)?;
-            let cookie = state.redeem(&token, authority, Instant::now())?;
-            let mut response = Redirect::to("/").into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&cookie).map_err(|_| PairingError::Unavailable)?,
-            );
-            Ok(response)
+            let registry = state.lock(Instant::now())?;
+            let link = registry
+                .links
+                .get(&Secret::digest(&token))
+                .filter(|link| link.agent.is_none())
+                .ok_or(PairingError::InvalidLink)?;
+            // Displaying a link must never consume it: browsers and link handlers
+            // may issue speculative or duplicate GETs before the human sees it.
+            Ok(crate::ui::message("Pair this browser", &format!(
+                "<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>",
+                link.secret.expose()
+            )).into_response())
         }
         (None, Some(invite)) => {
             let now = Instant::now();
@@ -103,6 +109,36 @@ async fn pair(
         }
         _ => Err(PairingError::InvalidLink),
     }
+}
+
+async fn pair_browser(
+    State(state): State<PairingState>,
+    headers: HeaderMap,
+    Form(form): Form<BrowserPairing>,
+) -> Result<Response, PairingError> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return Err(PairingError::Unauthorized);
+    }
+    let authority = headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .ok_or(PairingError::Unauthorized)?;
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    // There is no session CSRF token before pairing. The unpredictable one-use
+    // token and an exact Origin check protect this initial form submission.
+    if origins.next().and_then(|origin| origin.to_str().ok())
+        != Some(format!("http://{authority}").as_str())
+        || origins.next().is_some()
+    {
+        return Err(PairingError::Unauthorized);
+    }
+    let cookie = state.redeem(&form.token, authority, Instant::now())?;
+    let mut response = Redirect::to("/").into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(|_| PairingError::Unavailable)?,
+    );
+    Ok(response)
 }
 
 /// Applied to all browser routes, so future cookie writes inherit both checks.
@@ -252,4 +288,56 @@ pub(crate) async fn mcp_guard(
             .insert("beankeeper-pairing-url", value);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn token_expiring_after_the_confirmation_page_cannot_be_redeemed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, url) = PairingState::new("127.0.0.1:8750".parse()?)?;
+        let token = url.split_once('=').ok_or("pairing token")?.1;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:8750".parse()?);
+        headers.insert(header::ORIGIN, "http://127.0.0.1:8750".parse()?);
+        let page = pair(
+            State(state.clone()),
+            headers.clone(),
+            Query(PairQuery {
+                token: Some(token.into()),
+                invite: None,
+            }),
+        )
+        .await?;
+        assert_eq!(page.status(), StatusCode::OK);
+        assert!(page.headers().get(header::SET_COOKIE).is_none());
+        // Move the deadline instead of sleeping five minutes.
+        let now = Instant::now();
+        state
+            .lock(now)?
+            .links
+            .get_mut(&Secret::digest(token))
+            .ok_or("unconsumed link")?
+            .expires = now;
+        let response = pair_browser(
+            State(state.clone()),
+            headers,
+            Form(BrowserPairing {
+                token: token.into(),
+            }),
+        )
+        .await
+        .expect_err("expired POST must fail")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let body = to_bytes(response.into_body(), 8192).await?;
+        let body = std::str::from_utf8(&body)?;
+        assert!(body.contains("Pairing link expired or already used"));
+        assert!(!body.contains(token));
+        assert!(state.lock(Instant::now())?.sessions.is_empty());
+        Ok(())
+    }
 }

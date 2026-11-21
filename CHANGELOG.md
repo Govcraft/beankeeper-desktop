@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.9] - 2026-11-21
+
+### Fixed
+
+- Keep browser pairing links usable across duplicate or speculative GET/HEAD
+  requests. Pairing now requires selecting **Pair this browser** to submit a
+  same-origin POST. Only that POST consumes the five-minute, single-use token
+  and issues a browser session cookie.
+
 ## [0.1.0-rc.8] - 2026-11-21
 
 ### Fixed

@@ -758,7 +758,13 @@ fn closed_tabs_are_removed_and_another_browser_cannot_claim_their_stream() -> Te
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()?;
-    let redeemed = other.get(url).send()?;
+    assert_eq!(other.get(url).send()?.status(), 200);
+    let pairing_token = url.split_once('=').ok_or("pairing token")?.1;
+    let redeemed = other
+        .post(format!("{}/pair", server.base))
+        .header("Origin", &server.base)
+        .form(&[("token", pairing_token)])
+        .send()?;
     assert_eq!(redeemed.status(), 303);
     let cookie = redeemed.headers()["set-cookie"]
         .to_str()?
