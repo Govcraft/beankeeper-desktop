@@ -1,6 +1,6 @@
 //! Read-only HTML views backed exclusively by the upstream ledger query API.
 
-use std::{error::Error, fmt, fmt::Write};
+use std::{collections::HashSet, error::Error, fmt, fmt::Write};
 
 use axum::http::StatusCode;
 use beankeeper::types::ClearanceStatus;
@@ -17,6 +17,7 @@ use clap::Parser;
 use serde::Deserialize;
 
 use crate::{
+    ledger_rows::{self, AccountGroup, AuditSubject, EntryValues, RowError},
     links::values::{Currency, SCAN_LIMIT},
     links::{ACCOUNTS, HOME, LedgerRoute, REPORTS, REVIEW, ReportKind, TRANSACTIONS},
     markup::{Attribute, Markup, markup, write_markup},
@@ -40,6 +41,7 @@ pub(crate) enum ViewError {
     Invalid(&'static str),
     ReportOptions(String),
     Ledger(CliError),
+    Row(RowError),
     NotFound,
 }
 
@@ -49,7 +51,7 @@ impl ViewError {
             Self::Invalid(_) | Self::ReportOptions(_) => StatusCode::BAD_REQUEST,
             Self::NotFound | Self::Ledger(CliError::NotFound(_)) => StatusCode::NOT_FOUND,
             Self::Ledger(CliError::Validation(_)) => StatusCode::BAD_REQUEST,
-            Self::Ledger(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Ledger(_) | Self::Row(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -65,7 +67,7 @@ impl fmt::Display for ViewError {
             Self::Ledger(CliError::Validation(_)) => {
                 f.write_str("Choose a valid currency for these books.")
             }
-            Self::Ledger(_) => {
+            Self::Ledger(_) | Self::Row(_) => {
                 f.write_str("The ledger could not be read. Check the server log and try again.")
             }
         }
@@ -76,6 +78,7 @@ impl Error for ViewError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
+            Self::Row(error) => Some(error),
             _ => None,
         }
     }
@@ -84,6 +87,12 @@ impl Error for ViewError {
 impl From<CliError> for ViewError {
     fn from(error: CliError) -> Self {
         Self::Ledger(error)
+    }
+}
+
+impl From<RowError> for ViewError {
+    fn from(error: RowError) -> Self {
+        Self::Row(error)
     }
 }
 
@@ -436,13 +445,13 @@ fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Resul
         company,
         rows.len()
     );
-    for kind in ["asset", "liability", "equity", "revenue", "expense"] {
-        let group: Vec<_> = rows.iter().filter(|row| row.account_type == kind).collect();
-        if group.is_empty() {
-            continue;
-        }
-        write_markup!(html, "<li><strong>{}</strong><ul>", kind);
-        for account in group {
+    for AccountGroup { kind, rows } in ledger_rows::accounts_by_kind(&rows)? {
+        write_markup!(
+            html,
+            "<li><strong>{}</strong><ul>",
+            ledger_rows::account_kind_name(kind)
+        );
+        for account in rows {
             let mut account_filters = query.clone();
             account_filters.account = Some(account.code.clone());
             let link = account_filters.url("/transactions", company, 0);
@@ -497,6 +506,7 @@ fn transaction_table(
         "<div class=\"table-scroll\"><table><caption>Transaction register</caption><thead><tr><th scope=\"col\">Date</th><th scope=\"col\">Payee / description</th><th scope=\"col\">Reference</th><th scope=\"col\">Currency</th><th scope=\"col\">Entries</th></tr></thead><tbody>"
     );
     for row in rows {
+        let currency = ledger_rows::currency(&row.currency)?;
         write_markup!(
             html,
             "<tr id=\"{}{}\"><td>{}</td><th scope=\"row\"><a href=\"/transactions/{}?company={}\">{}</a></th><td>{}</td><td>{}</td>",
@@ -511,13 +521,14 @@ fn transaction_table(
         );
         write_markup!(html, "<td><ul>");
         for entry in db::get_entries_for_transaction(db.conn(), row.id)? {
+            let values = EntryValues::read(&entry, currency)?;
             write_markup!(
                 html,
                 "<li>{}: {} {} ({})</li>",
                 &entry.account_code,
-                &entry.direction,
-                &money::minor(entry.amount, &row.currency),
-                &entry.status
+                values.direction_label(),
+                money::ledger(values.amount),
+                values.clearance
             );
         }
         write_markup!(html, "</ul></td></tr>");
@@ -526,7 +537,11 @@ fn transaction_table(
     Ok(())
 }
 
-fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) -> bool {
+fn matches_extra(
+    query: &Filters,
+    txn: &TransactionRow,
+    entries: &[EntryRow],
+) -> Result<bool, ViewError> {
     if let Some(search) = &query.search {
         let search = &search.folded;
         if !txn.description.to_lowercase().contains(search)
@@ -537,7 +552,7 @@ fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) ->
                 .to_lowercase()
                 .contains(search)
         {
-            return false;
+            return Ok(false);
         }
     }
     if let Some(payee) = query.payee.as_deref() {
@@ -551,27 +566,33 @@ fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) ->
             .and_then(serde_json::Value::as_str)
             != Some(payee)
         {
-            return false;
+            return Ok(false);
         }
     }
     let min = query.min_amount();
     let max = query.max_amount();
-    entries.iter().any(|entry| {
-        query
+    for entry in entries {
+        if query
             .category
             .as_deref()
-            .is_none_or(|category| entry.tax_category.as_deref() == Some(category))
-            && query
+            .is_some_and(|category| entry.tax_category.as_deref() != Some(category))
+            || query
                 .account
                 .as_deref()
-                .is_none_or(|account| entry.account_code == account)
-            && query
-                .status
-                .as_ref()
-                .is_none_or(|status| entry.status == status.status().as_str())
-            && min.is_none_or(|min| entry.amount >= min)
-            && max.is_none_or(|max| entry.amount <= max)
-    })
+                .is_some_and(|account| entry.account_code != account)
+            || min.is_some_and(|min| entry.amount < min)
+            || max.is_some_and(|max| entry.amount > max)
+        {
+            continue;
+        }
+        if let Some(status) = &query.status
+            && ledger_rows::clearance(entry)? != status.status()
+        {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn register(
@@ -606,7 +627,7 @@ fn register(
         for txn in batch {
             cursor += 1;
             let entries = db::get_entries_for_transaction(db.conn(), txn.id)?;
-            if matches_extra(query, &txn, &entries) {
+            if matches_extra(query, &txn, &entries)? {
                 rows.push(txn);
             }
             if rows.len() == PAGE_SIZE || cursor - start == SCAN_LIMIT {
@@ -704,14 +725,16 @@ fn detail(
         html,
         "</pre></section><section><h2>Entries</h2><div class=\"table-scroll\"><table><caption>Entry amounts in transaction currency</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Clearance</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>"
     );
+    let currency = ledger_rows::currency(&txn.currency)?;
     for entry in &entries {
+        let values = EntryValues::read(entry, currency)?;
         write_markup!(
             html,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             &entry.account_code,
-            &entry.direction,
-            &money::minor(entry.amount, &txn.currency),
-            &entry.status,
+            values.direction_label(),
+            money::ledger(values.amount),
+            values.clearance,
             entry.memo.as_deref().unwrap_or("Not recorded"),
             entry.tax_category.as_deref().unwrap_or("Not recorded")
         );
@@ -742,25 +765,25 @@ fn audit(
     let count = i64::try_from(rows.len())
         .map_err(|_| ViewError::Invalid("The audit trail is too large to paginate."))?;
     let cursor = start + count;
-    let id = txn.id.to_string();
+    let entry_ids = entries.iter().map(|entry| entry.id).collect::<HashSet<_>>();
     let mut shown = 0;
     write_markup!(
         html,
         "<section><h2>Audit trail</h2><p>Recorded transaction changes and changes to its entries, newest first.</p>"
     );
-    for row in rows.iter().filter(|row| {
-        (row.entity == "transaction" && row.entity_id == id)
-            || (row.entity == "entry"
-                && entries
-                    .iter()
-                    .any(|entry| entry.id.to_string() == row.entity_id))
-    }) {
+    for row in &rows {
+        let Some(subject) = AuditSubject::read(row)? else {
+            continue;
+        };
+        if !subject.matches(txn.id, &entry_ids) {
+            continue;
+        }
         shown += 1;
         write_markup!(
             html,
             "<article><h3>{}: {} {}</h3><dl>",
             &row.changed_at,
-            &row.entity,
+            subject.kind().as_str(),
             &row.action
         );
         for (label, value) in [

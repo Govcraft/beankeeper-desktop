@@ -1,26 +1,34 @@
 //! Exact, locale-independent monetary presentation for browser views.
 
-use beankeeper::types::{Amount, Currency};
+use beankeeper::types::{Amount, Currency, Money};
 
 /// Format ledger minor units without passing through floating point.
 pub(crate) fn minor(value: impl Into<i128>, code: &str) -> String {
     let value = value.into();
-    Currency::from_code(code)
-        .ok()
-        .and_then(|currency| {
-            decimal(
-                &Amount::new(value).format_decimal(currency.minor_units()),
-                code,
-            )
-        })
-        .unwrap_or_else(|| format!("{value} {code} minor units (unknown currency)"))
+    Currency::from_code(code).map_or_else(
+        |_| format!("{value} {code} minor units (unknown currency)"),
+        |currency| ledger(Money::new(Amount::new(value), currency)),
+    )
+}
+
+/// Format already validated ledger money without parsing its currency or amount.
+pub(crate) fn ledger(money: Money) -> String {
+    let currency = money.currency();
+    let value = money.amount().format_decimal(currency.minor_units());
+    let (sign, whole, fraction) = decimal_parts(&value);
+    decorate(sign, whole, fraction, currency.code())
+}
+
+fn decimal_parts(value: &str) -> (&str, &str, &str) {
+    let (sign, value) = value.strip_prefix('-').map_or(("", value), |v| ("-", v));
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    (sign, whole, fraction)
 }
 
 /// Decorate an upstream major-unit display string, preserving its exact digits.
 pub(crate) fn decimal(value: &str, code: &str) -> Option<String> {
     let currency = Currency::from_code(code).ok()?;
-    let (sign, value) = value.strip_prefix('-').map_or(("", value), |v| ("-", v));
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let (sign, whole, fraction) = decimal_parts(value);
     if whole.is_empty()
         || !whole.bytes().all(|b| b.is_ascii_digit())
         || !fraction.bytes().all(|b| b.is_ascii_digit())
@@ -28,6 +36,10 @@ pub(crate) fn decimal(value: &str, code: &str) -> Option<String> {
     {
         return None;
     }
+    Some(decorate(sign, whole, fraction, code))
+}
+
+fn decorate(sign: &str, whole: &str, fraction: &str, code: &str) -> String {
     let symbol = match code {
         "USD" => "$",
         "EUR" => "€",
@@ -54,7 +66,7 @@ pub(crate) fn decimal(value: &str, code: &str) -> Option<String> {
         formatted.push('.');
         formatted.push_str(fraction);
     }
-    Some(formatted)
+    formatted
 }
 
 #[cfg(test)]
