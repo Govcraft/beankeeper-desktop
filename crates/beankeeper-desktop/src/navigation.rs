@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(schema["unevaluatedProperties"], false);
         assert!(schema["properties"]["tab_id"].is_object());
         let variants = schema["oneOf"].as_array().ok_or("view alternatives")?;
-        assert_eq!(variants.len(), 16);
+        assert_eq!(variants.len(), 17);
         for variant in variants {
             // tab_id is declared by the outer object and must remain allowed.
             assert_ne!(variant["additionalProperties"], false);

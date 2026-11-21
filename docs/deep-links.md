@@ -55,6 +55,7 @@ contain `code` and `message`, exit nonzero, and also print a diagnostic to stder
 | ID | URL path | Accepted filters |
 | --- | --- | --- |
 | `dashboard` | `/` | `company`, `currency` |
+| `financial-summary` | `/summary` | `company`, `currency`, date and comparison bounds, `cash_account`, `receivable_account`, `payable_account` |
 | `accounts` | `/accounts` | `company` |
 | `transactions` | `/transactions` | `company`, `account`, `category`, `payee`, `from`, `to`, `compare_from`, `compare_to`, `currency`, `search`, `status`, `min_amount`, `max_amount`, `offset` |
 | `transaction` | `/transactions/ID` | `transaction_id` (positive integer in the path), `company`, audit `offset` |
@@ -141,6 +142,19 @@ description/reference and does not substitute for an exact payee identifier.
 Account, tax category, clearance and amount constraints match the same entry.
 Missing or non-string `metadata.payee` cannot match a supplied payee. These
 filters reuse upstream reads and never change classifications or ledger data.
+
+Use the summary result's `desktop_view.link` where available. For older summary
+results, use `view_id: "financial-summary"` and copy the company, currency and
+four date bounds into `state`. Map resolved `cash_accounts`,
+`receivable_accounts`, and `payable_accounts` arrays to `cash_account`,
+`receivable_account`, and `payable_account`, respectively. The summary page
+uses the same method and selected accounts as `financial_summary`.
+
+Cash-flow chart targets can pass the full `cash_account` list to
+`ui_get_link`. Summary and cash-flow links accept a single account code or a
+list of exact codes. In URLs and the corresponding CLI flags, supply a
+comma-separated list, for example `cash_account=1000%2C1100` or
+`--cash-account 1000,1100`.
 
 ## Two-period detail
 

@@ -14,6 +14,71 @@ fn link(server: &Server, bearer: &str, view: &str, state: Value) -> TestResult<V
 }
 
 #[test]
+fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> TestResult {
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    beankeeper_cli::db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
+    beankeeper_cli::db::create_account(
+        db.conn(),
+        "acme",
+        "1100",
+        "Clearing reserve",
+        "asset",
+        None,
+    )?;
+    drop(db);
+    let reader = token(&ledger.reader)?;
+    let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
+    server.initialize(Some(reader))?;
+    server.pair()?;
+    let summary = link(
+        &server,
+        reader,
+        "financial-summary",
+        json!({
+            "company":"acme","currency":"USD",
+            "from":"2026-10-01","to":"2026-10-31",
+            "compare_from":"2026-09-01","compare_to":"2026-09-30",
+            "cash_account":["1000","1100"]
+        }),
+    )?;
+    let summary_page = server
+        .client
+        .get(summary["url"].as_str().ok_or("summary URL")?)
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(
+        summary_page
+            .contains("2026-10-01 through 2026-10-31, compared with 2026-09-01 through 2026-09-30")
+    );
+    assert!(summary_page.contains("Cash on hand in the selected accounts is USD 0.00"));
+
+    let cash_flow = link(
+        &server,
+        reader,
+        "cash-flow",
+        json!({
+            "company":"acme","currency":"USD","from":"2026-10-01","to":"2026-10-31",
+            "cash_account":["1000","1100"]
+        }),
+    )?;
+    let cash_url = cash_flow["url"].as_str().ok_or("cash flow URL")?;
+    let cash_json: Value = server
+        .client
+        .get(format!("{cash_url}&format=json"))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let accounts = cash_json["cash_accounts"]
+        .as_array()
+        .ok_or("selected cash accounts")?;
+    assert!(accounts.iter().any(|account| account["code"] == "1000"));
+    assert!(accounts.iter().any(|account| account["code"] == "1100"));
+    Ok(())
+}
+
+#[test]
 fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
@@ -81,6 +146,11 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     server.pair()?;
     for (view, state, expected_status) in [
         ("dashboard", json!({"company":"acme","currency":"USD"}), 200),
+        (
+            "financial-summary",
+            json!({"company":"acme","currency":"USD","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30","cash_account":"1000"}),
+            200,
+        ),
         ("accounts", json!({"company":"acme"}), 200),
         (
             "transactions",
