@@ -1,4 +1,6 @@
 import hashlib
+import os
+import sys
 import importlib.util
 import io
 import json
@@ -33,6 +35,32 @@ class PackagingTests(unittest.TestCase):
         for tag in ("v0.1.0", "beankeeper-cli-v99.0.0", "main"):
             with self.assertRaises(ValueError):
                 release.version(tag)
+
+
+    def test_rc_tag_matches_and_debian_version_uses_tilde(self):
+        self.assertTrue(release.valid_version("0.1.0-rc.1"))
+        self.assertTrue(release.is_prerelease("0.1.0-rc.1"))
+        self.assertFalse(release.is_prerelease("0.1.0"))
+        self.assertEqual(release.debian_upstream_version("0.1.0-rc.1"), "0.1.0~rc.1")
+        self.assertEqual(release.debian_upstream_version("0.1.0"), "0.1.0")
+        with self.assertRaises(ValueError):
+            release.version("beankeeper-desktop-v0.1.0")
+        self.assertEqual(release.version("beankeeper-desktop-v0.1.0-rc.1"), "0.1.0-rc.1")
+        directory = release.stage(self.binary, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", self.root / "work")
+        deb = self.output / "bk-0.1.0-rc.1-x86_64-unknown-linux-gnu.deb"
+        release.debian(directory, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", deb)
+        with deb.open("rb") as data:
+            self.assertEqual(data.read(8), b"!<arch>\n")
+            members = {}
+            while header := data.read(60):
+                size = int(header[48:58])
+                members[header[:16].decode().strip().rstrip("/")] = data.read(size)
+                if size % 2:
+                    data.read(1)
+        with tarfile.open(fileobj=io.BytesIO(members["control.tar.gz"])) as control:
+            metadata = control.extractfile("control").read().decode()
+        self.assertIn("Version: 0.1.0~rc.1\n", metadata)
+        self.assertNotIn("Version: 0.1.0-rc.1\n", metadata)
 
     def test_supported_archive_layouts_preserve_binary_and_license(self):
         for target in release.TARGETS:
@@ -119,6 +147,53 @@ class PackagingTests(unittest.TestCase):
         for value, target in (("../../escape", next(iter(release.TARGETS))), ("0.1.0", "unrecognized")):
             with self.assertRaises(ValueError):
                 release.name(value, target)
+
+    def test_windows_version_info_is_numeric_for_stable_and_rc(self):
+        self.assertEqual(release.windows_version_info("0.1.0"), "0.1.0.0")
+        self.assertEqual(release.windows_version_info("0.1.0-rc.1"), "0.1.0.1")
+        self.assertEqual(release.windows_version_info("1.2.3-rc.12"), "1.2.3.12")
+        with self.assertRaises(ValueError):
+            release.windows_version_info("0.1.0-beta.1")
+
+    def test_windows_installer_passes_numeric_version_info(self):
+        target = "x86_64-pc-windows-msvc"
+        directory = release.stage(self.binary, "0.1.0-rc.1", target, self.root / "work")
+        with patch.object(release.subprocess, "run") as run, patch.object(
+            release.shutil, "which", return_value="ISCC.exe"
+        ):
+            release.installer(directory, "0.1.0-rc.1", target, self.output)
+        arguments = run.call_args.args[0]
+        self.assertIn("/DReleaseVersion=0.1.0-rc.1", arguments)
+        self.assertIn("/DVersionInfoVersion=0.1.0.1", arguments)
+
+    def test_license_embed_check_compares_trust_json_and_ignores_runtime_overrides(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "check_license_embed", ROOT / "scripts/check-license-embed.py"
+        )
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        payload = {"service_url": "https://license.example.test", "public_keys": {"k": "pub"}}
+        fake = self.root / "bk"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "assert 'BEANKEEPER_LICENSE_SERVICE_URL' not in os.environ\n"
+            "assert 'BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON' not in os.environ\n"
+            "assert 'BEANKEEPER_LICENSE_KEYS_FILE' not in os.environ\n"
+            "json.dump(" + repr(payload) + ", sys.stdout)\n"
+        )
+        fake.chmod(0o755)
+        env = {
+            "BEANKEEPER_LICENSE_SERVICE_URL": "https://license.example.test",
+            "BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON": json.dumps(payload["public_keys"]),
+            "BEANKEEPER_LICENSE_KEYS_FILE": "/tmp/should-not-be-used",
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+        }
+        checker.check(str(fake), env)
+        env["BEANKEEPER_LICENSE_SERVICE_URL"] = "https://wrong.example"
+        with self.assertRaises(SystemExit):
+            checker.check(str(fake), env)
 
 
 

@@ -88,6 +88,17 @@ fn release_version(value: &str) -> Result<semver::Version, UpdateError> {
     }
     Ok(version)
 }
+
+/// Local Desktop version. Prereleases such as 0.1.0-rc.1 are allowed so an rc
+/// binary can compare itself to a stable update manifest. Build metadata is not.
+fn installed_version(value: &str) -> Result<semver::Version, UpdateError> {
+    let version =
+        semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
+    if !version.build.is_empty() {
+        return Err(UpdateError::Invalid("invalid version"));
+    }
+    Ok(version)
+}
 impl Manifest {
     fn parse(bytes: &[u8]) -> Result<Self, UpdateError> {
         let manifest: Self = serde_json::from_slice(bytes)?;
@@ -106,7 +117,7 @@ impl Manifest {
     }
     /// Compare versions numerically, including multi-digit minor versions.
     pub fn newer_than(&self, current: &str) -> Result<bool, UpdateError> {
-        Ok(release_version(&self.version)? > release_version(current)?)
+        Ok(release_version(&self.version)? > installed_version(current)?)
     }
 }
 
@@ -659,6 +670,7 @@ mod tests {
         let parsed = verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier)?;
         assert!(parsed.newer_than("9.9.99")?);
         assert!(!parsed.newer_than("10.0.0")?);
+        assert!(parsed.newer_than("9.10.0-rc.1")?);
         let mut tampered = bytes.clone();
         tampered.push(b' ');
         assert!(verify_manifest(&tampered, &sign(&bytes), &OfflineVerifier).is_err());
@@ -670,6 +682,8 @@ mod tests {
         assert!(verify_manifest(&bytes, &sign(&bytes), &OfflineVerifier).is_err());
         assert!(release_version("1.0.0/../../payload").is_err());
         assert!(release_version("1.0.0-rc.1").is_err());
+        assert!(installed_version("1.0.0-rc.1").is_ok());
+        assert!(installed_version("1.0.0/../../payload").is_err());
         Ok(())
     }
     #[test]

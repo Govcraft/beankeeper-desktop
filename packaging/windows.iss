@@ -3,6 +3,7 @@
 AppId={{4167AAFC-5F8D-4472-9C23-C1A697D43F18}
 AppName=Beankeeper Desktop
 AppVersion={#ReleaseVersion}
+VersionInfoVersion={#VersionInfoVersion}
 AppPublisher=Govcraft
 AppPublisherURL=https://github.com/Govcraft/beankeeper-desktop
 DefaultDirName={localappdata}\Programs\Beankeeper Desktop

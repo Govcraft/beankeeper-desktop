@@ -45,7 +45,7 @@ function Install-Beankeeper {
         $release = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest"
         $releaseVersion = $release.tag_name -replace '^beankeeper-desktop-v', ''
     }
-    if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $releaseVersion" }
+    if ($releaseVersion -notmatch '^\d+\.\d+\.\d+(-rc\.\d+)?$') { throw "Invalid release version: $releaseVersion" }
     $stem = "bk-$releaseVersion-x86_64-pc-windows-msvc"
     $artifact = "$stem.zip"
     $url = "https://github.com/$Repository/releases/download/beankeeper-desktop-v$releaseVersion"

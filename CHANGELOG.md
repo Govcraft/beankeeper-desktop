@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-11-20
+
+Prerelease of 0.1.0. The git tag `beankeeper-desktop-v0.1.0-rc.1` is published
+as a GitHub prerelease and is not marked latest. Release artifacts embed the
+production license public key `prod-2026` and
+`https://license.beankeeper.govcraft.ai` from `packaging/license-embed.json`.
+
+Update checks accept a prerelease *local* version (for example `0.1.0-rc.1`)
+so an rc binary can compare itself to a stable manifest. Published update
+manifests remain stable-only.
+
 ## [0.1.0] - 2026-11-20
 
 Release tags use `beankeeper-desktop-vX.Y.Z`. There is no paid Apple or Windows

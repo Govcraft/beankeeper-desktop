@@ -83,3 +83,36 @@ fn redemption_requires_configured_service_and_trust_before_claim_consumption() -
     assert!(String::from_utf8_lossy(&output.stderr).contains("BEANKEEPER_LICENSE_SERVICE_URL"));
     Ok(())
 }
+
+#[test]
+fn license_trust_json_reports_compile_time_embed_not_runtime_overrides() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("keys.json"),
+        br#"{"runtime":"not-embedded"}"#,
+    )?;
+    let output = command(dir.path())
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", "https://example.invalid")
+        .args(["license", "trust", "--json"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let trust: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let expected_url = option_env!("BEANKEEPER_LICENSE_SERVICE_URL").filter(|url| !url.is_empty());
+    let expected_keys: serde_json::Value =
+        serde_json::from_str(option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON").unwrap_or("{}"))?;
+    assert_eq!(
+        trust.get("service_url"),
+        Some(&expected_url.map_or(serde_json::Value::Null, |url| url.into()))
+    );
+    assert_eq!(trust.get("public_keys"), Some(&expected_keys));
+    assert_ne!(
+        trust.get("service_url").and_then(serde_json::Value::as_str),
+        Some("https://example.invalid")
+    );
+    assert!(trust["public_keys"].get("runtime").is_none());
+    Ok(())
+}

@@ -86,7 +86,7 @@ sys.exit({1 if fail else 0})
         self.assertEqual((self.destination / "bk").read_text(), "previous version")
 
     def test_invalid_version_is_rejected_before_downloading(self):
-        for value in ("../main", "0.1", "0.1.0.1", "0.1.0-beta"):
+        for value in ("../main", "0.1", "0.1.0.1", "0.1.0-beta", "0.1.0-rc", "v0.1.0-rc.1"):
             with self.subTest(value=value):
                 self.env["BK_VERSION"] = value
                 result = self.run_installer()
