@@ -42,11 +42,15 @@ fn main() {
         );
     }
 
-    if let Some(keys) = keys.filter(|s| !s.is_empty()) {
-        rustc_env("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON", &keys);
-    }
-    if let Some(url) = url.filter(|s| !s.is_empty()) {
-        rustc_env("BEANKEEPER_LICENSE_SERVICE_URL", &url);
+    // Debug/test builds stay unbaked so cargo test is hermetic even if the
+    // developer shell exported these variables.
+    if release {
+        if let Some(keys) = keys.filter(|s| !s.is_empty()) {
+            rustc_env("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON", &keys);
+        }
+        if let Some(url) = url.filter(|s| !s.is_empty()) {
+            rustc_env("BEANKEEPER_LICENSE_SERVICE_URL", &url);
+        }
     }
 }
 

@@ -38,6 +38,16 @@ def is_prerelease(release_version):
     return bool(re.fullmatch(r"\d+\.\d+\.\d+-rc\.\d+", release_version))
 
 
+def windows_version_info(release_version):
+    """Inno Setup VersionInfoVersion must be numeric X.Y.Z.W, not 0.1.0-rc.1."""
+    if not valid_version(release_version):
+        raise ValueError("unsupported target or invalid release version")
+    if is_prerelease(release_version):
+        core, rc = release_version.split("-rc.", 1)
+        return f"{core}.{int(rc)}"
+    return f"{release_version}.0"
+
+
 def debian_upstream_version(release_version):
     """Debian would treat 0.1.0-rc.1 as revision rc.1; use 0.1.0~rc.1 so it sorts before 0.1.0."""
     if not valid_version(release_version):
@@ -137,6 +147,7 @@ def installer(directory, release_version, target, output):
             Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
             / "Inno Setup 6/ISCC.exe")
         subprocess.run([compiler, f"/DReleaseVersion={release_version}",
+                        f"/DVersionInfoVersion={windows_version_info(release_version)}",
                         f"/DSourceDir={directory.resolve()}",
                         f"/DOutputDir={output.resolve()}", f"/DArtifactName={stem}",
                         str(ROOT / "packaging/windows.iss")], check=True)

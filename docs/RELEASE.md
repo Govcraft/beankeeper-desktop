@@ -22,6 +22,7 @@ Release builds embed `packaging/license-embed.json` (production license public
 keys and `https://license.beankeeper.govcraft.ai`). Repository Actions variables
 `BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` and `BEANKEEPER_LICENSE_SERVICE_URL` can
 override the file; the public key is not a secret.
+Inspect the compiled-in values with `bk license trust --json`; the release smoke test compares that output to the embed env, rather than grepping raw binary bytes. Windows installers also set a numeric `VersionInfoVersion` (`0.1.0-rc.1` becomes `0.1.0.1`) because Inno Setup cannot store a prerelease string in the PE version resource.
 
 | Target | Assets |
 | --- | --- |

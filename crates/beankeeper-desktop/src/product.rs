@@ -82,6 +82,75 @@ pub enum LicenseCommand {
         #[arg(long, default_value = "polar", requires = "code_file")]
         storefront: Option<String>,
     },
+    /// Show the license service URL and issuer keys compiled into this binary.
+    Trust {
+        /// Print a JSON object with service_url and public_keys.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Compile-time license trust, ignoring runtime environment overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedLicenseTrust {
+    /// Origin compiled into the binary, if the release build provided one.
+    pub service_url: Option<&'static str>,
+    /// JSON object of key id to public key; "{}" when none were compiled in.
+    pub public_keys_json: &'static str,
+}
+
+/// Values forwarded by build.rs via cargo:rustc-env, not process environment.
+#[must_use]
+pub fn embedded_license_trust() -> EmbeddedLicenseTrust {
+    EmbeddedLicenseTrust {
+        service_url: option_env!("BEANKEEPER_LICENSE_SERVICE_URL").filter(|url| !url.is_empty()),
+        public_keys_json: option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON").unwrap_or("{}"),
+    }
+}
+
+fn embedded_public_keys() -> Result<serde_json::Map<String, serde_json::Value>, ProductError> {
+    let value = serde_json::from_str(embedded_license_trust().public_keys_json)
+        .map_err(|_| ProductError::Configuration("embedded public keys are not valid JSON"))?;
+    match value {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Err(ProductError::Configuration(
+            "embedded public keys must be a JSON object",
+        )),
+    }
+}
+
+fn write_embedded_trust(as_json: bool) -> Result<(), ProductError> {
+    let trust = embedded_license_trust();
+    let keys = embedded_public_keys()?;
+    if as_json {
+        let body = serde_json::json!({
+            "service_url": trust.service_url,
+            "public_keys": keys,
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&body).map_err(|_| {
+                ProductError::Configuration("cannot encode embedded license trust")
+            })?
+        );
+        return Ok(());
+    }
+    match trust.service_url {
+        Some(url) => println!("Embedded license service: {url}"),
+        None => println!("No license service URL was compiled into this binary."),
+    }
+    if keys.is_empty() {
+        println!("No issuer public keys were compiled into this binary.");
+    } else {
+        println!("Embedded issuer public keys:");
+        for (key_id, value) in &keys {
+            match value.as_str() {
+                Some(key) => println!("  {key_id}: {key}"),
+                None => println!("  {key_id}: {value}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Per-user Desktop state, independent of any ledger, with an explicit test override.
@@ -254,6 +323,7 @@ fn redeem(code_file: &std::path::Path, storefront: &str) -> Result<Vec<u8>, Prod
 pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
     match options.command {
         None => println!("{}", license_status()?),
+        Some(LicenseCommand::Trust { json }) => write_embedded_trust(json)?,
         Some(LicenseCommand::Activate {
             file,
             code_file,
@@ -293,4 +363,23 @@ pub fn status_text() -> String {
         })
         .unwrap_or_else(|e| e.to_string());
     format!("{license}\n{updates}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{embedded_license_trust, embedded_public_keys};
+
+    #[test]
+    fn embedded_trust_matches_compile_time_env() {
+        let trust = embedded_license_trust();
+        assert_eq!(
+            trust.service_url,
+            option_env!("BEANKEEPER_LICENSE_SERVICE_URL").filter(|url| !url.is_empty())
+        );
+        assert_eq!(
+            trust.public_keys_json,
+            option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON").unwrap_or("{}")
+        );
+        embedded_public_keys().expect("embedded keys must be a JSON object");
+    }
 }

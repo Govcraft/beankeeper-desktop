@@ -54,7 +54,7 @@ pub fn command() -> Command {
                 .about("Create an encrypted ledger and configure your MCP clients"),
         ))
         .subcommand(crate::product::LicenseOptions::augment_args(
-            Command::new("license").about("Show or activate an offline Desktop license"),
+            Command::new("license").about("Show, activate, or print compiled-in license trust"),
         ))
         .subcommand(
             Command::new("update-check")

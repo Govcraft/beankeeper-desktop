@@ -141,20 +141,10 @@ jobs:
         run: |
           binary="staging/bk-$VERSION-$TARGET/bk"
           if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
-          test "$("$binary" --version)" = "bk $VERSION"
+          reported=$("$binary" --version | tr -d '\r')
+          test "$reported" = "bk $VERSION"
           "$binary" serve --help
-          python -c "
-          from pathlib import Path
-          import json, os, sys
-          data = Path(sys.argv[1]).read_bytes()
-          url = os.environ['BEANKEEPER_LICENSE_SERVICE_URL'].encode()
-          if url not in data:
-              raise SystemExit('service URL was not embedded in the binary')
-          for key_id, value in json.loads(os.environ['BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON']).items():
-              if value.encode() not in data:
-                  raise SystemExit(f'public key for {key_id} was not embedded')
-          print('license embed ok')
-          " "$binary"
+          python scripts/check-license-embed.py "$binary"
       - name: Build OS installer
         run: python scripts/release.py installer --target "$TARGET"
       - name: Optional Apple signing, notarization and stapling
@@ -189,7 +179,8 @@ jobs:
           dpkg-deb --contents "dist/bk-$VERSION-$TARGET.deb"
           mkdir unpacked
           dpkg-deb --extract "dist/bk-$VERSION-$TARGET.deb" unpacked
-          test "$(unpacked/usr/bin/bk --version)" = "bk $VERSION"
+          reported=$(unpacked/usr/bin/bk --version | tr -d '\r')
+          test "$reported" = "bk $VERSION"
           unpacked/usr/bin/bk serve --help
       - name: Inspect macOS installer payload
         if: runner.os == 'macOS'
@@ -202,7 +193,7 @@ jobs:
           $installer = Get-Item "dist/bk-$env:VERSION-$env:TARGET-setup.exe"
           $process = Start-Process -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$destination" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw 'EXE installer failed' }
-          $reported = & "$destination/bk.exe" --version
+          $reported = (& "$destination/bk.exe" --version).ToString().Trim()
           if ($LASTEXITCODE -ne 0 -or $reported -ne "bk $env:VERSION") { throw 'Installed binary failed' }
       - name: Test Windows checksum installer
         if: runner.os == 'Windows'
