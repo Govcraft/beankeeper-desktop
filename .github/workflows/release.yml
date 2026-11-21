@@ -191,7 +191,7 @@ jobs:
         run: |
           $destination = Join-Path $env:RUNNER_TEMP 'bk-installer-test'
           $installer = Get-Item "dist/bk-$env:VERSION-$env:TARGET-setup.exe"
-          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$destination" -Wait -PassThru
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOSERVICE=1', "/DIR=$destination" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw 'EXE installer failed' }
           $reported = (& "$destination/bk.exe" --version).ToString().Trim()
           if ($LASTEXITCODE -ne 0 -or $reported -ne "bk $env:VERSION") { throw 'Installed binary failed' }

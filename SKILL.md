@@ -5,10 +5,29 @@ description: Work with the user's encrypted local Beankeeper Desktop workspace o
 
 # Beankeeper Desktop
 
-Ask the human to run `bk --db /path/to/books.db setup` once in a terminal. The
-command creates encrypted books, stores the passphrase in the OS keychain,
-prepares a private recovery kit and merges the `beankeeper` MCP server into
-Claude Desktop, Claude Code and Codex configs. Restart the agent client afterward.
+Installers normally configure encrypted local books and background hosting.
+Use `service_status` on the separate `beankeeper-service` MCP connection to check
+readiness. `service_start`, `service_stop`, `service_install` and
+`service_uninstall` manage the per-user host, even when its HTTP server is stopped.
+These local tools have OS-user service authority, separate from ledger grants;
+use them only when the owner's request authorizes that lifecycle action.
+They accept no arguments and return named errors or structured status with a
+plain-language message, running version, MCP endpoint and optional Desktop link.
+Answer in plain words first. Offer the Desktop view only when useful.
+
+The ledger MCP entry runs `bk mcp bridge --service`, discovering the current
+loopback port and using the private agent-token file. If unavailable, use
+`service_status` to diagnose and `service_start` when authorized. Reconnect the
+ledger MCP client after restarting hosting. CLI equivalents are
+`bk service install | uninstall | start | stop | status --json`.
+Uninstall removes hosting while preserving all books and credentials.
+See [background hosting](docs/service.md) for storage and recovery details.
+
+For manual foreground hosting, the owner can still run
+`bk --db /path/to/books.db setup` once in a terminal. It creates encrypted books,
+stores the passphrase in the OS keychain, prepares a private recovery kit and
+merges the `beankeeper` MCP server into Claude Desktop, Claude Code and Codex
+configs. Restart the agent client afterward.
 
 The default preset is read-only. `--preset bookkeeper` adds posting and proposals
 with initial per-company USD spend caps, without approval or administrative
@@ -16,10 +35,10 @@ grants. Use proposal tools for work requiring human review. Never ask for, read,
 print, copy or attach the recovery kit, passphrase store or owner-token file.
 The human owns backup/recovery and approval credentials.
 
-Client configs invoke `bk mcp bridge` with a private agent-token file path. The
-bridge connects to the running `bk serve`; it does not start its own ledger
-server. When unavailable, tell the human to start `bk --db /path/to/books.db
-serve` or rerun `setup --force`. Stored passphrases are resolved automatically
+Manual setup configs invoke `bk mcp bridge` with an explicit endpoint and a
+private agent-token file path. This bridge connects to the running `bk serve`.
+For manual hosting, the owner can start `bk --db /path/to/books.db serve` or
+rerun `setup --force`. Stored passphrases are resolved automatically
 for enrolled ledgers; explicit upstream secret sources take precedence.
 
 `setup --force` resumes without deleting data, rotating the root or changing an

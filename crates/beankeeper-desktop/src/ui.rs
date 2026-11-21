@@ -105,7 +105,21 @@ pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> 
         "/assets/style.css",
         get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE) }),
     )
-    .route("/health", get(|| async { HEALTH }))
+    .route(
+        "/health",
+        get(|| async {
+            (
+                [
+                    (
+                        "x-beankeeper-desktop-version",
+                        env!("CARGO_PKG_VERSION").to_owned(),
+                    ),
+                    ("x-beankeeper-desktop-pid", std::process::id().to_string()),
+                ],
+                HEALTH,
+            )
+        }),
+    )
     .fallback(|| async { (StatusCode::NOT_FOUND, "Page not found") })
 }
 

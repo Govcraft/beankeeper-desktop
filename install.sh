@@ -6,14 +6,20 @@
 #
 # Options (environment variables):
 #   BK_VERSION   - version to install (default: latest)
-#   BK_INSTALL   - install directory (default: /usr/local/bin)
+#   BK_INSTALL   - install directory (default: ~/.local/bin)
+#   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 
 set -eu
 
 REPO="Govcraft/beankeeper-desktop"
-INSTALL_DIR="${BK_INSTALL:-/usr/local/bin}"
+INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
+NO_SERVICE="${BK_NO_SERVICE:-0}"
 
 main() {
+    case "${1:-}" in
+        --no-service) NO_SERVICE=1; shift ;;
+    esac
+    [ "$#" -eq 0 ] || fatal "usage: install.sh [--no-service]"
     detect_platform
     resolve_version
     if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
@@ -21,6 +27,9 @@ main() {
     fi
     download_and_install
     verify
+    if [ "$NO_SERVICE" != 1 ]; then
+        "${INSTALL_DIR}/bk" service install || fatal "background setup failed; run ${INSTALL_DIR}/bk service install in your desktop session"
+    fi
 }
 
 detect_platform() {
@@ -88,11 +97,18 @@ download_and_install() {
 
     tar xzf "${BK_TEMP_DIR}/${ARCHIVE}" -C "$BK_TEMP_DIR"
 
+    if [ -x "${INSTALL_DIR}/bk" ] && "${INSTALL_DIR}/bk" service --help >/dev/null 2>&1; then
+        "${INSTALL_DIR}/bk" service stop || fatal "could not stop the existing background service"
+    fi
+    mkdir -p "$INSTALL_DIR"
     if [ -w "$INSTALL_DIR" ]; then
-        install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/bk"
+        # Rename a complete binary so a running inode is never overwritten.
+        install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/.bk-new-$$"
+        mv -f "${INSTALL_DIR}/.bk-new-$$" "${INSTALL_DIR}/bk"
     else
         info "installing to ${INSTALL_DIR} (requires sudo)..."
-        sudo install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/bk"
+        sudo install -m755 "${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk" "${INSTALL_DIR}/.bk-new-$$"
+        sudo mv -f "${INSTALL_DIR}/.bk-new-$$" "${INSTALL_DIR}/bk"
     fi
 }
 
@@ -149,4 +165,4 @@ info() { printf '  \033[1;32m>\033[0m %s\n' "$1"; }
 warn() { printf '  \033[1;33m>\033[0m %s\n' "$1" >&2; }
 fatal() { printf '  \033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 
-main
+main "$@"

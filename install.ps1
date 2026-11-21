@@ -4,7 +4,8 @@ param(
     [string]$Version = $env:BK_VERSION,
     [string]$InstallDir = $(if ($env:BK_INSTALL) { $env:BK_INSTALL } else {
         Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
-    })
+    }),
+    [switch]$NoService = ($env:BK_NO_SERVICE -eq '1')
 )
 $ErrorActionPreference = 'Stop'
 $Repository = 'Govcraft/beankeeper-desktop'
@@ -70,7 +71,24 @@ function Install-Beankeeper {
             throw "Downloaded binary does not report bk $releaseVersion"
         }
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        Copy-Item -LiteralPath $binary -Destination (Join-Path $InstallDir 'bk.exe') -Force
+        $installed = Join-Path $InstallDir 'bk.exe'
+        if (Test-Path -LiteralPath $installed) {
+            & $installed service --help *> $null
+            if ($LASTEXITCODE -eq 0) {
+                & $installed service stop
+                if ($LASTEXITCODE -ne 0) { throw 'Could not stop the existing background service' }
+            }
+        }
+        $copied = $false
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            try { Copy-Item -LiteralPath $binary -Destination $installed -Force; $copied = $true; break }
+            catch { Start-Sleep -Milliseconds 250 }
+        }
+        if (-not $copied) { throw 'The installed binary is still in use; close bk processes and retry' }
+        if (-not $NoService) {
+            & $installed service install
+            if ($LASTEXITCODE -ne 0) { throw 'Background setup failed; run bk service install in your desktop session' }
+        }
         Write-Host "Installed bk $releaseVersion to $InstallDir. Add this directory to your PATH."
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force
