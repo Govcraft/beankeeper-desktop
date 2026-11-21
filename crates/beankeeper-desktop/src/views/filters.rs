@@ -46,11 +46,11 @@ impl DateBounds {
         Ok(Self { from, to })
     }
 
-    pub(crate) const fn from(&self) -> Option<Date> {
+    pub(crate) const fn from(self) -> Option<Date> {
         self.from
     }
 
-    pub(crate) const fn to(&self) -> Option<Date> {
+    pub(crate) const fn to(self) -> Option<Date> {
         self.to
     }
 }
@@ -68,13 +68,13 @@ pub(crate) struct Period {
 }
 
 impl Comparison {
-    fn parse(from: Option<String>, to: Option<String>) -> Result<Option<Self>, ViewError> {
+    fn parse(from: Option<&str>, to: Option<&str>) -> Result<Option<Self>, ViewError> {
         fn date(value: &str) -> Result<Date, ViewError> {
             value.parse().map_err(|_| {
                 ViewError::Invalid("Comparison dates must be valid YYYY-MM-DD calendar dates.")
             })
         }
-        match (from.as_deref(), to.as_deref()) {
+        match (from, to) {
             (None, None) => Ok(None),
             (None, Some(to)) => Ok(Some(Self::AsOf(date(to)?))),
             (Some(from), Some(to)) => {
@@ -179,7 +179,10 @@ impl ViewQuery {
             category: nonempty(self.category),
             payee: nonempty(self.payee),
             dates,
-            comparison: Comparison::parse(self.compare_from, self.compare_to)?,
+            comparison: Comparison::parse(
+                self.compare_from.as_deref(),
+                self.compare_to.as_deref(),
+            )?,
             amounts: AmountBounds::parse(self.min_amount, self.max_amount)?,
             search: nonempty(self.search).map(|original| Search {
                 folded: original.to_lowercase(),
@@ -256,7 +259,7 @@ mod tests {
     #[test]
     fn parsed_query_preserves_browser_defaults_and_proves_usable_bounds() -> Result<(), ViewError> {
         let filters = ViewQuery {
-            from: Some("".into()),
+            from: Some(String::new()),
             to: Some("2026-06-30".into()),
             compare_from: Some("2026-05-01".into()),
             compare_to: Some("2026-05-31".into()),

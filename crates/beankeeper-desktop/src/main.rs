@@ -42,7 +42,7 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|error| error.exit());
             let ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             service::run(
-                options,
+                &options,
                 ledger,
                 matches.value_source("db") == Some(ValueSource::CommandLine),
             )
@@ -53,34 +53,8 @@ fn main() -> ExitCode {
                 product::LicenseOptions::from_arg_matches(options).unwrap_or_else(|e| e.exit());
             product::run_license(options).map_err(DesktopError::Product)
         }
-        Some(("update-check", _)) => product::state_dir()
-            .and_then(|dir| {
-                let status = updates::check(
-                    &dir.join("updates.json"),
-                    product::update_checks(),
-                    updates::now(),
-                )?;
-                println!("{status}");
-                Ok(())
-            })
-            .map_err(DesktopError::Product),
-        Some(("self-update", _)) => product::state_dir()
-            .and_then(|dir| {
-                if product::update_checks() == updates::UpdateChecks::Disabled {
-                    return Err(product::ProductError::Configuration(
-                        "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
-                    ));
-                }
-                updates::check(
-                    &dir.join("updates.json"),
-                    updates::UpdateChecks::Enabled,
-                    updates::now(),
-                )?;
-                updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
-                println!("Desktop updated. Restart bk serve to use the installed version.");
-                Ok(())
-            })
-            .map_err(DesktopError::Product),
+        Some(("update-check", _)) => check_updates(),
+        Some(("self-update", _)) => install_update(),
         Some(("serve", options)) => {
             let options =
                 ServeOptions::from_arg_matches(options).unwrap_or_else(|error| error.exit());
@@ -132,6 +106,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn check_updates() -> Result<(), DesktopError> {
+    product::state_dir()
+        .and_then(|dir| {
+            let status = updates::check(
+                &dir.join("updates.json"),
+                product::update_checks(),
+                updates::now(),
+            )?;
+            println!("{status}");
+            Ok(())
+        })
+        .map_err(DesktopError::Product)
+}
+
+fn install_update() -> Result<(), DesktopError> {
+    product::state_dir()
+        .and_then(|dir| {
+            if product::update_checks() == updates::UpdateChecks::Disabled {
+                return Err(product::ProductError::Configuration(
+                    "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
+                ));
+            }
+            updates::check(
+                &dir.join("updates.json"),
+                updates::UpdateChecks::Enabled,
+                updates::now(),
+            )?;
+            updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
+            println!("Desktop updated. Restart bk serve to use the installed version.");
+            Ok(())
+        })
+        .map_err(DesktopError::Product)
 }
 
 fn upstream(matches: &clap::ArgMatches) -> ExitCode {

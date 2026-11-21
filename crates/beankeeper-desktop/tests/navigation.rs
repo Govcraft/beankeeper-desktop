@@ -27,11 +27,9 @@ fn issue(ledger: &Ledger, name: &str) -> TestResult<Value> {
 }
 
 fn call(server: &Server, bearer: &str, name: &str, arguments: Value) -> TestResult<Value> {
-    rpc(server.request(
-        "tools/call",
-        json!({"name":name,"arguments":arguments}),
-        Some(bearer),
-    )?)
+    let mut params = json!({"name":name});
+    params["arguments"] = arguments;
+    rpc(server.request("tools/call", params, Some(bearer))?)
 }
 
 fn content(result: &Value) -> &Value {
@@ -200,9 +198,7 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
                     _ => json!({}),
                 };
                 let result = call(&server, bearer, name, arguments)?;
-                if bearer != nav {
-                    assert_eq!(content(&result)["code"], "FORBIDDEN");
-                } else {
+                if bearer == nav {
                     if name == "ui_status" {
                         assert_ne!(result["result"]["isError"], true);
                         assert_eq!(content(&result)["paired"], false);
@@ -213,6 +209,8 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
                     assert!(text(&result).contains("nothing") || text(&result).contains("Nothing"));
                     assert!(text(&result).contains("/pair?invite="));
                     assert!(content(&result)["pairing_url"].as_str().is_some());
+                } else {
+                    assert_eq!(content(&result)["code"], "FORBIDDEN");
                 }
             }
         }
@@ -226,30 +224,7 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
     assert_no_connected_tab(&report);
     assert!(text(&report).contains("/reports/balance-sheet?to=2026-12-31"));
     assert!(content(&report)["pairing_url"].as_str().is_some());
-    for arguments in [
-        json!({"view_id":"https://evil.example"}),
-        json!({"view_id":"transactions","state":{"from":"2026-02-30"}}),
-        json!({"view_id":"transaction"}),
-        json!({"view_id":"review","state":{"account":"1000"}}),
-        json!({"view_id":"dashboard","injected":true}),
-        json!({"view_id":"reports","state":{"report_kind":"../review"}}),
-        json!({"view_id":"reports","state":{"report_kind":"missing"}}),
-        json!({"view_id":"transactions","state":{"period":"month"}}),
-        json!({"view_id":"income-statement","state":{"search":"ignored"}}),
-        json!({"view_id":"balance-sheet","state":{"from":"2026-01-01"}}),
-        json!({"view_id":"trend","state":{"period":"week"}}),
-        json!({"view_id":"trend","state":{"metric":"missing"}}),
-        json!({"view_id":"budget-variance","state":{"year":"0"}}),
-        json!({"view_id":"budget-variance","state":{"from":"2026-02-02","to":"2026-02-28"}}),
-        json!({"view_id":"reconciliation","state":{"account":"1000","mode":"missing"}}),
-        json!({"view_id":"1099","state":{"period":"year"}}),
-        json!({"view_id":"reports","state":{"format":"json"}}),
-    ] {
-        assert_eq!(
-            call(&server, nav, "ui_show_view", arguments)?["result"]["isError"],
-            true
-        );
-    }
+    assert_invalid_navigation_requests(&server, nav)?;
     assert_eq!(
         server
             .request("tools/list", json!({}), Some("invalid"))?
@@ -414,16 +389,7 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
         content(&call(&server, nav, "ui_status", json!({}))?)["tabs"][0]["highlight"],
         "transaction-1"
     );
-    let other_status = call(&server, token(&other)?, "ui_status", json!({}))?;
-    assert_eq!(content(&other_status)["paired"], false);
-    assert_eq!(content(&other_status)["tabs"], json!([]));
-    let targeted = call(
-        &server,
-        token(&other)?,
-        "ui_show_view",
-        json!({"view_id":"review","tab_id":tab}),
-    )?;
-    assert_no_connected_tab(&targeted);
+    assert_other_agent_isolated(&server, token(&other)?, &tab)?;
     let second = update(&server, &csrf, None, "/review?company=acme", "")?;
     let mut second_events = stream(&server, &second)?;
     event(&mut second_events, "heartbeat")?;
@@ -470,65 +436,7 @@ fn report_navigation_restores_filters_and_acknowledges_report_highlights() -> Te
     let tab = update(&server, &csrf, None, "/", "")?;
     let mut events = stream(&server, &tab)?;
     event(&mut events, "heartbeat")?;
-    let cases = [
-        ("reports", json!({}), "/reports?company=acme"),
-        (
-            "income-statement",
-            json!({"from":"2026-01-01","to":"2026-03-31"}),
-            "/reports/income-statement?company=acme&from=2026-01-01&to=2026-03-31&currency=USD",
-        ),
-        (
-            "balance-sheet",
-            json!({"to":"2026-03-31"}),
-            "/reports/balance-sheet?company=acme&to=2026-03-31&currency=USD",
-        ),
-        (
-            "cash-flow",
-            json!({"cash_account":"1000"}),
-            "/reports/cash-flow?company=acme&currency=USD&cash_account=1000",
-        ),
-        (
-            "trend",
-            json!({"metric":"net-worth","period":"quarter"}),
-            "/reports/trend?company=acme&currency=USD&period=quarter&metric=net-worth",
-        ),
-        (
-            "budget-variance",
-            json!({"year":"2026"}),
-            "/reports/budget-variance?company=acme&currency=USD&year=2026",
-        ),
-        (
-            "schedule-c",
-            json!({"from":"2026-01-01","to":"2026-12-31"}),
-            "/reports/schedule-c?company=acme&from=2026-01-01&to=2026-12-31&currency=USD",
-        ),
-        (
-            "1099",
-            json!({"threshold":"0"}),
-            "/reports/1099?company=acme&currency=USD&threshold=0",
-        ),
-        (
-            "reconciliation",
-            json!({"account":"1000","to":"2026-03-31","mode":"bank","statement":"S1 & fees","statement_balance":"1234.56"}),
-            "/reconciliation?company=acme&account=1000&to=2026-03-31&currency=USD&mode=bank&statement=S1%20%26%20fees&statement_balance=1234.56",
-        ),
-        (
-            "reconciliation",
-            json!({"account":"1000","mode":"settlement","statement":"S1","link_key":"applies_to"}),
-            "/reconciliation?company=acme&account=1000&currency=USD&mode=settlement&statement=S1&link_key=applies_to",
-        ),
-        (
-            "reconciliation",
-            json!({}),
-            "/reconciliation?company=acme&currency=USD",
-        ),
-        (
-            "budget-variance",
-            json!({}),
-            "/reports/budget-variance?company=acme&currency=USD",
-        ),
-    ];
-    for (view, mut state, expected) in cases {
+    for (view, mut state, expected) in report_navigation_cases() {
         state["company"] = json!("acme");
         if view != "reports" {
             state["currency"] = json!("USD");
@@ -860,4 +768,107 @@ fn generating_a_link_does_not_queue_navigation_or_change_a_connected_tab() -> Te
         before
     );
     Ok(())
+}
+
+fn assert_invalid_navigation_requests(server: &Server, nav: &str) -> TestResult {
+    for arguments in [
+        json!({"view_id":"https://evil.example"}),
+        json!({"view_id":"transactions","state":{"from":"2026-02-30"}}),
+        json!({"view_id":"transaction"}),
+        json!({"view_id":"review","state":{"account":"1000"}}),
+        json!({"view_id":"dashboard","injected":true}),
+        json!({"view_id":"reports","state":{"report_kind":"../review"}}),
+        json!({"view_id":"reports","state":{"report_kind":"missing"}}),
+        json!({"view_id":"transactions","state":{"period":"month"}}),
+        json!({"view_id":"income-statement","state":{"search":"ignored"}}),
+        json!({"view_id":"balance-sheet","state":{"from":"2026-01-01"}}),
+        json!({"view_id":"trend","state":{"period":"week"}}),
+        json!({"view_id":"trend","state":{"metric":"missing"}}),
+        json!({"view_id":"budget-variance","state":{"year":"0"}}),
+        json!({"view_id":"budget-variance","state":{"from":"2026-02-02","to":"2026-02-28"}}),
+        json!({"view_id":"reconciliation","state":{"account":"1000","mode":"missing"}}),
+        json!({"view_id":"1099","state":{"period":"year"}}),
+        json!({"view_id":"reports","state":{"format":"json"}}),
+    ] {
+        assert_eq!(
+            call(server, nav, "ui_show_view", arguments)?["result"]["isError"],
+            true
+        );
+    }
+    Ok(())
+}
+
+fn assert_other_agent_isolated(server: &Server, other: &str, tab: &str) -> TestResult {
+    let other_status = call(server, other, "ui_status", json!({}))?;
+    assert_eq!(content(&other_status)["paired"], false);
+    assert_eq!(content(&other_status)["tabs"], json!([]));
+    let targeted = call(
+        server,
+        other,
+        "ui_show_view",
+        json!({"view_id":"review","tab_id":tab}),
+    )?;
+    assert_no_connected_tab(&targeted);
+    Ok(())
+}
+
+fn report_navigation_cases() -> [(&'static str, Value, &'static str); 12] {
+    [
+        ("reports", json!({}), "/reports?company=acme"),
+        (
+            "income-statement",
+            json!({"from":"2026-01-01","to":"2026-03-31"}),
+            "/reports/income-statement?company=acme&from=2026-01-01&to=2026-03-31&currency=USD",
+        ),
+        (
+            "balance-sheet",
+            json!({"to":"2026-03-31"}),
+            "/reports/balance-sheet?company=acme&to=2026-03-31&currency=USD",
+        ),
+        (
+            "cash-flow",
+            json!({"cash_account":"1000"}),
+            "/reports/cash-flow?company=acme&currency=USD&cash_account=1000",
+        ),
+        (
+            "trend",
+            json!({"metric":"net-worth","period":"quarter"}),
+            "/reports/trend?company=acme&currency=USD&period=quarter&metric=net-worth",
+        ),
+        (
+            "budget-variance",
+            json!({"year":"2026"}),
+            "/reports/budget-variance?company=acme&currency=USD&year=2026",
+        ),
+        (
+            "schedule-c",
+            json!({"from":"2026-01-01","to":"2026-12-31"}),
+            "/reports/schedule-c?company=acme&from=2026-01-01&to=2026-12-31&currency=USD",
+        ),
+        (
+            "1099",
+            json!({"threshold":"0"}),
+            "/reports/1099?company=acme&currency=USD&threshold=0",
+        ),
+        (
+            "reconciliation",
+            json!({"account":"1000","to":"2026-03-31","mode":"bank","statement":"S1 & fees","statement_balance":"1234.56"}),
+            "/reconciliation?company=acme&account=1000&to=2026-03-31&currency=USD&mode=bank&statement=S1%20%26%20fees&statement_balance=1234.56",
+        ),
+        (
+            "reconciliation",
+            json!({"account":"1000","mode":"settlement","statement":"S1","link_key":"applies_to"}),
+            "/reconciliation?company=acme&account=1000&currency=USD&mode=settlement&statement=S1&link_key=applies_to",
+        ),
+        (
+            "reconciliation",
+            json!({}),
+            "/reconciliation?company=acme&currency=USD",
+        ),
+        (
+            "budget-variance",
+            json!({}),
+            "/reports/budget-variance?company=acme&currency=USD",
+        ),
+    ]
 }

@@ -2,7 +2,10 @@
 
 use super::{
     LinkError, REPORTS, REVIEW_PREFIX, ReportKind, TRANSACTION_PREFIX, encode_path, fields,
-    values::*,
+    values::{
+        AccountCode, AccountSelection, BudgetWindow, Clearance, Currency, Date, DecimalAmount,
+        MinorAmount, Offset, ProposalId, Threshold, TransactionId, Year,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::Error};
@@ -39,7 +42,7 @@ macro_rules! filter_set {
 }
 
 filter_set!(Empty {});
-filter_set!(Company { company: String });
+filter_set!(BookFilter { company: String });
 filter_set!(Dashboard {
     company: String,
     currency: Currency
@@ -89,7 +92,7 @@ filter_set!(Balance {
     to: Date,
     compare_to: Date
 });
-filter_set!(Cash {
+filter_set!(CashFlowFilters {
     company: String,
     currency: Currency,
     from: Date,
@@ -141,7 +144,8 @@ filter_set!(Reconciliation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Transaction {
     company: Option<String>,
-    transaction_id: TransactionId,
+    #[serde(rename = "transaction_id")]
+    id: TransactionId,
     offset: Option<Offset>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -152,7 +156,7 @@ pub(crate) struct ReviewDetail {
 }
 impl Validated<Transaction> {
     pub(super) fn route(&self) -> String {
-        format!("{TRANSACTION_PREFIX}{}", self.0.transaction_id)
+        format!("{TRANSACTION_PREFIX}{}", self.0.id)
     }
 }
 impl Validated<ReviewDetail> {
@@ -181,13 +185,13 @@ pub(crate) enum ReconciliationMode {
     Settlement,
 }
 
-fn chronological(from: &Option<Date>, to: &Option<Date>) -> Result<(), LinkError> {
+fn chronological(from: Option<Date>, to: Option<Date>) -> Result<(), LinkError> {
     if matches!((from, to), (Some(from), Some(to)) if from.date() > to.date()) {
         return Err(LinkError("The start date must not be after the end date."));
     }
     Ok(())
 }
-fn comparison(from: &Option<Date>, to: &Option<Date>) -> Result<(), LinkError> {
+fn comparison(from: Option<Date>, to: Option<Date>) -> Result<(), LinkError> {
     match (from, to) {
         (None, None) => Ok(()),
         (Some(_), Some(_)) => chronological(from, to),
@@ -203,7 +207,7 @@ macro_rules! no_relations {
 }
 no_relations!(
     Empty,
-    Company,
+    BookFilter,
     Dashboard,
     Catalog,
     Balance,
@@ -213,16 +217,16 @@ no_relations!(
 macro_rules! period_relations {
     ($($name:ident),*) => { $( impl Validate for $name {
         fn validate(&self) -> Result<(), LinkError> {
-            chronological(&self.from, &self.to)?;
-            comparison(&self.compare_from, &self.compare_to)
+            chronological(self.from, self.to)?;
+            comparison(self.compare_from, self.compare_to)
         }
     } )* };
 }
-period_relations!(Period, Cash, Trend, Summary);
+period_relations!(Period, CashFlowFilters, Trend, Summary);
 impl Validate for Transactions {
     fn validate(&self) -> Result<(), LinkError> {
-        chronological(&self.from, &self.to)?;
-        comparison(&self.compare_from, &self.compare_to)?;
+        chronological(self.from, self.to)?;
+        comparison(self.compare_from, self.compare_to)?;
         if matches!((&self.min_amount, &self.max_amount), (Some(min), Some(max)) if min > max) {
             return Err(LinkError("Minimum amount must not exceed maximum amount."));
         }
@@ -232,15 +236,15 @@ impl Validate for Transactions {
 impl Validate for Budget {
     fn validate(&self) -> Result<(), LinkError> {
         BudgetWindow::new(self.from, self.to, self.year.as_ref())?;
-        comparison(&self.compare_from, &self.compare_to)?;
+        comparison(self.compare_from, self.compare_to)?;
         BudgetWindow::new(self.compare_from, self.compare_to, None)?;
         Ok(())
     }
 }
 impl Validate for Vendor {
     fn validate(&self) -> Result<(), LinkError> {
-        chronological(&self.from, &self.to)?;
-        comparison(&self.compare_from, &self.compare_to)?;
+        chronological(self.from, self.to)?;
+        comparison(self.compare_from, self.compare_to)?;
         if let (Some(amount), Some(currency)) = (&self.threshold, &self.currency) {
             amount.validate_currency(currency)?;
         }
@@ -256,7 +260,7 @@ impl Validate for Reconciliation {
     }
 }
 
-/// Compatibility spelling: reports + report_kind has the same typed alternatives
+/// Compatibility spelling: reports + `report_kind` has the same typed alternatives
 /// as direct report view IDs. A catalog has no report-specific filters.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(untagged)]
@@ -274,7 +278,7 @@ impl Default for ReportSelector {
 pub(crate) enum ReportAddress {
     IncomeStatement(Validated<Period>),
     BalanceSheet(Validated<Balance>),
-    CashFlow(Validated<Cash>),
+    CashFlow(Validated<CashFlowFilters>),
     Trend(Validated<Trend>),
     BudgetVariance(Validated<Budget>),
     ScheduleC(Validated<Period>),
@@ -301,6 +305,6 @@ impl ReportSelector {
                 }
             },
         };
-        encode_path(route.into(), fields)
+        encode_path(route.into(), &fields)
     }
 }

@@ -89,6 +89,7 @@ pub enum ServiceError {
 
 impl ServiceError {
     /// Stable error name returned by lifecycle MCP tools.
+    #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::Io(_) => "SERVICE_IO",
@@ -318,12 +319,11 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
             .timeout(Duration::from_secs(2))
             .build()
             .map_err(crate::DesktopError::from)?;
-        let response = match client
+        let Ok(response) = client
             .get(format!("{}health", crate::server::local_url(runtime.bind)))
             .send()
-        {
-            Ok(response) => response,
-            Err(_) => return Ok(result),
+        else {
+            return Ok(result);
         };
         if response
             .headers()
@@ -365,7 +365,7 @@ pub(crate) fn connection() -> Result<(String, PathBuf), ServiceError> {
 ///
 /// # Errors
 /// Returns actionable service-manager, configuration and provisioning errors.
-pub fn run(options: ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(), ServiceError> {
+pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(), ServiceError> {
     if matches!(options.command, ServiceCommand::Mcp) {
         return mcp::serve();
     }
@@ -444,6 +444,7 @@ pub fn run(options: ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(
     }
     Ok(())
 }
+#[derive(Clone, Copy)]
 enum InstallMode {
     Command {
         explicit_db: bool,

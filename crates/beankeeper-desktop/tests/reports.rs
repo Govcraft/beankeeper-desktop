@@ -5,6 +5,73 @@ use chrono::{Datelike, Local};
 use common::{Ledger, Server, TestResult, rpc, token};
 use serde_json::{Value, json};
 
+type FixturePosting = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    i64,
+    &'static str,
+);
+const FIXTURE_POSTINGS: &[FixturePosting] = &[
+    (
+        "acme",
+        "2026-01-10",
+        "USD",
+        "1000",
+        "4000",
+        123_456,
+        "sched-c:1",
+    ),
+    (
+        "acme",
+        "2026-02-10",
+        "USD",
+        "5000",
+        "1000",
+        65_000,
+        "sched-c:18",
+    ),
+    (
+        "acme",
+        "2026-03-10",
+        "USD",
+        "5000",
+        "1000",
+        4_321,
+        "custom-tax",
+    ),
+    ("acme", "2026-04-10", "USD", "5000", "1000", 3_210, ""),
+    (
+        "acme",
+        "2026-01-10",
+        "MXN",
+        "1000",
+        "4000",
+        987_654,
+        "sched-c:1",
+    ),
+    (
+        "acme",
+        "2025-01-10",
+        "USD",
+        "1000",
+        "4000",
+        111,
+        "sched-c:1",
+    ),
+    (
+        "other",
+        "2026-01-10",
+        "USD",
+        "1000",
+        "4000",
+        222_222,
+        "sched-c:1",
+    ),
+];
+
 fn fixture() -> TestResult<Ledger> {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
@@ -18,63 +85,7 @@ fn fixture() -> TestResult<Ledger> {
             db::create_account(db.conn(), company, code, name, kind, None)?;
         }
     }
-    for (company, date, currency, debit, credit, amount, category) in [
-        (
-            "acme",
-            "2026-01-10",
-            "USD",
-            "1000",
-            "4000",
-            123_456,
-            "sched-c:1",
-        ),
-        (
-            "acme",
-            "2026-02-10",
-            "USD",
-            "5000",
-            "1000",
-            65_000,
-            "sched-c:18",
-        ),
-        (
-            "acme",
-            "2026-03-10",
-            "USD",
-            "5000",
-            "1000",
-            4_321,
-            "custom-tax",
-        ),
-        ("acme", "2026-04-10", "USD", "5000", "1000", 3_210, ""),
-        (
-            "acme",
-            "2026-01-10",
-            "MXN",
-            "1000",
-            "4000",
-            987_654,
-            "sched-c:1",
-        ),
-        (
-            "acme",
-            "2025-01-10",
-            "USD",
-            "1000",
-            "4000",
-            111,
-            "sched-c:1",
-        ),
-        (
-            "other",
-            "2026-01-10",
-            "USD",
-            "1000",
-            "4000",
-            222_222,
-            "sched-c:1",
-        ),
-    ] {
+    for &(company, date, currency, debit, credit, amount, category) in FIXTURE_POSTINGS {
         let metadata = json!({"payee":"Vendor, \"quoted\"\n<script>", "tin":"000-00-0000", "payee_address":"A & B", "applies_to":"sale"}).to_string();
         let entries = [
             db::PostEntryParams {
@@ -189,7 +200,7 @@ fn rendered_scalars(value: &Value, html: &str) {
                     // symbols and grouping. Raw amount fields are verified by the
                     // JSON/CSV contract checks, rather than expected in HTML.
                     let decimals = html
-                        .replace(",", "")
+                        .replace(',', "")
                         .replace(['$', '€', '£', '¥'], "")
                         .replace("CA", "")
                         .replace("MX", "");
@@ -283,91 +294,7 @@ fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_resul
     let before = fingerprint(&db)?;
     let previous_end = format!("{previous_year}-12-31");
     let previous_start = format!("{previous_year}-01-01");
-    for (filters, args, empty) in [
-        (String::new(), vec![], true),
-        // Empty form submissions use the same defaults as omitted bounds.
-        ("&from=&to=".into(), vec![], true),
-        (
-            format!("&to={previous_end}"),
-            vec!["--to", previous_end.as_str()],
-            false,
-        ),
-        (
-            format!("&from={previous_start}"),
-            vec!["--from", previous_start.as_str()],
-            false,
-        ),
-        (
-            format!("&from={previous_start}&to={previous_end}"),
-            vec![
-                "--from",
-                previous_start.as_str(),
-                "--to",
-                previous_end.as_str(),
-            ],
-            false,
-        ),
-        (
-            "&from=1900-01-01&to=1900-12-31".into(),
-            vec!["--from", "1900-01-01", "--to", "1900-12-31"],
-            true,
-        ),
-    ] {
-        let mut cli_args = vec!["income-statement", "--currency", "USD"];
-        cli_args.extend(args);
-        let expected: Value = serde_json::from_str(&cli_report(&ledger, &cli_args, "json")?)?;
-        let expected = &expected["data"];
-        let path = format!(
-            "{}/reports/income-statement?company=acme&currency=USD{filters}",
-            server.base
-        );
-        let html = server
-            .client
-            .get(&path)
-            .send()?
-            .error_for_status()?
-            .text()?;
-        assert_eq!(
-            html.contains("No revenue or expense activity in this range for USD"),
-            empty,
-            "{path}: {html}"
-        );
-        for field in ["from", "to"] {
-            let date = expected[field].as_str().ok_or("resolved report date")?;
-            assert!(html.contains(&format!("name=\"{field}\" type=\"date\" value=\"{date}\"")));
-        }
-        assert!(html.contains(&format!(
-            "Reporting period: {} through {} (inclusive).",
-            expected["from"].as_str().ok_or("from")?,
-            expected["to"].as_str().ok_or("to")?
-        )));
-        let actual: Value = server
-            .client
-            .get(format!("{path}&format=json"))
-            .send()?
-            .json()?;
-        assert_eq!(&actual, expected);
-        let download = html
-            .split_once("<a download href=\"")
-            .and_then(|(_, rest)| rest.split_once('"'))
-            .map(|(url, _)| url.replace("&amp;", "&"))
-            .ok_or("JSON download link")?;
-        assert!(download.contains(&format!(
-            "from={}",
-            expected["from"].as_str().ok_or("from")?
-        )));
-        assert!(download.contains(&format!("to={}", expected["to"].as_str().ok_or("to")?)));
-        let downloaded: Value = server
-            .client
-            .get(format!("{}{download}", server.base))
-            .send()?
-            .json()?;
-        assert_eq!(&downloaded, expected);
-        if empty {
-            assert!(html.contains("href=\"/transactions?company=acme&amp;currency=USD\""));
-            assert!(html.contains("Choose different dates above"));
-        }
-    }
+    assert_income_periods(&server, &ledger, &previous_start, &previous_end)?;
     for (filters, empty) in [
         ("company=other&currency=USD", false),
         ("company=acme&currency=MXN", false),
@@ -449,126 +376,7 @@ fn every_report_matches_cli_json_and_url_filters_restore_the_rendered_results() 
     server.pair()?;
     // Startup audits the review identity; only report reads must be mutation-free.
     let before = fingerprint(&ledger.db()?)?;
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "/reports/income-statement?from=2026-01-01&to=2026-03-31",
-            &[
-                "income-statement",
-                "--from",
-                "2026-01-01",
-                "--to",
-                "2026-03-31",
-            ],
-        ),
-        (
-            "/reports/balance-sheet?to=2026-03-31",
-            &["balance-sheet", "--to", "2026-03-31"],
-        ),
-        (
-            "/reports/cash-flow?from=2026-01-01&to=2026-03-31&cash_account=1000",
-            &[
-                "cash-flow",
-                "--from",
-                "2026-01-01",
-                "--to",
-                "2026-03-31",
-                "--cash-account",
-                "1000",
-            ],
-        ),
-        (
-            "/reports/trend?from=2026-01-01&to=2026-03-31&metric=spending&period=month",
-            &[
-                "trend",
-                "--metric",
-                "spending",
-                "--period",
-                "month",
-                "--from",
-                "2026-01-01",
-                "--to",
-                "2026-03-31",
-            ],
-        ),
-        (
-            "/reports/trend?from=2026-01-01&to=2026-03-31&metric=net-worth&period=quarter",
-            &[
-                "trend",
-                "--metric",
-                "net-worth",
-                "--period",
-                "quarter",
-                "--from",
-                "2026-01-01",
-                "--to",
-                "2026-03-31",
-            ],
-        ),
-        (
-            "/reports/budget-variance?from=2026-02-01&to=2026-03-31",
-            &[
-                "budget-variance",
-                "--year",
-                "2026",
-                "--from",
-                "2",
-                "--to",
-                "3",
-                "--include-unbudgeted",
-            ],
-        ),
-        (
-            "/reports/budget-variance?year=2026",
-            &["budget-variance", "--year", "2026", "--include-unbudgeted"],
-        ),
-        (
-            "/reports/schedule-c?from=2026-01-01&to=2026-12-31",
-            &["schedule-c", "--from", "2026-01-01", "--to", "2026-12-31"],
-        ),
-        (
-            "/reports/1099?from=2026-01-01&to=2026-03-31&threshold=0",
-            &[
-                "1099",
-                "--from",
-                "2026-01-01",
-                "--to",
-                "2026-03-31",
-                "--threshold",
-                "0",
-            ],
-        ),
-        (
-            "/reconciliation?account=1000&to=2026-01-31&statement=S1&statement_balance=400",
-            &[
-                "reconciliation",
-                "--account",
-                "1000",
-                "--to",
-                "2026-01-31",
-                "--statement",
-                "S1",
-                "--statement-balance",
-                "400",
-            ],
-        ),
-        (
-            "/reports/reconciliation?account=1000&to=2026-03-31&mode=settlement&statement=S1&link_key=applies_to",
-            &[
-                "reconciliation",
-                "--account",
-                "1000",
-                "--to",
-                "2026-03-31",
-                "--mode",
-                "settlement",
-                "--statement",
-                "S1",
-                "--link-key",
-                "applies_to",
-            ],
-        ),
-    ];
-    for (path, args) in cases {
+    for (path, args) in CLI_REPORT_CASES {
         for currency in ["USD", "MXN"] {
             let path = format!("{}{path}&company=acme&currency={currency}", server.base);
             let mut cli_args = args.to_vec();
@@ -856,27 +664,7 @@ fn reports_show_empty_states_defaults_company_scope_and_actionable_errors() -> T
         .send()?;
     assert_eq!(response.status(), 200);
     assert!(response.text()?.contains("No matching rows"));
-    // The configured company remains the default, but a URL explicitly overrides it.
-    let mut scoped = Server::start(&ledger, &["--company", "other", "serve"], None)?;
-    scoped.pair()?;
-    let default: Value = scoped
-        .client
-        .get(format!(
-            "{}/reports/schedule-c?format=json&to=2026-12-31",
-            scoped.base
-        ))
-        .send()?
-        .json()?;
-    assert_eq!(default["lines"][0]["net"], 222_222);
-    let explicit: Value = scoped
-        .client
-        .get(format!(
-            "{}/reports/schedule-c?company=acme&format=json&currency=MXN&to=2026-12-31",
-            scoped.base
-        ))
-        .send()?
-        .json()?;
-    assert_eq!(explicit["lines"][0]["net"], 987_654);
+    assert_report_company_scope(&ledger)?;
     Ok(())
 }
 
@@ -955,6 +743,245 @@ fn deep_links_apply_exact_category_payee_and_both_reporting_periods() -> TestRes
             assert_eq!(data["comparison"]["total_expenses"], 4_321);
         }
     }
+    assert_balance_sheet_comparison(&server)?;
+    Ok(())
+}
+
+const CLI_REPORT_CASES: &[(&str, &[&str])] = &[
+    (
+        "/reports/income-statement?from=2026-01-01&to=2026-03-31",
+        &[
+            "income-statement",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-03-31",
+        ],
+    ),
+    (
+        "/reports/balance-sheet?to=2026-03-31",
+        &["balance-sheet", "--to", "2026-03-31"],
+    ),
+    (
+        "/reports/cash-flow?from=2026-01-01&to=2026-03-31&cash_account=1000",
+        &[
+            "cash-flow",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-03-31",
+            "--cash-account",
+            "1000",
+        ],
+    ),
+    (
+        "/reports/trend?from=2026-01-01&to=2026-03-31&metric=spending&period=month",
+        &[
+            "trend",
+            "--metric",
+            "spending",
+            "--period",
+            "month",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-03-31",
+        ],
+    ),
+    (
+        "/reports/trend?from=2026-01-01&to=2026-03-31&metric=net-worth&period=quarter",
+        &[
+            "trend",
+            "--metric",
+            "net-worth",
+            "--period",
+            "quarter",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-03-31",
+        ],
+    ),
+    (
+        "/reports/budget-variance?from=2026-02-01&to=2026-03-31",
+        &[
+            "budget-variance",
+            "--year",
+            "2026",
+            "--from",
+            "2",
+            "--to",
+            "3",
+            "--include-unbudgeted",
+        ],
+    ),
+    (
+        "/reports/budget-variance?year=2026",
+        &["budget-variance", "--year", "2026", "--include-unbudgeted"],
+    ),
+    (
+        "/reports/schedule-c?from=2026-01-01&to=2026-12-31",
+        &["schedule-c", "--from", "2026-01-01", "--to", "2026-12-31"],
+    ),
+    (
+        "/reports/1099?from=2026-01-01&to=2026-03-31&threshold=0",
+        &[
+            "1099",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-03-31",
+            "--threshold",
+            "0",
+        ],
+    ),
+    (
+        "/reconciliation?account=1000&to=2026-01-31&statement=S1&statement_balance=400",
+        &[
+            "reconciliation",
+            "--account",
+            "1000",
+            "--to",
+            "2026-01-31",
+            "--statement",
+            "S1",
+            "--statement-balance",
+            "400",
+        ],
+    ),
+    (
+        "/reports/reconciliation?account=1000&to=2026-03-31&mode=settlement&statement=S1&link_key=applies_to",
+        &[
+            "reconciliation",
+            "--account",
+            "1000",
+            "--to",
+            "2026-03-31",
+            "--mode",
+            "settlement",
+            "--statement",
+            "S1",
+            "--link-key",
+            "applies_to",
+        ],
+    ),
+];
+
+fn assert_income_periods(
+    server: &Server,
+    ledger: &Ledger,
+    previous_start: &str,
+    previous_end: &str,
+) -> TestResult {
+    for (filters, args, empty) in [
+        (String::new(), vec![], true),
+        // Empty form submissions use the same defaults as omitted bounds.
+        ("&from=&to=".into(), vec![], true),
+        (
+            format!("&to={previous_end}"),
+            vec!["--to", previous_end],
+            false,
+        ),
+        (
+            format!("&from={previous_start}"),
+            vec!["--from", previous_start],
+            false,
+        ),
+        (
+            format!("&from={previous_start}&to={previous_end}"),
+            vec!["--from", previous_start, "--to", previous_end],
+            false,
+        ),
+        (
+            "&from=1900-01-01&to=1900-12-31".into(),
+            vec!["--from", "1900-01-01", "--to", "1900-12-31"],
+            true,
+        ),
+    ] {
+        let mut cli_args = vec!["income-statement", "--currency", "USD"];
+        cli_args.extend(args);
+        let expected: Value = serde_json::from_str(&cli_report(ledger, &cli_args, "json")?)?;
+        let expected = &expected["data"];
+        let path = format!(
+            "{}/reports/income-statement?company=acme&currency=USD{filters}",
+            server.base
+        );
+        let html = server
+            .client
+            .get(&path)
+            .send()?
+            .error_for_status()?
+            .text()?;
+        assert_eq!(
+            html.contains("No revenue or expense activity in this range for USD"),
+            empty,
+            "{path}: {html}"
+        );
+        for field in ["from", "to"] {
+            let date = expected[field].as_str().ok_or("resolved report date")?;
+            assert!(html.contains(&format!("name=\"{field}\" type=\"date\" value=\"{date}\"")));
+        }
+        assert!(html.contains(&format!(
+            "Reporting period: {} through {} (inclusive).",
+            expected["from"].as_str().ok_or("from")?,
+            expected["to"].as_str().ok_or("to")?
+        )));
+        let actual: Value = server
+            .client
+            .get(format!("{path}&format=json"))
+            .send()?
+            .json()?;
+        assert_eq!(&actual, expected);
+        let download = html
+            .split_once("<a download href=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(url, _)| url.replace("&amp;", "&"))
+            .ok_or("JSON download link")?;
+        assert!(download.contains(&format!(
+            "from={}",
+            expected["from"].as_str().ok_or("from")?
+        )));
+        assert!(download.contains(&format!("to={}", expected["to"].as_str().ok_or("to")?)));
+        let downloaded: Value = server
+            .client
+            .get(format!("{}{download}", server.base))
+            .send()?
+            .json()?;
+        assert_eq!(&downloaded, expected);
+        if empty {
+            assert!(html.contains("href=\"/transactions?company=acme&amp;currency=USD\""));
+            assert!(html.contains("Choose different dates above"));
+        }
+    }
+    Ok(())
+}
+
+fn assert_report_company_scope(ledger: &Ledger) -> TestResult {
+    // The configured company remains the default, but a URL explicitly overrides it.
+    let mut scoped = Server::start(ledger, &["--company", "other", "serve"], None)?;
+    scoped.pair()?;
+    let default: Value = scoped
+        .client
+        .get(format!(
+            "{}/reports/schedule-c?format=json&to=2026-12-31",
+            scoped.base
+        ))
+        .send()?
+        .json()?;
+    assert_eq!(default["lines"][0]["net"], 222_222);
+    let explicit: Value = scoped
+        .client
+        .get(format!(
+            "{}/reports/schedule-c?company=acme&format=json&currency=MXN&to=2026-12-31",
+            scoped.base
+        ))
+        .send()?
+        .json()?;
+    assert_eq!(explicit["lines"][0]["net"], 987_654);
+    Ok(())
+}
+
+fn assert_balance_sheet_comparison(server: &Server) -> TestResult {
     let balance_url = format!(
         "{}/reports/balance-sheet?company=acme&currency=USD&to=2026-03-31&compare_to=2026-01-31",
         server.base

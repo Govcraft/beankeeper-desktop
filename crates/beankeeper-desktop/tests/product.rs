@@ -197,7 +197,7 @@ fn license_trust_json_reports_compile_time_embed_not_runtime_overrides() -> Test
         serde_json::from_str(option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON").unwrap_or("{}"))?;
     assert_eq!(
         trust.get("service_url"),
-        Some(&expected_url.map_or(serde_json::Value::Null, |url| url.into()))
+        Some(&expected_url.map_or(serde_json::Value::Null, std::convert::Into::into))
     );
     assert_eq!(trust.get("public_keys"), Some(&expected_keys));
     assert_ne!(

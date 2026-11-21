@@ -22,7 +22,7 @@ impl Markup {
         self.0.push_str(&other.0);
     }
 
-    pub(crate) fn write<const N: usize>(&mut self, template: Template<N>, parts: [&dyn Part; N]) {
+    pub(crate) fn write<const N: usize>(&mut self, template: &Template<N>, parts: [&dyn Part; N]) {
         let mut start = 0;
         for (slot, part) in template.slots.into_iter().zip(parts) {
             self.0.push_str(&template.structure[start..slot]);
@@ -143,7 +143,7 @@ impl Write for Escaper<'_> {
 macro_rules! write_markup {
     ($output:expr, $structure:expr $(, $part:expr)* $(,)?) => {
         $output.write(
-            const { $crate::markup::Template::new($structure) },
+            &const { $crate::markup::Template::new($structure) },
             [$(&$part as &dyn $crate::markup::Part),*],
         )
     };

@@ -152,8 +152,8 @@ impl SetupReport {
         };
         Self {
             ledger,
-            summary,
             next_step,
+            summary,
         }
     }
 }
