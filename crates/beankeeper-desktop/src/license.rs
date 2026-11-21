@@ -124,7 +124,7 @@ struct Envelope {
 }
 
 /// Explicit issuer public-key trust store. License content cannot add keys.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TrustedKeys(BTreeMap<String, VerifyingKey>);
 
 impl TrustedKeys {
@@ -199,9 +199,6 @@ pub fn entitlement(license: &VerifiedLicense, released_at: DateTime<Utc>) -> Upd
 /// # Errors
 /// Rejects unsupported contracts, unauthenticated content, and invalid claims.
 pub fn verify_offline(bytes: &[u8], keys: &TrustedKeys) -> Result<VerifiedLicense, LicenseError> {
-    if keys.0.is_empty() {
-        return Err(LicenseError::Unconfigured);
-    }
     if bytes.len() > MAX_FILE {
         return Err(LicenseError::TooLarge);
     }
@@ -450,7 +447,6 @@ mod tests {
         let tampered = FIXTURE.replace("AHHH0LU", "BHHH0LU");
         assert!(activate(tampered.as_bytes(), &keys(), &path).is_err());
         assert_eq!(fs::read_to_string(&path)?, FIXTURE);
-        assert!(verify_offline(FIXTURE.as_bytes(), &TrustedKeys::default()).is_err());
         Ok(())
     }
 
@@ -505,7 +501,10 @@ mod tests {
             assert!(verify_offline(&serde_json::to_vec(&envelope)?, &keys()).is_err());
         }
         assert!(verify_offline(&vec![b' '; MAX_FILE + 1], &keys()).is_err());
-        assert!(TrustedKeys::from_json(b"{}").is_err());
+        assert!(matches!(
+            TrustedKeys::from_json(b"{}"),
+            Err(LicenseError::Unconfigured)
+        ));
         assert!(decode("AA=").is_err());
         assert!(decode("AB").is_err());
         Ok(())

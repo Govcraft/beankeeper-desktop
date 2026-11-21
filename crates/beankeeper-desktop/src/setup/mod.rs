@@ -236,6 +236,24 @@ impl SetupOptions {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SetupMode {
+    Fresh,
+    Resume,
+}
+
+impl SetupMode {
+    fn for_ledger(ledger: &Path, force: bool) -> Result<Self, SetupError> {
+        match (ledger.try_exists()?, force) {
+            (false, _) => Ok(Self::Fresh),
+            (true, true) => Ok(Self::Resume),
+            (true, false) => Err(SetupError::Invalid(
+                "ledger already exists; use --force to resume setup without deleting data or rotating keys",
+            )),
+        }
+    }
+}
+
 fn run_with_store(
     cli: &mut Cli,
     options: &SetupOptions,
@@ -251,12 +269,7 @@ fn run_with_store(
             "setup requires a terminal; use --non-interactive for automation",
         ));
     }
-    let existed = cli.db.try_exists()?;
-    if existed && !options.force {
-        return Err(SetupError::Invalid(
-            "ledger already exists; use --force to resume setup without deleting data or rotating keys",
-        ));
-    }
+    let mode = SetupMode::for_ledger(&cli.db, options.force)?;
     let home = options
         .config_home
         .clone()
@@ -282,7 +295,7 @@ fn run_with_store(
     let plan =
         prepare_client_configs(registration, &home, &executable, &cli.db, &token_file, &url)?;
     // Validate output collisions before creating a ledger or storing credentials.
-    if !existed
+    if matches!(mode, SetupMode::Fresh)
         && [token_file.as_path(), owner_file.as_path(), kit.as_path()]
             .iter()
             .any(|path| path.exists())
@@ -306,7 +319,7 @@ fn run_with_store(
     if kit.exists() {
         PrivateFile::open(&kit)?;
     }
-    let (secret, automatic_file) = store_ledger_secret(cli, store, registration, existed)?;
+    let (secret, automatic_file) = store_ledger_secret(cli, store, registration, mode)?;
     if !kit.exists() {
         private_create(
             &kit,
@@ -316,7 +329,7 @@ fn run_with_store(
     let temporary = temporary_passphrase(&secret)?;
     cli.passphrase.passphrase_fd = None;
     cli.passphrase.passphrase_file = Some(temporary.path().into());
-    if !existed {
+    if matches!(mode, SetupMode::Fresh) {
         initialize_ledger(cli, options.demo)?;
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
@@ -325,7 +338,8 @@ fn run_with_store(
         options,
         &token_file,
         &owner_file,
-        !matches!(registration, ClientRegistration::Standalone) && existed,
+        !matches!(registration, ClientRegistration::Standalone)
+            && matches!(mode, SetupMode::Resume),
     )?;
     write_store_marker(
         &cli.db,
@@ -336,7 +350,7 @@ fn run_with_store(
         Some(plan) => plan.write()?,
         None => Vec::new(),
     };
-    finish_setup(cli, options, &paths, configs, &secret, &temporary, existed)
+    finish_setup(cli, options, &paths, configs, &secret, &temporary, mode)
 }
 
 fn prepare_client_configs(
@@ -367,20 +381,22 @@ fn store_ledger_secret(
     cli: &Cli,
     store: &dyn SecretStore,
     registration: ClientRegistration<'_>,
-    existed: bool,
+    mode: SetupMode,
 ) -> Result<(SecretString, Option<PathBuf>), SetupError> {
     let supplied = passphrase::resolve_passphrase(
         cli.passphrase.passphrase_fd,
         cli.passphrase.passphrase_file.as_deref(),
         false,
     )?;
-    let secret = match supplied {
-        Some(secret) => secret,
-        None if existed => store.load(&cli.db)?.ok_or(SetupError::Invalid("keychain entry missing; restore the passphrase from your recovery kit using --passphrase-file"))?,
-        None => generate_passphrase()?,
+    let secret = match (supplied, mode) {
+        (Some(secret), _) => secret,
+        (None, SetupMode::Resume) => store.load(&cli.db)?.ok_or(SetupError::Invalid(
+            "keychain entry missing; restore the passphrase from your recovery kit using --passphrase-file",
+        ))?,
+        (None, SetupMode::Fresh) => generate_passphrase()?,
     };
     // Verify supplied recovery credentials before replacing a stored credential.
-    if existed {
+    if matches!(mode, SetupMode::Resume) {
         Db::open_existing(&cli.db, Some(&secret))?;
     }
     // Establish a recoverable credential before initialization.
@@ -388,7 +404,8 @@ fn store_ledger_secret(
     let automatic_file = match store.store(&cli.db, &secret) {
         Ok(()) => None,
         Err(keychain::KeychainError::Unavailable)
-            if !matches!(registration, ClientRegistration::Standalone) && !existed =>
+            if !matches!(registration, ClientRegistration::Standalone)
+                && matches!(mode, SetupMode::Fresh) =>
         {
             FileSecretStore::new(fallback.clone()).store(&cli.db, &secret)?;
             eprintln!("OS secret store unavailable; using a private credential file.");
@@ -406,7 +423,7 @@ fn finish_setup(
     configs: Vec<PathBuf>,
     secret: &SecretString,
     temporary: &tempfile::NamedTempFile,
-    existed: bool,
+    mode: SetupMode,
 ) -> Result<(), SetupError> {
     println!(
         "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
@@ -421,7 +438,7 @@ fn finish_setup(
     for path in configs {
         eprintln!("MCP config: {}", path.display());
     }
-    if !options.non_interactive && !existed {
+    if !options.non_interactive && matches!(mode, SetupMode::Fresh) {
         show_once(secret)?;
     }
     if !options.launch.no_start {

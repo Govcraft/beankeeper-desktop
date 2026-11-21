@@ -37,17 +37,31 @@ use crate::{
     },
 };
 
+const TAB_PREFIX: &str = "tab";
 const TAB_LIFETIME: Duration = Duration::from_secs(3);
 const MAX_TABS: usize = 128;
 const MAX_PENDING: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
 struct TabId(#[schemars(with = "String")] MagicTypeId);
 
 impl TabId {
     fn new() -> Self {
-        Self("tab".create_type_id::<V7>())
+        Self(TAB_PREFIX.create_type_id::<V7>())
+    }
+}
+
+impl<'de> Deserialize<'de> for TabId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        let id = value
+            .parse::<MagicTypeId>()
+            .map_err(serde::de::Error::custom)?;
+        if id.prefix().as_str() != TAB_PREFIX || id != value.as_str() {
+            return Err(serde::de::Error::custom("invalid tab identifier"));
+        }
+        Ok(Self(id))
     }
 }
 
@@ -630,6 +644,19 @@ mod tests {
         ));
         assert_eq!(next_event(&mut pending, None), UiEvent::Heartbeat);
         assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn tab_identifiers_round_trip_and_require_the_tab_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tab = TabId::new();
+        let encoded = serde_json::to_string(&tab)?;
+        assert_eq!(serde_json::from_str::<TabId>(&encoded)?, tab);
+
+        let browser = "browser".create_type_id::<V7>();
+        let encoded = serde_json::to_string(&browser)?;
+        assert!(serde_json::from_str::<TabId>(&encoded).is_err());
         Ok(())
     }
 
