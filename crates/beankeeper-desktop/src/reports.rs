@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use beankeeper::types::AccountType;
 use beankeeper_cli::{
     cli::{Cli, ReconciliationMode, ReportCommand},
     commands::{
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
+    ledger_rows,
     links::{
         LinkError, ReportKind as Kind,
         values::{BudgetWindow, Date, DecimalAmount, Threshold, Year},
@@ -562,11 +564,12 @@ fn income_context(
     // activity with upstream's query API before calling the period empty.
     let from = from.to_string();
     let to = to.to_string();
-    for account_type in ["revenue", "expense"] {
+    for account_type in [AccountType::Revenue, AccountType::Expense] {
+        let account_type = ledger_rows::account_kind_name(account_type);
         let balances = db::compute_trial_balance(
             db.conn(),
             company,
-            Some(account_type),
+            Some(account_type.as_ref()),
             Some(&from),
             Some(&to),
             Some(currency),

@@ -4,6 +4,7 @@ pub mod boundary;
 pub mod bridge;
 pub mod browser;
 pub mod cli;
+mod ledger_rows;
 pub mod license;
 pub mod links;
 mod markup;
