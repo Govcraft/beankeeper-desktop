@@ -27,6 +27,19 @@ existing preset. Capability changes and token renewal use upstream commands
 under the human owner's control. A token is secret and expires after one year.
 New companies need owner-configured spend limits before agent use.
 
+Start a setup conversation with `setup_status` over MCP, or `bk setup status
+--json`. Use its `next_step` and ask only for information the books still need.
+Ask whether the owner keeps personal books, business books, or both, then
+confirm their reporting currency and when their financial year begins.
+Confirm the names of their real accounts, the dates and amounts of any starting
+balances, and whether they want to import older bank statements. If the books
+already contain transactions, confirm what has been entered before proposing
+additional work. Status can show currencies in existing transactions. The
+current ledger does not store a default currency or fiscal-year start, and
+existing transactions may lack import provenance. Ask the owner when a setting
+or a statement's status is unclear. Summarize what is already set up and which
+decisions or statements are still needed.
+
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from
 the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
 terminal, then select **Pair this browser** on that page within five minutes.

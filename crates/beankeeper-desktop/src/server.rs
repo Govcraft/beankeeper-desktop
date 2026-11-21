@@ -18,6 +18,7 @@ use crate::{
     boundary::{self, LocalBoundary},
     cli::ServeOptions,
     navigation::{self, Navigation},
+    onboarding::DesktopTools,
     pairing::{self, PairingState},
     review, ui,
 };
@@ -76,14 +77,17 @@ pub fn application(
         false,
     )?;
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
+    let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
     let mcp = http_router_with_host_tools(
         cli,
         passphrase.as_ref(),
         read_only,
         config,
-        navigation.clone(),
+        DesktopTools {
+            navigation: navigation.clone(),
+            status_db: Arc::clone(&association_db),
+        },
     )?;
-    let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
     let review = review::router(
         Db::open_existing(&cli.db, passphrase.as_ref())?,
