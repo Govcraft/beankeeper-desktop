@@ -82,9 +82,15 @@ pub fn command() -> Command {
                 .about("Verify and install an eligible Desktop release (requires cosign)"),
         )
         .mut_subcommand("mcp", |command| {
-            command.subcommand(crate::bridge::BridgeOptions::augment_args(
-                Command::new("bridge").about("Forward stdio MCP to the running Desktop server"),
-            ))
+            command
+                .subcommand(crate::bridge::BridgeOptions::augment_args(
+                    Command::new("bridge").about("Forward stdio MCP to the running Desktop server"),
+                ))
+                .subcommand(
+                    Command::new("extension")
+                        .about("Start an installed MCP bundle and serve it over stdio")
+                        .hide(true),
+                )
         })
 }
 

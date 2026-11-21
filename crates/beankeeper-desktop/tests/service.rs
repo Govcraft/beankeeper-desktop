@@ -280,23 +280,38 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         false
     );
     fs::write(&runtime_path, &runtime)?;
-    // The managed bridge resolves fallback state without a fixed URL or token argument.
-    let mut bridge = configured()
-        .args(["mcp", "bridge", "--service"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let mut input = bridge.stdin.take().ok_or("stdin")?;
-    writeln!(
-        input,
-        "{}",
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-test","version":"1"}}})
-    )?;
-    drop(input);
-    let output = bridge.wait_with_output()?;
-    assert!(output.status.success());
-    let initialized: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
+    // Both stdio launchers discover the same running service. The extension
+    // leaves its installation alone and adds its MCP onboarding instructions.
+    for args in [
+        &["mcp", "bridge", "--service"][..],
+        &["mcp", "extension"][..],
+    ] {
+        let mut bridge = configured()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut input = bridge.stdin.take().ok_or("stdin")?;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-test","version":"1"}}})
+        )?;
+        drop(input);
+        let output = bridge.wait_with_output()?;
+        assert!(output.status.success());
+        let initialized: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
+        let instructions = initialized["result"]["instructions"]
+            .as_str()
+            .ok_or("instructions")?;
+        assert!(instructions.contains("minor units"));
+        assert_eq!(
+            instructions.contains("setup_status"),
+            args.ends_with(&["extension"])
+        );
+        assert!(!state.join("claude-extension").exists());
+    }
     drop(server);
     let output = configured()
         .args(["service", "status", "--json"])

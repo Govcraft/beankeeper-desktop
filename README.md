@@ -22,6 +22,12 @@ See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
 
+## Claude Desktop extension
+
+Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
+then ask Claude to set up your books. The extension connects over stdio and
+starts local hosting on first use. See [Claude Desktop setup and removal](docs/claude-desktop.md).
+
 ## Unsigned builds
 
 There is no paid Apple or Windows signing until revenue is proven. Release

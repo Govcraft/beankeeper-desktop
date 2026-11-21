@@ -1,5 +1,6 @@
 //! Per-user background hosting. No ledger schema or accounting operations live here.
 
+mod extension;
 mod manager;
 mod mcp;
 
@@ -19,8 +20,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
-    setup::{self, keychain},
+    setup::{self, ClientRegistration, keychain},
 };
+
+pub(crate) use extension::connection as extension_connection;
 
 const DEFAULT_PORT: u16 = 8750;
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -41,7 +44,13 @@ pub enum ServiceCommand {
         /// Use a private passphrase file instead of the native secret store (headless hosts).
         #[arg(long)]
         file_store: bool,
+        /// Leave all MCP client configurations unchanged.
+        #[arg(long)]
+        no_agents: bool,
     },
+    /// Internal first-launch install for an MCP bundle that manages its own client registration.
+    #[command(hide = true)]
+    InstallExtension,
     /// Disable and remove the service, preserving books, recovery material and credentials.
     Uninstall,
     /// Enable login startup and start the installed service.
@@ -389,54 +398,25 @@ pub fn run(options: ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(
     let _lock = lock(&paths.state.join("service-operation.lock"))?;
     let previous = Config::load(&paths)?;
     match options.command {
-        ServiceCommand::Install { file_store } => {
-            manager::check_user()?;
-            if let Some(previous) = &previous {
-                if explicit_db && fs::canonicalize(&cli.db)? != previous.books {
-                    return Err(ServiceError::Configuration(
-                        "a different ledger is already installed; uninstall the service before selecting other books",
-                    ));
-                }
-                cli.db = previous.books.clone();
-                manager::stop(&paths)?;
-            } else {
-                if paths.definition.symlink_metadata().is_ok() {
-                    return Err(ServiceError::Configuration(
-                        "an unmanaged service definition already exists; inspect it before installing Beankeeper hosting",
-                    ));
-                }
-                if !explicit_db {
-                    cli.db = paths.data.join("books.db");
-                }
-            }
-            if !cli.db.is_absolute() {
-                cli.db = std::path::absolute(&cli.db)?;
-            }
-            let executable = std::env::current_exe()?;
-            let old_executable = previous
-                .as_ref()
-                .map_or(executable.as_path(), |c| c.executable.as_path());
-            let port = previous.as_ref().map_or(DEFAULT_PORT, |c| c.port);
-            setup::run_service(
-                &mut cli,
-                &paths.home,
-                (Ipv4Addr::LOCALHOST, port).into(),
-                old_executable,
+        ServiceCommand::Install {
+            file_store,
+            no_agents,
+        } => install(
+            &paths,
+            &mut cli,
+            previous.as_ref(),
+            InstallMode::Command {
                 file_store,
-            )?;
-            let config = Config {
-                executable,
-                books: fs::canonicalize(&cli.db)?,
-                port,
-            };
-            private_json(&paths.config(), &config)?;
-            manager::install(&paths, &config)?;
-            manager::start(&paths)?;
-            wait_ready(&paths)?;
-            println!(
-                "Beankeeper is running in the background. Recovery kit: {}. Keep an offline copy under your own control.",
-                config.books.with_extension("recovery.txt").display()
-            );
+                explicit_db,
+                no_agents,
+            },
+        )?,
+        ServiceCommand::InstallExtension => {
+            // An explicit service installation racing the extension takes
+            // precedence. Reuse it and leave its registration untouched.
+            if previous.is_none() {
+                install(&paths, &mut cli, None, InstallMode::Extension)?;
+            }
         }
         ServiceCommand::Start => {
             require_installed(previous.as_ref())?;
@@ -464,6 +444,87 @@ pub fn run(options: ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(
     }
     Ok(())
 }
+enum InstallMode {
+    Command {
+        explicit_db: bool,
+        file_store: bool,
+        no_agents: bool,
+    },
+    Extension,
+}
+
+fn install(
+    paths: &Paths,
+    cli: &mut Cli,
+    previous: Option<&Config>,
+    mode: InstallMode,
+) -> Result<(), ServiceError> {
+    let (explicit_db, file_store) = match mode {
+        InstallMode::Command {
+            explicit_db,
+            file_store,
+            ..
+        } => (explicit_db, file_store),
+        InstallMode::Extension => (false, false),
+    };
+    manager::check_user()?;
+    if let Some(previous) = previous {
+        if explicit_db && fs::canonicalize(&cli.db)? != previous.books {
+            return Err(ServiceError::Configuration(
+                "a different ledger is already installed; uninstall the service before selecting other books",
+            ));
+        }
+        cli.db.clone_from(&previous.books);
+        manager::stop(paths)?;
+    } else {
+        if paths.definition.symlink_metadata().is_ok() {
+            return Err(ServiceError::Configuration(
+                "an unmanaged service definition already exists; inspect it before installing Beankeeper hosting",
+            ));
+        }
+        if !explicit_db {
+            cli.db = paths.data.join("books.db");
+        }
+    }
+    if !cli.db.is_absolute() {
+        cli.db = std::path::absolute(&cli.db)?;
+    }
+    let executable = std::env::current_exe()?;
+    let registration = match mode {
+        InstallMode::Command {
+            no_agents: false, ..
+        } => ClientRegistration::Managed {
+            previous_executable: previous.map_or(executable.as_path(), |config| &config.executable),
+        },
+        InstallMode::Command {
+            no_agents: true, ..
+        }
+        | InstallMode::Extension => ClientRegistration::Skip,
+    };
+    let port = previous.map_or(DEFAULT_PORT, |config| config.port);
+    setup::run_service(
+        cli,
+        &paths.home,
+        (Ipv4Addr::LOCALHOST, port).into(),
+        registration,
+        file_store,
+    )?;
+    let config = Config {
+        executable,
+        books: fs::canonicalize(&cli.db)?,
+        port,
+    };
+    private_json(&paths.config(), &config)?;
+    manager::install(paths, &config)?;
+    manager::start(paths)?;
+    wait_ready(paths)?;
+    println!(
+        "Beankeeper is running in the background. Recovery kit: {}. Keep an offline copy under your own control.",
+        config.books.with_extension("recovery.txt").display()
+    );
+    Ok(())
+}
+
 fn require_installed(config: Option<&Config>) -> Result<(), ServiceError> {
     config.map(|_| ()).ok_or(ServiceError::Configuration(
         "service is not installed; run bk service install",
