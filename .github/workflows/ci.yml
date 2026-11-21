@@ -23,6 +23,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - name: Check the documented installer contract
+        run: python3 -m unittest discover -s scripts/tests -p 'test_install.py'
+
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Compiling the test binaries also rebuilds the HTML/CSS embedded by
       # include_str!, directly from the checked-in UI sources.

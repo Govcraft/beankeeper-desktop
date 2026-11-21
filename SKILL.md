@@ -5,10 +5,88 @@ description: Work with the user's encrypted local Beankeeper Desktop workspace o
 
 # Beankeeper Desktop
 
-Ask the human to run `bk --db /path/to/books.db setup` once in a terminal. The
-command creates encrypted books, stores the passphrase in the OS keychain,
-prepares a private recovery kit and merges the `beankeeper` MCP server into
-Claude Desktop, Claude Code and Codex configs. Restart the agent client afterward.
+## Install and set up Beankeeper on this machine
+
+Run `bk service status --json` in the owner's logged-in user session. If
+`running` is true and the Beankeeper MCP tools respond, go straight to setup in
+conversation. If `installed` is true and `running` is false, run
+`bk service start` and check again. If the command is missing, install a signed
+Desktop release for this operating system and processor using the commands below.
+
+Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
+if `cosign` is missing. Install it through the owner's trusted package channel
+or stop and explain what is missing. Use the latest stable Desktop release
+unless the owner chooses a specific signed release candidate. To select a
+candidate, set `BK_VERSION` to its version without the tag prefix.
+
+### Linux and macOS
+
+Run this from the desktop login, with the regular user account. The installer
+detects Linux versus macOS and x86-64 versus Arm64.
+
+```sh
+(
+    set -eu
+    bk_bin="$HOME/.local/bin"
+    bk_download="$(mktemp -d)"
+    trap 'rm -rf "$bk_download"' EXIT
+    mkdir -p "$bk_bin"
+    curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh -o "$bk_download/install.sh"
+    BK_REQUIRE_SIGNATURES=1 BK_INSTALL="$bk_bin" BK_NO_SERVICE=1 sh "$bk_download/install.sh"
+    "$bk_bin/bk" service install --no-agents
+    "$bk_bin/bk" agents connect --all --json
+    "$bk_bin/bk" service status --json
+)
+```
+
+### Windows
+
+Run this in PowerShell 5.1 or later as the logged-in user. The installer checks
+for x64 Windows before downloading the release.
+
+```powershell
+& {
+    $ErrorActionPreference = 'Stop'
+    $bkDir = Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
+    $bkSetup = Join-Path ([IO.Path]::GetTempPath()) ("bk-install-" + [guid]::NewGuid() + ".ps1")
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1' -OutFile $bkSetup
+        & $bkSetup -RequireSignatures -NoService -InstallDir $bkDir
+        $bk = Join-Path $bkDir 'bk.exe'
+        & $bk service install --no-agents
+        if ($LASTEXITCODE -ne 0) { throw 'Beankeeper service installation failed' }
+        & $bk agents connect --all --json
+        if ($LASTEXITCODE -ne 0) { throw 'Beankeeper agent registration failed' }
+        & $bk service status --json
+        if ($LASTEXITCODE -ne 0) { throw 'Could not read Beankeeper service status' }
+    } finally {
+        Remove-Item -LiteralPath $bkSetup -Force -ErrorAction SilentlyContinue
+    }
+}
+```
+
+Both installers require SHA-256 and Sigstore verification of the release
+archive and checksum list, using the exact Govcraft release workflow and tag
+and GitHub Actions OIDC issuer. If verification fails, stop before executing the
+downloaded binary. Explain what failed, such as a missing signed release,
+unavailable cosign, or a checksum mismatch. If the service or registration
+fails, report the status and the specific step rather than repeating first-run
+provisioning or replacing an existing agent configuration.
+
+Explain where the private recovery kit was created on first installation. Ask
+the owner to open the kit directly and keep an offline copy. Only the owner
+handles the key. Use the installed location or restart the agent client when it
+needs to reload its connection. Confirm with the read-only `company_list` MCP
+tool, then call `setup_status` to begin conversational onboarding. Tell
+the owner that the books are encrypted locally, give the exact books path from
+`bk service status --json`, and explain that `bk agents disconnect` and
+`bk service uninstall` remove the connection and background service while
+preserving the books. The binary can then be removed from its install directory.
+
+If you cannot run commands on the owner's machine, give them the installation
+instructions for their platform or the Beankeeper extension for Claude Desktop
+when available. A browser-only agent needs a supported local connection to use
+the books.
 
 The default preset is read-only. `--preset bookkeeper` adds posting and proposals
 with initial per-company USD spend caps, without approval or administrative
