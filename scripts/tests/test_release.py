@@ -98,7 +98,12 @@ class PackagingTests(unittest.TestCase):
                 metadata = control.extractfile("control").read().decode()
                 self.assertIn(f"Architecture: {release.TARGETS[target]}\n", metadata)
                 self.assertIn("Conflicts: beankeeper-cli, bk, bk-bin\n", metadata)
-                self.assertEqual(control.getnames(), ["control"])
+                self.assertEqual(control.getnames(), ["control", "postinst"])
+                self.assertEqual(control.getmember("postinst").mode, 0o755)
+                hook = control.extractfile("postinst").read().decode()
+                self.assertIn('BK_NO_SERVICE', hook)
+                self.assertIn('runuser -u "$owner"', hook)
+                self.assertIn('/usr/bin/bk service install', hook)
             with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"])) as payload:
                 self.assertEqual(payload.extractfile("usr/bin/bk").read(), self.binary.read_bytes())
                 self.assertEqual(payload.getmember("usr/bin/bk").mode, 0o755)
@@ -113,6 +118,9 @@ class PackagingTests(unittest.TestCase):
             release.installer(directory, "0.1.0", target, self.output)
         arguments = run.call_args.args[0]
         root = Path(arguments[arguments.index("--root") + 1])
+        hooks = Path(arguments[arguments.index("--scripts") + 1])
+        self.assertIn('/usr/local/bin/bk service install', (hooks / 'postinstall').read_text())
+        self.assertIn('BK_NO_SERVICE', (hooks / 'postinstall').read_text())
         self.assertEqual((root / "usr/local/bin/bk").read_bytes(), self.binary.read_bytes())
         self.assertEqual((root / "usr/local/share/doc/beankeeper-desktop/LICENSE.md").read_bytes(),
                          (ROOT / "LICENSE.md").read_bytes())

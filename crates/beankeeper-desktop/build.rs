@@ -11,6 +11,14 @@
 //! packaging/license-embed.json is compacted before it is forwarded.
 
 fn main() {
+    // The unoptimized upstream clap command tree exceeds Windows' 1 MiB
+    // default main stack. Reserve the usual Unix main-stack budget; pages
+    // are committed on demand. This applies only to the Desktop executable.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bin=bk=/STACK:8388608");
+    }
     println!("cargo:rerun-if-env-changed=BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON");
     println!("cargo:rerun-if-env-changed=BEANKEEPER_LICENSE_SERVICE_URL");
 

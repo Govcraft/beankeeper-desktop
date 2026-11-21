@@ -97,7 +97,7 @@ def tar_bytes(files):
 
 def debian(directory, release_version, target, output):
     # Standard Debian ar container, with root-owned control/data tar members.
-    # No maintainer scripts, services, ledger access or post-install execution.
+    # Post-install setup is delegated to the invoking desktop user, never root.
     control = (
         "Package: beankeeper-desktop\n"
         f"Version: {debian_upstream_version(release_version)}\nArchitecture: {TARGETS[target]}\n"
@@ -114,7 +114,8 @@ def debian(directory, release_version, target, output):
         files.append((f"usr/share/doc/beankeeper-desktop/{document}",
                       (directory / document).read_bytes(), 0o644))
     members = [("debian-binary", b"2.0\n"),
-               ("control.tar.gz", tar_bytes([("control", control, 0o644)])),
+               ("control.tar.gz", tar_bytes([("control", control, 0o644),
+                                                ("postinst", (ROOT / "packaging/postinst").read_bytes(), 0o755)])),
                ("data.tar.gz", tar_bytes(files))]
     with output.open("wb") as archive:
         archive.write(b"!<arch>\n")
@@ -139,7 +140,10 @@ def installer(directory, release_version, target, output):
         documents.mkdir(parents=True, exist_ok=True)
         for document in ("README.md", "LICENSE.md"):
             shutil.copy2(directory / document, documents / document)
-        subprocess.run(["pkgbuild", "--root", str(root), "--identifier",
+        hooks = directory.parent / f"pkg-scripts-{target}"
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "packaging/postinstall", hooks / "postinstall")
+        subprocess.run(["pkgbuild", "--root", str(root), "--scripts", str(hooks), "--identifier",
                         "ai.govcraft.beankeeper-desktop", "--version", release_version,
                         "--install-location", "/", str(output / f"{stem}.pkg")], check=True)
     else:

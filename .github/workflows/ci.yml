@@ -41,3 +41,41 @@ jobs:
         with:
           key: msrv-1.91
       - run: cargo check --workspace --all-targets --locked
+
+  service-lifecycle:
+    name: Background service / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: service-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Select native Windows Perl for vendored OpenSSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: cargo build --locked
+      - name: Prepare Linux user bus
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          uid=$(id -u)
+          sudo systemctl start "user@$uid.service"
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      - name: Exercise native lifecycle and crash recovery
+        shell: bash
+        run: |
+          binary=target/debug/bk
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          python scripts/tests/service-lifecycle.py "$binary"

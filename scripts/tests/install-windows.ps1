@@ -12,7 +12,7 @@ Copy-Item "$root/dist/$artifact" $fixture
 $digest = (Get-FileHash "$fixture/$artifact" -Algorithm SHA256).Hash
 $manifest = "$fixture/checksums-sha256.txt"
 "$digest  $artifact" | Set-Content $manifest
-. "$root/install.ps1" -Version $releaseVersion -InstallDir $destination
+. "$root/install.ps1" -Version $releaseVersion -InstallDir $destination -NoService
 $script:bundleStatus = 404
 $script:signatureFails = $false
 $script:verified = @()

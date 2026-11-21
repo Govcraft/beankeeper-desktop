@@ -34,13 +34,18 @@ pub struct BridgeOptions {
     #[arg(long, default_value = "http://127.0.0.1:8750/mcp")]
     pub url: String,
     /// Private file containing the agent bearer token; never put the token in argv.
-    #[arg(long)]
-    pub token_file: PathBuf,
+    #[arg(long, required_unless_present = "service", conflicts_with = "service")]
+    pub token_file: Option<PathBuf>,
+    /// Discover the per-user background service endpoint and its private agent token.
+    #[arg(long, conflicts_with = "url")]
+    pub service: bool,
 }
 
 /// Transport failures without request bodies or secret credentials in diagnostics.
 #[derive(Debug)]
 pub enum BridgeError {
+    /// The managed Desktop service is unavailable.
+    Service(Box<crate::service::ServiceError>),
     /// A local-only URL was not supplied.
     InvalidUrl,
     /// The token is missing, malformed, or readable by other Unix users.
@@ -58,6 +63,7 @@ pub enum BridgeError {
 impl fmt::Display for BridgeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Service(error) => write!(f, "{}: {error}", error.code()),
             Self::InvalidUrl => f.write_str("MCP bridge requires http://127.0.0.1:PORT/mcp, http://localhost:PORT/mcp or http://[::1]:PORT/mcp"),
             Self::InvalidToken => f.write_str("MCP bridge requires a nonempty private agent token file (Unix mode 0600); run `bk setup` to configure it"),
             Self::Io(error) => write!(f, "MCP bridge I/O failed: {error}"),
@@ -92,8 +98,19 @@ impl From<reqwest::Error> for BridgeError {
 /// # Errors
 /// Rejects remote URLs, invalid credentials, HTTP failures, and malformed traffic.
 pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
-    let url = local_url(&options.url)?;
-    let secret = PrivateFile::open(&options.token_file)
+    let (url, token_file) = if options.service {
+        crate::service::connection().map_err(|error| BridgeError::Service(Box::new(error)))?
+    } else {
+        (
+            options.url.clone(),
+            options
+                .token_file
+                .clone()
+                .ok_or(BridgeError::InvalidToken)?,
+        )
+    };
+    let url = local_url(&url)?;
+    let secret = PrivateFile::open(&token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
     let token = secret.expose_secret().trim();
@@ -451,8 +468,9 @@ mod tests {
         fs::write(&token_file, "agent://private-secret")?;
         fs::set_permissions(&token_file, fs::Permissions::from_mode(0o644))?;
         let error = run(&BridgeOptions {
+            service: false,
             url: "http://127.0.0.1:1/mcp".into(),
-            token_file,
+            token_file: Some(token_file),
         })
         .err()
         .ok_or("expected error")?;

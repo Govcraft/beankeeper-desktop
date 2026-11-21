@@ -23,11 +23,11 @@ class ShellInstallerTests(unittest.TestCase):
         self.destination.mkdir()
         self.stem = "bk-0.1.0-x86_64-unknown-linux-gnu"
         binary = self.root / "bk"
-        binary.write_text('#!/bin/sh\nprintf "bk 0.1.0\\n"\n')
+        binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then printf "bk 0.1.0\\n"; else printf "%s\\n" "$*" >> "$BK_TEST_LOG"; fi\n')
         directory = release.stage(binary, "0.1.0", "x86_64-unknown-linux-gnu", self.root / "work")
         release.compress(directory, "0.1.0", "x86_64-unknown-linux-gnu", self.fixtures)
         release.checksums(self.fixtures)
-        for command in ("sh", "awk", "tar", "install", "mktemp", "rm", "gzip", "sha256sum", "shasum", "grep"):
+        for command in ("sh", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
         self.script("uname", 'print("Linux" if "-s" in sys.argv else "x86_64")')
@@ -46,7 +46,7 @@ if "-w" in args: print("200", end="")
 ''')
         self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0",
                     "BK_INSTALL": str(self.destination), "FIXTURES": str(self.fixtures),
-                    "TMPDIR": str(self.root)}
+                    "TMPDIR": str(self.root), "BK_TEST_LOG": str(self.root / "service-actions")}
 
     def script(self, name, code):
         path = self.bin / name
@@ -76,6 +76,28 @@ sys.exit({1 if fail else 0})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("cosign not found", result.stderr)
         self.assertTrue((self.destination / "bk").exists())
+
+    def test_service_is_installed_by_default_and_reinstall_stops_before_upgrading(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actions = self.root / "service-actions"
+        self.assertEqual(actions.read_text().splitlines(), ["service install"])
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(actions.read_text().splitlines(),
+                         ["service install", "service --help", "service stop", "service install"])
+
+    def test_service_install_has_environment_and_flag_opt_outs(self):
+        self.env["BK_NO_SERVICE"] = "1"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "service-actions").exists())
+        (self.destination / "bk").unlink()
+        self.env.pop("BK_NO_SERVICE")
+        result = subprocess.run(["/bin/sh", str(ROOT / "install.sh"), "--no-service"],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "service-actions").exists())
 
     def test_tampered_archive_never_replaces_installed_binary(self):
         (self.destination / "bk").write_text("previous version")

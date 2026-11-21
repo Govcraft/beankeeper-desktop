@@ -124,12 +124,36 @@ pub fn application(
 /// # Errors
 /// Returns bind, runtime, passphrase, ledger or server failures.
 pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), DesktopError> {
-    let address = bind.address();
+    let listener = std::net::TcpListener::bind(bind.address())?;
+    serve_bound(cli, listener, read_only)
+}
+
+/// Host an already-bound loopback socket, preserving port fallback without a bind race.
+///
+/// # Errors
+/// Returns runtime, ledger or server startup failures.
+pub(crate) fn serve_listener(
+    cli: &Cli,
+    listener: std::net::TcpListener,
+) -> Result<(), DesktopError> {
+    validate_bind(listener.local_addr()?, false)?;
+    serve_bound(cli, listener, false)
+}
+
+fn serve_bound(
+    cli: &Cli,
+    listener: std::net::TcpListener,
+    read_only: bool,
+) -> Result<(), DesktopError> {
+    listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let listener = runtime.block_on(tokio::net::TcpListener::bind(address))?;
+    let listener = {
+        let _enter = runtime.enter();
+        tokio::net::TcpListener::from_std(listener)?
+    };
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
@@ -147,7 +171,7 @@ pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), Desk
         "Beankeeper Desktop listening on {} (MCP: /mcp)",
         local_url(bound)
     );
-    if !address.ip().is_loopback() {
+    if !bound.ip().is_loopback() {
         eprintln!(
             "Remote listener enabled: plaintext HTTP, no TLS; Host/Origin remain restricted to localhost, 127.0.0.1 and [::1]"
         );
@@ -155,10 +179,23 @@ pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), Desk
     runtime.block_on(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                shutdown_signal().await;
                 cancellation.cancel();
             })
             .await
     })?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

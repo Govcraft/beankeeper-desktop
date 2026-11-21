@@ -123,6 +123,77 @@ pub fn prepare_configs(
     Ok(ConfigPlan(files))
 }
 
+/// Prepare service-managed client entries, accepting only the previously managed executable.
+/// The bridge discovers the current endpoint from private service state.
+///
+/// # Errors
+/// Rejects unrelated existing entries and malformed client configuration.
+pub fn prepare_service_configs(
+    home: &Path,
+    executable: &Path,
+    previous: &Path,
+) -> Result<ConfigPlan, ConfigError> {
+    fn text(path: &Path) -> Result<&str, ConfigError> {
+        path.to_str()
+            .ok_or_else(|| ConfigError::NonUnicodePath(path.into()))
+    }
+    let command = text(executable)?;
+    let previous = text(previous)?;
+    let mut files = Vec::new();
+    for path in [desktop_path(home), home.join(".claude.json")] {
+        let mut contents = read_optional(&path)?;
+        for (name, args) in service_entries() {
+            let mut document: Value = if contents.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&contents).map_err(|_| ConfigError::Invalid(path.clone()))?
+            };
+            if let Some(entry) = document.get_mut("mcpServers").and_then(|v| v.get_mut(name)) {
+                let expected = json!({"command":previous,"args":args});
+                if *entry != expected {
+                    return Err(ConfigError::Conflict(path));
+                }
+                *entry = json!({"command":command,"args":args});
+            }
+            contents =
+                serde_json::to_string(&document).map_err(|_| ConfigError::Invalid(path.clone()))?;
+            let entry = json!({"command":command,"args":args});
+            // Reuse the strict JSON merge for an arbitrary server name.
+            contents = String::from_utf8(merge_json_named(&path, &contents, &entry, name)?)
+                .map_err(|_| ConfigError::Invalid(path.clone()))?;
+        }
+        files.push((path, contents.into_bytes()));
+    }
+    let path = home.join(".codex/config.toml");
+    let mut contents = read_optional(&path)?;
+    for (name, args) in service_entries() {
+        let mut document: DocumentMut = contents
+            .parse()
+            .map_err(|_| ConfigError::Invalid(path.clone()))?;
+        if let Some(servers) = document
+            .get_mut("mcp_servers")
+            .and_then(Item::as_table_like_mut)
+            && let Some(entry) = servers.get_mut(name)
+        {
+            merge_toml_named(&path, &contents, previous, &args, name)?;
+            entry["command"] = value(command);
+        }
+        contents = merge_toml_named(&path, &document.to_string(), command, &args, name)?;
+    }
+    files.push((path, contents.into_bytes()));
+    Ok(ConfigPlan(files))
+}
+
+fn service_entries() -> [(&'static str, Vec<String>); 2] {
+    [
+        (
+            "beankeeper",
+            vec!["mcp".into(), "bridge".into(), "--service".into()],
+        ),
+        ("beankeeper-service", vec!["service".into(), "mcp".into()]),
+    ]
+}
+
 /// Prepare and persist the three client config files.
 ///
 /// # Errors
@@ -156,6 +227,15 @@ fn read_optional(path: &Path) -> Result<String, ConfigError> {
 }
 
 fn merge_json(path: &Path, contents: &str, entry: &Value) -> Result<Vec<u8>, ConfigError> {
+    merge_json_named(path, contents, entry, "beankeeper")
+}
+
+fn merge_json_named(
+    path: &Path,
+    contents: &str,
+    entry: &Value,
+    name: &str,
+) -> Result<Vec<u8>, ConfigError> {
     let invalid = || ConfigError::Invalid(path.to_path_buf());
     let mut document: Value = if contents.trim().is_empty() {
         json!({})
@@ -168,12 +248,12 @@ fn merge_json(path: &Path, contents: &str, entry: &Value) -> Result<Vec<u8>, Con
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or_else(invalid)?;
-    match servers.get("beankeeper") {
+    match servers.get(name) {
         Some(previous) if previous != entry => {
             return Err(ConfigError::Conflict(path.to_path_buf()));
         }
         _ => {
-            servers.insert("beankeeper".into(), entry.clone());
+            servers.insert(name.into(), entry.clone());
         }
     }
     let mut bytes = serde_json::to_vec_pretty(&document).map_err(|_| invalid())?;
@@ -187,6 +267,16 @@ fn merge_toml(
     command: &str,
     args: &[String],
 ) -> Result<String, ConfigError> {
+    merge_toml_named(path, contents, command, args, "beankeeper")
+}
+
+fn merge_toml_named(
+    path: &Path,
+    contents: &str,
+    command: &str,
+    args: &[String],
+    name: &str,
+) -> Result<String, ConfigError> {
     let invalid = || ConfigError::Invalid(path.to_path_buf());
     let mut document: DocumentMut = contents.parse().map_err(|_| invalid())?;
     if !document.contains_key("mcp_servers") {
@@ -195,7 +285,7 @@ fn merge_toml(
     let servers = document["mcp_servers"]
         .as_table_like_mut()
         .ok_or_else(invalid)?;
-    if let Some(previous) = servers.get("beankeeper") {
+    if let Some(previous) = servers.get(name) {
         let same_command = previous.get("command").and_then(Item::as_str) == Some(command);
         let same_args = previous
             .get("args")
@@ -221,7 +311,7 @@ fn merge_toml(
             values.push(argument.as_str());
         }
         entry["args"] = value(values);
-        servers.insert("beankeeper", Item::Table(entry));
+        servers.insert(name, Item::Table(entry));
     }
     Ok(document.to_string())
 }
@@ -243,6 +333,51 @@ fn private_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn Error>>;
+
+    #[test]
+    fn service_configs_upgrade_only_owned_entries_and_preserve_other_settings() -> TestResult {
+        let home = tempfile::tempdir()?;
+        fs::write(
+            home.path().join(".claude.json"),
+            r#"{"theme":"dark","mcpServers":{"other":{"command":"other"}}}"#,
+        )?;
+        let first =
+            prepare_service_configs(home.path(), Path::new("/old/bk"), Path::new("/old/bk"))?;
+        first.write()?;
+        let paths =
+            prepare_service_configs(home.path(), Path::new("/new/bk"), Path::new("/old/bk"))?
+                .write()?;
+        let document: Value = serde_json::from_str(&fs::read_to_string(&paths[1])?)?;
+        assert_eq!(document["theme"], "dark");
+        assert_eq!(document["mcpServers"]["other"]["command"], "other");
+        assert_eq!(
+            document["mcpServers"]["beankeeper"]["args"],
+            json!(["mcp", "bridge", "--service"])
+        );
+        assert_eq!(
+            document["mcpServers"]["beankeeper-service"]["args"],
+            json!(["service", "mcp"])
+        );
+        assert_eq!(document["mcpServers"]["beankeeper"]["command"], "/new/bk");
+        prepare_service_configs(home.path(), Path::new("/new/bk"), Path::new("/new/bk"))?
+            .write()?;
+        let before = fs::read_to_string(&paths[1])?;
+        assert!(
+            prepare_service_configs(
+                home.path(),
+                Path::new("/other/bk"),
+                Path::new("/unowned/bk")
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&paths[1])?, before);
+        let config: DocumentMut = fs::read_to_string(&paths[2])?.parse()?;
+        assert_eq!(
+            config["mcp_servers"]["beankeeper-service"]["command"].as_str(),
+            Some("/new/bk")
+        );
+        Ok(())
+    }
 
     #[test]
     fn merges_three_clients_preserves_settings_and_keeps_tokens_out_of_configs() -> TestResult {

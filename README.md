@@ -53,6 +53,26 @@ Exact archive names are in [docs/RELEASE.md](docs/RELEASE.md). `install.sh` and
 `install.ps1` already verify checksums and, when `cosign` is on `PATH`, the
 Sigstore bundles.
 
+## Run quietly in the background
+
+Installers now run `bk service install` for the logged-in owner. Beankeeper keeps
+its encrypted books locally, starts at login and recovers after a crash. Your
+agent can use it without opening a browser.
+
+```sh
+bk service install
+bk service status --json
+bk service stop
+bk service start
+bk service uninstall  # preserves books and recovery material
+```
+
+Installation configures ledger MCP plus local lifecycle tools, including while
+the server is stopped. The bridge discovers the actual loopback endpoint, with
+a fallback when port 8750 is occupied. Recovery material stays in a private file
+under the owner's control. See [background hosting](docs/service.md) for OS paths,
+credential storage, Linux lingering, upgrades and installer opt-out flags.
+
 ## Build and run
 
 Requires Rust 1.91 or newer and the C build tools needed by upstream's bundled

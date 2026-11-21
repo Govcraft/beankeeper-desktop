@@ -1,5 +1,9 @@
 # Desktop setup command reference
 
+For quiet login startup, automatic crash recovery and lifecycle MCP tools, use
+[`bk service install`](service.md). The commands below remain available for
+manual onboarding and foreground hosting.
+
 Run `bk setup` to create an encrypted ledger, save its passphrase in the OS
 keychain, prepare a private recovery kit, configure three MCP clients, start the
 local server and open the UI. No account or model API key is required.
@@ -29,7 +33,7 @@ An explicit upstream `--passphrase-file`, `--passphrase-fd`, or
 | `--force` | Resume an existing encrypted ledger. Preserve its data, root and valid setup token. |
 | `--recovery-kit PATH` | Override the default private recovery kit path. |
 | `--config-home PATH` | Use this home directory when locating all three client configs. |
-| `--secret-store-file PATH` | Explicit Unix headless alternative to native keychain storage. |
+| `--secret-store-file PATH` | Explicit private-file headless alternative to native keychain storage. |
 | `--bind ADDRESS` | Canonical loopback address with a nonzero port; default `127.0.0.1:8750`. |
 | `--no-start` | Skip server startup. |
 | `--no-open` | Skip browser launch. Use with `--no-start` in CI. |
@@ -67,7 +71,7 @@ macOS Keychain and Windows Credential Manager require a real logged-in platform
 session for end-to-end testing. Windows files use a protected native DACL granting
 only the current process user and SYSTEM; the Linux CI run cannot exercise it.
 
-For an explicit headless Unix setup:
+For an explicit headless setup (Unix paths shown):
 
 ```sh
 install -d -m 700 /private/beankeeper-secrets
