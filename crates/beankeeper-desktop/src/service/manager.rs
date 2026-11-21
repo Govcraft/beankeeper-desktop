@@ -272,7 +272,8 @@ pub(super) fn launch_agent(paths: &Paths, config: &Config) -> Result<String, Ser
     ))
 }
 fn windows_runner(paths: &Paths, config: &Config) -> Result<String, ServiceError> {
-    let mut script = "$ErrorActionPreference = 'Stop'\n".to_owned();
+    // Windows PowerShell 5.1 needs a BOM for non-ASCII owner paths.
+    let mut script = "\u{feff}$ErrorActionPreference = 'Stop'\n".to_owned();
     for (key, path) in environment(paths) {
         script.push_str(&format!("$env:{key} = {}\n", ps(text(path)?)?));
     }
@@ -290,7 +291,7 @@ fn windows_task(paths: &Paths) -> Result<String, ServiceError> {
     let arguments = ps(&format!(
         "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{runner}\""
     ))?;
-    Ok(format!(
+    let script = format!(
         r#"param([ValidateSet('install','start','stop','uninstall','running')][string]$Operation)
 $ErrorActionPreference = 'Stop'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -311,13 +312,39 @@ switch ($Operation) {{
     'running' {{ if (-not $task -or $task.State -ne 'Running') {{ exit 1 }} }}
 }}
 "#
-    ))
+    );
+    Ok(format!("\u{feff}{script}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+    #[test]
+    fn windows_scripts_preserve_unicode_owner_paths_with_utf8_bom() -> TestResult {
+        let paths = Paths {
+            home: "/café/owner's home".into(),
+            data: "/café/data".into(),
+            state: "/café/state".into(),
+            logs: "/café/logs".into(),
+            definition: "/café/task.ps1".into(),
+        };
+        let config = Config {
+            executable: "/café/bk.exe".into(),
+            books: "/café/books.db".into(),
+            port: 8750,
+        };
+        for script in [windows_runner(&paths, &config)?, windows_task(&paths)?] {
+            assert!(script.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
+            assert!(script.contains("café"));
+        }
+        let runner = windows_runner(&paths, &config)?;
+        assert!(runner.contains("Start-Process"));
+        assert!(runner.contains("-RedirectStandardError"));
+        assert!(!runner.contains("*>>"));
+        Ok(())
+    }
+
     #[test]
     fn manager_definitions_escape_paths_and_enforce_user_restart_policy() -> TestResult {
         let paths = Paths {
