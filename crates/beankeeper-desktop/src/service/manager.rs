@@ -240,7 +240,17 @@ fn xml(value: &str) -> Result<String, ServiceError> {
 }
 fn ps(value: &str) -> Result<String, ServiceError> {
     clean(value)?;
-    Ok(format!("'{}'", value.replace('\'', "''")))
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for ch in value.chars() {
+        // PowerShell treats typographic single quotes as delimiters too.
+        if matches!(ch, '\'' | '\u{2018}'..='\u{201b}') {
+            literal.push(ch);
+        }
+        literal.push(ch);
+    }
+    literal.push('\'');
+    Ok(literal)
 }
 fn environment(paths: &Paths) -> Vec<(&'static str, &Path)> {
     vec![
@@ -437,6 +447,10 @@ mod tests {
             assert!(script.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
             assert!(script.contains("café"));
         }
+        assert_eq!(
+            ps("owner's ‘file’ ‚folder‛")?,
+            "'owner''s ‘‘file’’ ‚‚folder‛‛'"
+        );
         let runner = windows_runner(&paths, &config)?;
         assert!(runner.contains("Start-Process"));
         assert!(runner.contains("-RedirectStandardError"));

@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
     if os.environ.get("CI") != "true":
         parser.error("requires CI=true and a disposable runner")
-    with tempfile.TemporaryDirectory(prefix="bk service café 's-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="bk service café 's owner’s-") as temporary:
         root = Path(temporary)
         env = dict(os.environ)
         env.update(BEANKEEPER_SERVICE_DATA_DIR=str(root / "data"),
