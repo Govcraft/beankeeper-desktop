@@ -129,6 +129,11 @@ loopback port and using the private agent-token file. If unavailable, use
 `service_status` to diagnose and `service_start` when authorized. Reconnect the
 ledger MCP client after restarting hosting. CLI equivalents are
 `bk service install | uninstall | start | stop | status --json`.
+On Linux, Beankeeper discovers the owner's session bus for lifecycle commands.
+If you get `SESSION_ENV_UNAVAILABLE`, ask the owner to retry from an active login
+session or pass its `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` to the
+launcher. `bk agents connect` and `bk agents doctor` can report this code.
+Managed agent configs need no hand-edited session variables.
 Uninstall removes hosting while preserving all books and credentials.
 See [background hosting](docs/service.md) for storage and recovery details.
 
