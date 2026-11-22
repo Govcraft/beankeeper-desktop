@@ -748,11 +748,11 @@ fn desktop_reserves_replays_approves_and_reverses_opening_balances() -> TestResu
     let status = || setup_result(server, scoped, LEDGER_SETUP_STATUS, json!({}));
     assert_eq!(status()?["transactions"], 0);
 
-    let approved = setup_result(server, approver, "txn_approve", approve)?;
-    assert_eq!(approved["status"], "approved");
-    assert!(approved["resolved_by_uri"].is_string());
-    assert_ne!(approved["resolved_by_uri"], pending[0]["proposer_uri"]);
-    let transaction = approved["transaction_id"]
+    let posted = setup_result(server, approver, "txn_approve", approve)?;
+    assert_eq!(posted["status"], "approved");
+    assert!(posted["resolved_by_uri"].is_string());
+    assert_ne!(posted["resolved_by_uri"], pending[0]["proposer_uri"]);
+    let transaction = posted["transaction_id"]
         .as_i64()
         .ok_or("missing approved transaction ID")?;
     assert_eq!(status()?["transactions"], 1);
@@ -846,7 +846,13 @@ fn setup_result(server: &Server, token: &str, name: &str, arguments: Value) -> T
     let mut response = setup_call(server, token, name, arguments)?;
     let result = &mut response["result"];
     assert_eq!(result["isError"], false, "{name} failed: {result}");
-    Ok(result["structuredContent"].take())
+    if let Some(content) = result.get_mut("structuredContent") {
+        return Ok(content.take());
+    }
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or("missing tool data")?;
+    Ok(serde_json::from_str(text)?)
 }
 
 fn verify_scoped_stdio(server: &Server, scoped: &str) -> TestResult {
