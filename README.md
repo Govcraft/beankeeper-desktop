@@ -81,10 +81,11 @@ bk service uninstall  # preserves books and recovery material
 Installation configures ledger MCP plus local lifecycle tools, including while
 the server is stopped. The bridge discovers the actual loopback endpoint, with
 a fallback when port 8750 is occupied. On Linux, lifecycle commands can find the
-owner's session bus from tmux, SSH or IDEs that did not inherit the login
-environment. Recovery material stays in a private file
-under the owner's control. See [background hosting](docs/service.md) for OS paths,
-credential storage, Linux lingering, upgrades and installer opt-out flags.
+owner's session bus when Claude Desktop, an IDE, tmux or SSH launches `bk`
+without the login environment. Status verifies the live service directly.
+Recovery material stays in a private file under the owner's control.
+See [background hosting](docs/service.md) for OS paths, credential storage,
+Linux lingering, upgrades and installer opt-out flags.
 
 ## Build and run
 
