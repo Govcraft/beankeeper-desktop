@@ -102,7 +102,10 @@ reverse it with `loginctl disable-linger "$USER"`. A systemd user session and bu
 are required; minimal containers without them can use foreground `bk serve`.
 When the login environment is missing, lifecycle commands find the bus in the
 owner's runtime directory (normally `/run/user/<UID>/bus`) after checking that
-the directory and Unix socket both belong to that user. If discovery fails,
+the directory and Unix socket both belong to that user. The commands preserve
+explicit session settings. `bk service status --json` verifies the live local
+endpoint even when the launcher supplies only `HOME`, `LOGNAME`, `USER`,
+`SHELL` and `PATH`. If lifecycle discovery fails,
 `SESSION_ENV_UNAVAILABLE` asks the owner to retry from an active login session
 or pass its `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` to the launcher.
 Managed agent registrations need no per-client session variables.

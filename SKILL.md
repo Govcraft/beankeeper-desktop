@@ -130,7 +130,9 @@ loopback port and using the private agent-token file. If unavailable, use
 `service_status` to diagnose and `service_start` when authorized. Reconnect the
 ledger MCP client after restarting hosting. CLI equivalents are
 `bk service install | uninstall | start | stop | status --json`.
-On Linux, Beankeeper discovers the owner's session bus for lifecycle commands.
+On Linux, Beankeeper discovers the owner's session bus for lifecycle commands
+when Claude Desktop or another launcher omits it. `service_status` checks the
+live local endpoint directly.
 If you get `SESSION_ENV_UNAVAILABLE`, ask the owner to retry from an active login
 session or pass its `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` to the
 launcher. `bk agents connect` and `bk agents doctor` can report this code.

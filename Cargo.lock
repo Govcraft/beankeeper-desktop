@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "beankeeper-desktop"
-version = "0.1.0-rc.14"
+version = "0.1.0-rc.15"
 dependencies = [
  "assert_cmd",
  "axum",

@@ -27,7 +27,7 @@ use crate::{
 };
 
 pub(crate) use extension::connection as extension_connection;
-use session::Session;
+use session::UserSessionEnv;
 
 const DEFAULT_PORT: u16 = 8750;
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -433,7 +433,7 @@ pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
     if let Some(endpoint) = endpoint_at(&paths, &config.books)? {
         Ok(endpoint)
     } else {
-        Session::discover()?;
+        UserSessionEnv::discover()?;
         Err(ServiceError::NotReady)
     }
 }
@@ -456,7 +456,7 @@ fn authenticated_endpoint(
 /// Check session availability for registration when a managed service exists.
 /// Healthy endpoints work without a session bus in the client process.
 pub(crate) fn registration_session() -> Result<(), ServiceError> {
-    let Err(error) = Session::discover() else {
+    let Err(error) = UserSessionEnv::discover() else {
         return Ok(());
     };
     let paths = Paths::discover()?;
@@ -535,13 +535,13 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
         }
         ServiceCommand::Start => {
             let config = require_installed(previous.as_ref())?;
-            manager::start(&paths, &Session::discover()?)?;
+            manager::start(&paths, &UserSessionEnv::discover()?)?;
             wait_ready(&paths, &config.books)?;
             println!("Beankeeper started.");
         }
         ServiceCommand::Stop => {
             if previous.is_some() {
-                manager::stop(&paths, &Session::discover()?)?;
+                manager::stop(&paths, &UserSessionEnv::discover()?)?;
                 // A native manager can terminate the host before it removes
                 // its descriptor, notably when Windows stops the task.
                 remove_if_exists(&paths.runtime())?;
@@ -550,7 +550,7 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
         }
         ServiceCommand::Uninstall => {
             if previous.is_some() {
-                manager::uninstall(&paths, &Session::discover()?)?;
+                manager::uninstall(&paths, &UserSessionEnv::discover()?)?;
                 remove_if_exists(&paths.config())?;
                 remove_if_exists(&paths.runtime())?;
             }
@@ -587,7 +587,7 @@ fn install(
         InstallMode::Extension => (false, ServiceSecretStorage::NativeRequired),
     };
     manager::check_user()?;
-    let session = Session::discover()?;
+    let session = UserSessionEnv::discover()?;
     if let Some(previous) = previous {
         if explicit_db && fs::canonicalize(&cli.db)? != previous.books {
             return Err(ServiceError::Configuration(

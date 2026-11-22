@@ -6,16 +6,26 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Config, Paths, ServiceError, private_write, remove_if_exists, session::Session};
+use super::{
+    Config, Paths, ServiceError, private_write, remove_if_exists, session::UserSessionEnv,
+};
 use crate::private_file::PrivateFile;
 
 const UNIT: &str = "beankeeper-desktop.service";
 const LABEL: &str = "ai.govcraft.beankeeper-desktop";
 const WINDOWS_STOP_SIGNAL: &str = "service-stop.request";
 
+#[derive(Clone, Copy)]
+enum Program<'a> {
+    Systemctl(&'a UserSessionEnv),
+    Launchctl,
+    PowerShell,
+    Id,
+}
+
 pub(super) fn check_user() -> Result<(), ServiceError> {
     #[cfg(unix)]
-    if output("id", &["-u"])? == "0" {
+    if output(Program::Id, &["-u"])? == "0" {
         return Err(ServiceError::Configuration(
             "install the service as the desktop user, without sudo; package hooks must select the logged-in owner",
         ));
@@ -50,7 +60,7 @@ pub(super) fn install(paths: &Paths, config: &Config) -> Result<(), ServiceError
     Ok(())
 }
 
-pub(super) fn start(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
+pub(super) fn start(paths: &Paths, session: &UserSessionEnv) -> Result<(), ServiceError> {
     if cfg!(target_os = "linux") {
         systemctl(session, &["unmask", UNIT])?;
         systemctl(session, &["link", "--force", text(&linux_artifact(paths))?])?;
@@ -60,12 +70,18 @@ pub(super) fn start(paths: &Paths, session: &Session) -> Result<(), ServiceError
         systemctl(session, &["start", UNIT])
     } else if cfg!(target_os = "macos") {
         let domain = domain()?;
-        checked("launchctl", &["enable", &format!("{domain}/{LABEL}")])?;
-        if success("launchctl", &["print", &format!("{domain}/{LABEL}")])? {
-            checked("launchctl", &["kickstart", &format!("{domain}/{LABEL}")])
+        checked(
+            Program::Launchctl,
+            &["enable", &format!("{domain}/{LABEL}")],
+        )?;
+        if success(Program::Launchctl, &["print", &format!("{domain}/{LABEL}")])? {
+            checked(
+                Program::Launchctl,
+                &["kickstart", &format!("{domain}/{LABEL}")],
+            )
         } else {
             checked(
-                "launchctl",
+                Program::Launchctl,
                 &["bootstrap", &domain, text(&paths.definition)?],
             )
         }
@@ -75,12 +91,12 @@ pub(super) fn start(paths: &Paths, session: &Session) -> Result<(), ServiceError
     }
 }
 
-pub(super) fn stop(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
+pub(super) fn stop(paths: &Paths, session: &UserSessionEnv) -> Result<(), ServiceError> {
     if cfg!(target_os = "linux") {
         // Inspect the policy before stopping. Mask replaces the owned linked unit,
         // preventing both crash restarts and activation on the next login.
-        let _policy = command_output(
-            systemctl_command(session),
+        let _policy = output(
+            Program::Systemctl(session),
             &["show", UNIT, "--property=Restart", "--value"],
         )?;
         let masked = std::fs::read_link(&paths.definition)
@@ -92,9 +108,9 @@ pub(super) fn stop(paths: &Paths, session: &Session) -> Result<(), ServiceError>
     } else if cfg!(target_os = "macos") {
         let domain = domain()?;
         let target = format!("{domain}/{LABEL}");
-        checked("launchctl", &["disable", &target])?;
-        if success("launchctl", &["print", &target])? {
-            checked("launchctl", &["bootout", &target])?;
+        checked(Program::Launchctl, &["disable", &target])?;
+        if success(Program::Launchctl, &["print", &target])? {
+            checked(Program::Launchctl, &["bootout", &target])?;
         }
         Ok(())
     } else {
@@ -103,7 +119,7 @@ pub(super) fn stop(paths: &Paths, session: &Session) -> Result<(), ServiceError>
     }
 }
 
-pub(super) fn uninstall(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
+pub(super) fn uninstall(paths: &Paths, session: &UserSessionEnv) -> Result<(), ServiceError> {
     stop(paths, session)?;
     if cfg!(target_os = "linux") {
         systemctl(session, &["unmask", UNIT])?;
@@ -120,27 +136,31 @@ pub(super) fn uninstall(paths: &Paths, session: &Session) -> Result<(), ServiceE
     Ok(())
 }
 
-fn systemctl_command(session: &Session) -> Command {
-    let mut command = manager_command("systemctl");
-    session.apply(&mut command);
-    command.arg("--user");
-    command
-}
-fn systemctl(session: &Session, args: &[&str]) -> Result<(), ServiceError> {
-    check_command(systemctl_command(session), args)
+fn systemctl(session: &UserSessionEnv, args: &[&str]) -> Result<(), ServiceError> {
+    checked(Program::Systemctl(session), args)
 }
 fn linux_artifact(paths: &Paths) -> std::path::PathBuf {
     paths.state.join("systemd").join(UNIT)
 }
 fn domain() -> Result<String, ServiceError> {
-    Ok(format!("gui/{}", output("id", &["-u"])?))
+    Ok(format!("gui/{}", output(Program::Id, &["-u"])?))
 }
 fn text(path: &Path) -> Result<&str, ServiceError> {
     path.to_str()
         .ok_or(ServiceError::Configuration("service paths must be Unicode"))
 }
-fn manager_command(program: &str) -> Command {
-    let mut command = Command::new(program);
+fn manager_command(program: Program<'_>) -> Command {
+    let mut command = match program {
+        Program::Systemctl(session) => {
+            let mut command = Command::new("systemctl");
+            session.apply(&mut command);
+            command.arg("--user");
+            command
+        }
+        Program::Launchctl => Command::new("launchctl"),
+        Program::PowerShell => Command::new("powershell.exe"),
+        Program::Id => Command::new("id"),
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -152,11 +172,8 @@ fn manager_command(program: &str) -> Command {
     command
 }
 
-fn checked(program: &str, args: &[&str]) -> Result<(), ServiceError> {
-    check_command(manager_command(program), args)
-}
-fn check_command(command: Command, args: &[&str]) -> Result<(), ServiceError> {
-    if command_succeeded(command, args)? {
+fn checked(program: Program<'_>, args: &[&str]) -> Result<(), ServiceError> {
+    if success(program, args)? {
         Ok(())
     } else {
         Err(ServiceError::Manager(
@@ -164,23 +181,16 @@ fn check_command(command: Command, args: &[&str]) -> Result<(), ServiceError> {
         ))
     }
 }
-fn success(program: &str, args: &[&str]) -> Result<bool, ServiceError> {
-    command_succeeded(manager_command(program), args)
-}
-fn command_succeeded(mut command: Command, args: &[&str]) -> Result<bool, ServiceError> {
-    Ok(command
+fn success(program: Program<'_>, args: &[&str]) -> Result<bool, ServiceError> {
+    Ok(manager_command(program)
         .args(args)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?
         .success())
 }
-fn output(program: &str, args: &[&str]) -> Result<String, ServiceError> {
-    command_output(manager_command(program), args)
-}
-fn command_output(mut command: Command, args: &[&str]) -> Result<String, ServiceError> {
-    let output = command.args(args).output()?;
+fn output(program: Program<'_>, args: &[&str]) -> Result<String, ServiceError> {
+    let output = manager_command(program).args(args).output()?;
     if !output.status.success() {
         return Err(ServiceError::Manager(
             "cannot query the OS service manager; ensure your user session is available",
@@ -199,7 +209,7 @@ fn powershell(paths: &Paths, operation: &str) -> Result<(), ServiceError> {
 }
 fn powershell_success(paths: &Paths, operation: &str) -> Result<bool, ServiceError> {
     success(
-        "powershell.exe",
+        Program::PowerShell,
         &[
             "-NoProfile",
             "-NonInteractive",

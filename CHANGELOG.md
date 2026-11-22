@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.15] - 2026-11-22
+
+### Fixed
+
+- Use the same validated session environment for every Linux systemd user
+  command, preserving the launcher's explicit settings. Cover service status
+  from Claude Desktop's minimal environment in native Linux CI.
+
 ## [0.1.0-rc.14] - 2026-11-22
 
 ### Fixed
