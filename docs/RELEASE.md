@@ -66,9 +66,12 @@ are produced. Sigstore bundles do not go into the checksum manifest themselves.
 
 ## Dry runs without credentials
 
-PRs touching packaging run the release build matrix automatically. All paid
-signing and publication are disabled for PRs and manual runs. Alternatively,
-after this workflow is on main, run from GitHub Actions, or:
+Pull requests package the targets their changes affect: CI's change planner
+calls the shared `packaging.yml` workflow with, for example, only Windows for an
+`install.ps1` change or every target for a `scripts/release.py` change (see
+[CI.md](CI.md)). The release workflow also qualifies `main` every night by
+packaging all targets. All paid signing and publication are disabled for PRs,
+nightly and manual runs. To dry-run every target on demand:
 
 ```sh
 gh workflow run release.yml --ref main

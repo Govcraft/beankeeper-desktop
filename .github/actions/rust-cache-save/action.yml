@@ -1,0 +1,27 @@
+name: Save a warmed Rust dependency cache
+description: Trim workspace artifacts and save a family's cache. Main-only maintenance use.
+inputs:
+  family:
+    description: Cache family from scripts/ci/catalog.py
+    required: true
+  key:
+    description: Exact identity reported by rust-setup
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: trim
+      shell: bash
+      env:
+        FAMILY: ${{ inputs.family }}
+      run: python scripts/ci/cache.py trim --family "$FAMILY"
+    - uses: actions/cache/save@v5
+      if: steps.trim.outputs.save == 'true'
+      with:
+        # Keep identical to rust-setup: the path list is part of the cache version.
+        path: |
+          target
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ inputs.key }}

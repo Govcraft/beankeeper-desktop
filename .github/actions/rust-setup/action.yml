@@ -1,0 +1,56 @@
+name: Set up a cached Rust toolchain
+description: >-
+  Install a cache family's pinned compiler and restore the dependency cache that
+  main last warmed for it. Never saves; cache-maintenance.yml owns every write.
+inputs:
+  family:
+    description: Cache family from scripts/ci/catalog.py
+    required: true
+outputs:
+  key:
+    description: Exact cache identity for this family
+    value: ${{ steps.identity.outputs.key }}
+  cache-hit:
+    description: Whether the exact identity was restored
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - id: identity
+      shell: bash
+      env:
+        FAMILY: ${{ inputs.family }}
+      run: python scripts/ci/cache.py setup --family "$FAMILY"
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.identity.outputs.toolchain }}
+        targets: ${{ steps.identity.outputs.targets }}
+        components: ${{ steps.identity.outputs.components }}
+    - name: Select the family compiler over rust-toolchain.toml
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ steps.identity.outputs.toolchain }}
+      run: echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+    - name: Select native Windows Perl for vendored OpenSSL
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Git Bash's perl shadows Strawberry and lacks native build modules.
+        $perl = 'C:/Strawberry/perl/bin/perl.exe'
+        & $perl -MLocale::Maketext::Simple -MIPC::Cmd -e 'print "$^X\n"'
+        if ($LASTEXITCODE -ne 0) { throw 'Native Perl prerequisites are missing' }
+        "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - id: restore
+      uses: actions/cache/restore@v5
+      with:
+        # Keep identical to rust-cache-save: the path list is part of the cache version.
+        path: |
+          target
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore-prefix }}

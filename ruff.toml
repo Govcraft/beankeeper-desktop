@@ -1,0 +1,7 @@
+# Lint and format settings for the CI helpers (scripts/ci), shared by local
+# runs and the CI tooling check so both apply exactly the same rules.
+target-version = "py312"
+line-length = 100
+
+[lint]
+extend-select = ["B", "FURB", "I", "RUF", "UP"]

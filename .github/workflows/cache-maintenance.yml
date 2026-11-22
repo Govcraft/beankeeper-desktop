@@ -1,0 +1,114 @@
+name: Dependency cache maintenance
+
+# The only writer of shared compiler caches. Validation jobs restore them and
+# never save, so pull requests cannot evict main's caches. Caches are keyed by
+# manifests, the lock file, the compiler and the warm recipe (scripts/ci/cache.py),
+# so this warms a family only after one of those changes, then prunes the entry
+# it replaced.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dependency-caches
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match scripts/ci/cache.py CARGO_ENV and every consumer workflow.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  plan:
+    name: Find missing main caches
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      missing: ${{ steps.plan.outputs.missing }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Select only absent cache identities
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/cache.py plan
+
+  warm:
+    name: Warm / ${{ matrix.family }}
+    needs: plan
+    if: needs.plan.outputs.missing == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust-setup
+        id: rust
+        with:
+          family: ${{ matrix.family }}
+      - name: Verify the planned cache identity
+        env:
+          PLANNED: ${{ matrix.key }}
+          ACTUAL: ${{ steps.rust.outputs.key }}
+        run: test "$PLANNED" = "$ACTUAL"
+      - name: Compile the validation dependency graphs
+        if: matrix.kind != 'release'
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: python scripts/ci/cache.py warm --family "$FAMILY"
+      - name: Compile the release dependency graph
+        if: matrix.kind == 'release'
+        uses: ./.github/actions/release-build
+        with:
+          target: ${{ matrix.target }}
+          license-public-keys-json: ${{ vars.BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON }}
+          license-service-url: ${{ vars.BEANKEEPER_LICENSE_SERVICE_URL }}
+      - uses: ./.github/actions/rust-cache-save
+        with:
+          family: ${{ matrix.family }}
+          key: ${{ steps.rust.outputs.key }}
+
+  prune:
+    name: Prune superseded caches
+    needs: [plan, warm]
+    # Safe after partial warm failures: a family rotates only once its new key exists.
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Remove main caches whose replacement exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/cache.py prune
