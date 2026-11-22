@@ -16,7 +16,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::{
-    bridge::{self, BridgeError},
+    bridge,
     output::{Envelope, Metadata},
     service,
 };
@@ -212,28 +212,16 @@ impl ServiceCheck {
     }
 
     fn probe() -> Self {
-        let status = match service::status() {
-            Ok(status) => status,
+        let endpoint = match service::connection() {
+            Ok(endpoint) => endpoint,
             Err(error) => return Self::unavailable(error.code(), error.to_string()),
         };
-        if !status.installed {
-            return Self::unavailable("SERVICE_NOT_INSTALLED", status.message);
+        if let Err(error) = bridge::probe_service(&endpoint, bridge::Probe::ReadOnlyTool) {
+            return Self::unavailable(error.diagnostic_code(), error.to_string());
         }
-        let Some(endpoint) = status.mcp_endpoint else {
-            return Self::unavailable("SERVICE_NOT_READY", status.message);
-        };
-        let token_file = status.books.with_extension("agent-token");
-        if let Err(error) = bridge::probe_service_tool(&endpoint, &token_file) {
-            let code = match error {
-                BridgeError::InvalidToken => "AGENT_CREDENTIAL_INVALID",
-                BridgeError::Rejected(_) => "AGENT_MCP_REJECTED",
-                BridgeError::ToolFailed => "AGENT_TOOL_FAILED",
-                BridgeError::Http(_) => "AGENT_MCP_UNREACHABLE",
-                _ => "AGENT_MCP_PROTOCOL",
-            };
-            return Self::unavailable(code, error.to_string());
+        Self::Ready {
+            endpoint: endpoint.url().to_string(),
         }
-        Self::Ready { endpoint }
     }
 }
 
@@ -346,7 +334,13 @@ fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, Agen
         .filter(|agent| selected.is_none_or(|selected| selected == *agent))
         .map(|agent| check_agent(agent, &locations, binary, operation, selected.is_some()))
         .collect();
-    let service = matches!(operation, Operation::Doctor).then(ServiceCheck::probe);
+    let service = match operation {
+        Operation::Doctor => Some(ServiceCheck::probe()),
+        Operation::Connect => service::registration_session()
+            .err()
+            .map(|error| ServiceCheck::unavailable(error.code(), error.to_string())),
+        Operation::Detect | Operation::Disconnect => None,
+    };
     Ok(Report { agents, service })
 }
 

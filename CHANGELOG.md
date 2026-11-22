@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.13] - 2026-11-22
+
+### Fixed
+
+- Discover the Linux owner's session bus for lifecycle commands. Let managed
+  bridges use a verified running endpoint without the login environment and
+  report distinct session, endpoint and authentication failures.
+
 ## [0.1.0-rc.11] - 2026-11-21
 
 ### Added

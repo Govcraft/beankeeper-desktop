@@ -67,12 +67,14 @@ through server startup. A private runtime descriptor publishes the actual port;
 ledger MCP client after service replacement. Explicit bridge `--url` and
 `--token-file` options still work for manual servers.
 
-Status authenticates the expected ledger token, verifies Desktop's health
-identity and live PID, and reads the running version from the responding server.
-It does not decrypt books or fetch a passphrase. Stale runtime files, unrelated
-listeners and stopped managers do not count as a running service. A healthy
-endpoint that rejects an expired or revoked agent token reports not ready;
-the owner must renew that credential using upstream agent commands.
+Status verifies Desktop's health identity and PID before using the private agent
+credential to open a short MCP session. It reads the version from the responding
+server. The running bridge and status check work from the published endpoint
+even when the calling agent has no connection to the OS service manager.
+`bk service status --json` includes an `error_code` if the published endpoint
+cannot be reached, its process identity differs, or MCP authentication fails.
+If an agent credential has expired or been revoked, ask the owner to renew it
+using the upstream agent commands.
 
 ## Platform behavior and files
 
@@ -98,6 +100,12 @@ ends when the last login session closes. An owner who explicitly wants hosting
 after logout can enable lingering with `loginctl enable-linger "$USER"` and
 reverse it with `loginctl disable-linger "$USER"`. A systemd user session and bus
 are required; minimal containers without them can use foreground `bk serve`.
+When the login environment is missing, lifecycle commands find the bus in the
+owner's runtime directory (normally `/run/user/<UID>/bus`) after checking that
+the directory and Unix socket both belong to that user. If discovery fails,
+`SESSION_ENV_UNAVAILABLE` asks the owner to retry from an active login session
+or pass its `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` to the launcher.
+Managed agent registrations need no per-client session variables.
 
 macOS uses `RunAtLoad` and a LaunchAgent that restarts after unsuccessful exit.
 Stop disables the label and boots it out of the user's GUI domain. Start enables
