@@ -12,6 +12,7 @@ use beankeeper_cli::{
     },
     db::{
         self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow,
+        audit::{AuditPageLimit, AuditPageOffset},
         companies::{Company, CompanySlug},
         ids::TransactionId,
         transactions::TransactionValueFilter,
@@ -870,17 +871,32 @@ fn audit(
     html: &mut Markup,
 ) -> Result<(), ViewError> {
     let start = query.offset.position();
-    let params = ListAuditParams {
-        actor: None,
-        agent_uri: None,
-        company_slug: Some(company),
-        entity: None,
-        action: None,
-        limit: SCAN_LIMIT,
-        offset: start,
-    };
-    let total = db::count_audit(db.read(), &params)?;
-    let rows = db::list_audit(db.read(), &params)?;
+    let (total, rows) = db.read_snapshot(|reader| {
+        let mut params = ListAuditParams {
+            actor: None,
+            agent_uri: None,
+            company_slug: Some(company),
+            entity: None,
+            action: None,
+            limit: AuditPageLimit::default(),
+            offset: AuditPageOffset::default(),
+        };
+        let total = db::count_audit(reader, &params)?;
+        let end = (start + SCAN_LIMIT).min(total);
+        let mut cursor = start;
+        let mut rows = Vec::new();
+        // Each upstream query has its own page limit. The browser scans up to
+        // SCAN_LIMIT rows in one snapshot before offering a continuation.
+        while cursor < end {
+            params.limit = (end - cursor)
+                .min(i64::from(AuditPageLimit::MAX))
+                .try_into()?;
+            params.offset = cursor.try_into()?;
+            rows.extend(db::list_audit(reader, &params)?);
+            cursor += i64::from(params.limit.get());
+        }
+        Ok((total, rows))
+    })?;
     let count = i64::try_from(rows.len())
         .map_err(|_| ViewError::Invalid("The audit trail is too large to paginate."))?;
     let cursor = start + count;
@@ -1420,6 +1436,7 @@ mod tests {
         };
         let newest = render_query(&db, &detail_path, &audit_query)?;
         assert!(newest.content.as_str().contains("Continue audit trail"));
+        assert!(newest.content.as_str().contains("&amp;offset=1000"));
         assert!(
             newest
                 .content
