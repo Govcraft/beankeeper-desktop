@@ -1,7 +1,10 @@
 //! Encrypted Desktop onboarding using upstream ledger and identity APIs.
 
+mod access;
 pub mod config;
 pub mod keychain;
+
+pub use access::{AgentAccess, Preset};
 
 use std::{
     error::Error,
@@ -23,10 +26,10 @@ use beankeeper_cli::{
         spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
-    identity::{self, Admin, Granted, IssueRequest, IssuedCredential, VerifiedAgent},
+    identity::{self, Admin, Granted, IssueRequest, IssuedCredential, VerifiedAgent, WriteMode},
     passphrase,
 };
-use clap::{Args, ValueEnum};
+use clap::Args;
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::IgnoredAny;
 
@@ -34,34 +37,6 @@ use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
 
 const SETUP_METADATA_LIMIT: usize = 64 * 1024;
-
-/// Least-privilege grants for the user's MCP client.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Preset {
-    /// Read reports and ledger data.
-    ReadOnly,
-    /// Read, post within spend limits, and propose, without approval rights.
-    Bookkeeper,
-}
-
-impl Preset {
-    fn capabilities(self) -> &'static [Capability] {
-        match self {
-            Self::ReadOnly => &[Capability::Read],
-            Self::Bookkeeper => &[Capability::Read, Capability::Post, Capability::Propose],
-        }
-    }
-
-    fn matches_grants(self, grants: &[String]) -> bool {
-        let expected = self.capabilities();
-        expected
-            .iter()
-            .all(|capability| grants.iter().any(|grant| grant == capability.path()))
-            && grants
-                .iter()
-                .all(|grant| expected.iter().any(|capability| grant == capability.path()))
-    }
-}
 
 const OWNER_CAPABILITIES: &[Capability] = &[
     Capability::Read,
@@ -86,9 +61,9 @@ pub struct SetupOptions {
     /// Seed upstream's sample companies and transactions.
     #[arg(long)]
     pub demo: bool,
-    /// Agent capability preset.
-    #[arg(long, value_enum, default_value = "read-only")]
-    pub preset: Preset,
+    /// Agent capability preset for standalone setup (default: read-only).
+    #[arg(long, value_enum)]
+    pub preset: Option<Preset>,
     /// Private recovery kit path (default: ledger path with .recovery.txt extension).
     #[arg(long)]
     pub recovery_kit: Option<PathBuf>,
@@ -104,12 +79,36 @@ pub struct SetupOptions {
     /// Local Desktop address; requires a nonzero port.
     #[arg(long, default_value = "127.0.0.1:8750")]
     pub bind: SocketAddr,
+    /// Spend limits used by standalone setup only.
+    #[command(flatten)]
+    spend_limits: StandaloneSpendLimits,
+}
+
+#[derive(Args, Debug)]
+struct StandaloneSpendLimits {
     /// Bookkeeper's maximum post in USD cents, per initial company.
-    #[arg(long, default_value = "10000", value_parser = clap::value_parser!(i64).range(0..))]
-    pub max_post: i64,
+    #[arg(long, default_value_t = Self::default().max_post)]
+    max_post: i64,
     /// Bookkeeper's daily spend in USD cents, per initial company.
-    #[arg(long, default_value = "50000", value_parser = clap::value_parser!(i64).range(0..))]
-    pub daily_limit: i64,
+    #[arg(long, default_value_t = Self::default().daily_limit)]
+    daily_limit: i64,
+}
+
+impl Default for StandaloneSpendLimits {
+    fn default() -> Self {
+        Self {
+            max_post: 10_000,
+            daily_limit: 50_000,
+        }
+    }
+}
+
+impl TryFrom<&StandaloneSpendLimits> for Caps {
+    type Error = CliError;
+
+    fn try_from(limits: &StandaloneSpendLimits) -> Result<Self, Self::Error> {
+        Self::from_minor_units(Some(limits.max_post), Some(limits.daily_limit))
+    }
 }
 
 /// Options controlling how setup opens the local Desktop workspace.
@@ -262,7 +261,7 @@ impl SetupOptions {
             force: true,
             non_interactive: true,
             demo: false,
-            preset: Preset::ReadOnly,
+            preset: None,
             recovery_kit: None,
             config_home: Some(home.into()),
             secret_store_file: None,
@@ -271,8 +270,7 @@ impl SetupOptions {
                 no_open: true,
             },
             bind,
-            max_post: 10_000,
-            daily_limit: 50_000,
+            spend_limits: StandaloneSpendLimits::default(),
         }
     }
 }
@@ -295,6 +293,42 @@ impl SetupMode {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Provisioning {
+    StandaloneReadOnly,
+    StandaloneBookkeeper(Caps),
+    Managed(SetupMode),
+}
+
+impl TryFrom<(&SetupOptions, ClientRegistration<'_>, SetupMode)> for Provisioning {
+    type Error = CliError;
+
+    fn try_from(
+        (options, registration, mode): (&SetupOptions, ClientRegistration<'_>, SetupMode),
+    ) -> Result<Self, Self::Error> {
+        Ok(match registration {
+            ClientRegistration::Standalone => {
+                let caps = Caps::try_from(&options.spend_limits)?;
+                match options.preset.unwrap_or_default() {
+                    Preset::ReadOnly => Self::StandaloneReadOnly,
+                    Preset::Bookkeeper => Self::StandaloneBookkeeper(caps),
+                }
+            }
+            ClientRegistration::Managed { .. } | ClientRegistration::Skip => Self::Managed(mode),
+        })
+    }
+}
+
+impl Provisioning {
+    fn preset(self) -> Preset {
+        match self {
+            Self::StandaloneReadOnly => Preset::ReadOnly,
+            Self::StandaloneBookkeeper(_) => Preset::Bookkeeper,
+            Self::Managed(_) => Preset::MANAGED,
+        }
+    }
+}
+
 fn run_with_store(
     cli: &mut Cli,
     options: &SetupOptions,
@@ -312,6 +346,7 @@ fn run_with_store(
         ));
     }
     let mode = SetupMode::for_ledger(&cli.db, options.force)?;
+    let provisioning = Provisioning::try_from((options, registration, mode))?;
     let home = options
         .config_home
         .clone()
@@ -381,14 +416,7 @@ fn run_with_store(
         initialize_ledger(cli, options.demo)?;
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
-    provision(
-        &db,
-        options,
-        &token_file,
-        &owner_file,
-        !matches!(registration, ClientRegistration::Standalone)
-            && matches!(mode, SetupMode::Resume),
-    )?;
+    provision(&db, provisioning, &token_file, &owner_file)?;
     write_store_marker(
         &cli.db,
         options.secret_store_file.as_deref(),
@@ -684,16 +712,17 @@ fn has_registered_tokens(wire: serde_json::Value) -> Result<bool, SetupError> {
 
 fn provision(
     db: &Db,
-    options: &SetupOptions,
+    provisioning: Provisioning,
     token_file: &Path,
     owner_file: &Path,
-    preserve_preset: bool,
 ) -> Result<(), SetupError> {
     let conn = db.read();
     if token_file.exists() {
         let raw = PrivateFile::open(token_file)?.read_secret(BEARER_FILE_LIMIT)?;
         let agent = identity::verify(conn, raw.expose_secret().trim())?;
-        if !preserve_preset && !options.preset.matches_grants(agent.capabilities()) {
+        if !matches!(provisioning, Provisioning::Managed(SetupMode::Resume))
+            && Preset::try_from(&agent) != Ok(provisioning.preset())
+        {
             return Err(SetupError::Invalid(
                 "existing token has a different preset; use upstream agent issuance for explicit credential changes",
             ));
@@ -719,17 +748,19 @@ fn provision(
         None
     };
     let actor = bootstrap_owner.as_ref().unwrap_or(&actor);
-    let mut companies = db::list_companies(conn)?;
-    if companies.is_empty() {
+    if db::list_companies(conn)?.is_empty() {
         Granted::<Admin>::with_db(db, actor, |grant| {
             db::create_company(grant, &"personal".parse()?, &"Personal".parse()?, None)
         })?;
-        companies = db::list_companies(conn)?;
     }
-    let issued = issue(db, actor, "desktop_agent", options.preset.capabilities())?;
-    if options.preset == Preset::Bookkeeper {
-        let caps = Caps::from_minor_units(Some(options.max_post), Some(options.daily_limit))?;
-        for company in companies {
+    let issued = issue(
+        db,
+        actor,
+        "desktop_agent",
+        provisioning.preset().capabilities(),
+    )?;
+    if let Provisioning::StandaloneBookkeeper(caps) = provisioning {
+        for company in db::list_companies(conn)? {
             let limit =
                 SpendLimit::new(issued.agent_uri.clone(), company.slug, Currency::USD, caps);
             Granted::<Admin>::with_db(db, actor, |grant| audit::set_spend_limit(grant, &limit))?;
@@ -751,7 +782,7 @@ fn issue(
         .map(|capability| capability.path().to_owned())
         .collect::<Vec<_>>();
     Ok(Granted::<Admin>::with_db(db, actor, |grant| {
-        identity::issue_credential(
+        identity::issue_credential_with_mode(
             grant,
             &IssueRequest {
                 name,
@@ -760,6 +791,7 @@ fn issue(
                 public_key: None,
                 generate_key: true,
             },
+            WriteMode::default(),
         )
     })?)
 }
@@ -1179,7 +1211,7 @@ mod tests {
         keychain::restrict_directory(root.path())?;
         let books = root.path().join("books.db");
         let db = Db::open(&books, Some(&SecretString::from("setup-policy-fixture")))?;
-        let options = SetupOptions::from_service(root.path(), "127.0.0.1:8750".parse()?);
+        let provisioning = Provisioning::Managed(SetupMode::Fresh);
         let owner_file = books.with_extension("owner-token");
         let agent_file = books.with_extension("agent-token");
         let read_identity = |path: &Path| -> Result<VerifiedAgent, Box<dyn Error>> {
@@ -1187,7 +1219,7 @@ mod tests {
             Ok(identity::verify(db.read(), token.expose_secret())?)
         };
 
-        provision(&db, &options, &agent_file, &owner_file, false)?;
+        provision(&db, provisioning, &agent_file, &owner_file)?;
         let owner = read_identity(&owner_file)?;
         assert!(owner.allows(Capability::Admin)?);
         assert!(db::policy::get(db.read())?.enforce);
@@ -1199,19 +1231,16 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
         };
         assert_eq!(policy_events()?, [owner.jti()]);
-        assert!(
-            options
-                .preset
-                .matches_grants(read_identity(&agent_file)?.capabilities())
-        );
+        let agent = read_identity(&agent_file)?;
+        assert_eq!(Preset::try_from(&agent), Ok(Preset::Bookkeeper));
+        assert_eq!(agent.write_mode(), WriteMode::Direct);
 
         fs::remove_file(&agent_file)?;
-        provision(&db, &options, &agent_file, &owner_file, false)?;
+        provision(&db, provisioning, &agent_file, &owner_file)?;
         assert_eq!(read_identity(&owner_file)?.jti(), owner.jti());
-        assert!(
-            options
-                .preset
-                .matches_grants(read_identity(&agent_file)?.capabilities())
+        assert_eq!(
+            Preset::try_from(&read_identity(&agent_file)?),
+            Ok(Preset::Bookkeeper)
         );
         assert_eq!(policy_events()?, [owner.jti()]);
         Ok(())
@@ -1223,18 +1252,6 @@ mod tests {
         assert!(has_registered_tokens(serde_json::json!([{}]))?);
         assert!(has_registered_tokens(serde_json::json!({"tokens": []})).is_err());
         Ok(())
-    }
-
-    #[test]
-    fn preset_requires_the_same_grants_in_any_order() {
-        let read = Capability::Read.path().to_owned();
-        let post = Capability::Post.path().to_owned();
-        let propose = Capability::Propose.path().to_owned();
-        let approve = Capability::Approve.path().to_owned();
-        assert!(Preset::Bookkeeper.matches_grants(&[post.clone(), propose.clone(), read.clone()]));
-        assert!(!Preset::Bookkeeper.matches_grants(&[post.clone(), read.clone()]));
-        assert!(!Preset::Bookkeeper.matches_grants(&[propose, approve, post, read.clone()]));
-        assert!(Preset::ReadOnly.matches_grants(&[read.clone(), read]));
     }
 
     #[cfg(unix)]

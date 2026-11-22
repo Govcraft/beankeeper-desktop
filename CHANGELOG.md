@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.19] - 2026-11-22
+
+### Changed
+
+- Fresh managed installs issue a bookkeeper credential that posts directly.
+  Setup and service status explain the verified grant and its signed write mode.
+- Document optional sign-off and owner undo through audited reversal.
+
 ## [0.1.0-rc.18] - 2026-11-22
 
 ### Fixed

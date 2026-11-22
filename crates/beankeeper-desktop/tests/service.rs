@@ -43,6 +43,7 @@ fn stopped_service_status_is_structured_and_has_no_side_effects() -> TestResult 
     let status: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(status["installed"], false);
     assert_eq!(status["running"], false);
+    assert!(status["agent_access"].is_null());
     assert!(status["mcp_endpoint"].is_null());
     assert!(status["version"].is_null());
     assert_eq!(
@@ -208,47 +209,39 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         restrict_directory(path)?;
     }
     let books = data.join("books.db");
-    let output = isolated(root.path())
-        .arg("--db")
-        .arg(&books)
-        .args([
-            "setup",
-            "--non-interactive",
-            "--no-start",
-            "--no-open",
-            "--secret-store-file",
-        ])
-        .arg(data.join("passphrase"))
-        .arg("--config-home")
-        .arg(&home)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let executable = std::path::PathBuf::from(assert_cmd::cargo::cargo_bin!("bk"));
-    let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    fs::write(
-        state.join("service.json"),
-        serde_json::to_vec(&json!({
-            "executable":executable,"books":books,"port":occupied.local_addr()?.port()
-        }))?,
-    )?;
-    restrict_file(&state.join("service.json"))?;
-    write_stub_registration(&config, &bin)?;
     let configured = || {
         let mut command = without_session(root.path());
-        command.env("XDG_CONFIG_HOME", &config).env(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
+        command
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
         command
     };
+    // Let the real install provision the ledger, then take over from the stub manager.
+    write_stub_manager(&bin)?;
+    let output = configured()
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/stub-systemd-bus")
+        .args(["service", "install", "--file-store", "--no-agents"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("OS service manager refused"));
+    let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let service_config = state.join("service.json");
+    let mut registration: Value = serde_json::from_slice(&fs::read(&service_config)?)?;
+    registration["port"] = json!(occupied.local_addr()?.port());
+    fs::write(&service_config, serde_json::to_vec(&registration)?)?;
+    restrict_file(&service_config)?;
+    fs::write(
+        config.join("systemd/user/beankeeper-desktop.service"),
+        "test registration",
+    )?;
     let mut host = configured();
     host.args(["service", "run"]);
     let server = Server::launch(host)?;
@@ -265,6 +258,8 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(status["mcp_endpoint"], format!("{}/mcp", server.base));
     assert_fallback_link(&configured, &state, &server.base)?;
+    assert_eq!(status["agent_access"]["preset"], "bookkeeper");
+    assert_eq!(status["agent_access"]["write_mode"], "direct");
     let agent_command = || {
         let mut command = configured();
         command
@@ -278,6 +273,7 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
     assert_stale_runtime_fails(&configured, &agent_command, &state)?;
     assert_managed_stdio_launchers(&configured, &state, &server.base)?;
+    assert_managed_write_modes(&configured, &books, &status["agent_access"])?;
     assert_managed_auth_failure(&configured, &agent_command, &books)?;
     drop(server);
     let output = configured()
@@ -474,7 +470,14 @@ fn assert_managed_link(tools: &Value, link: &Value, navigation: &Value, base: &s
         .find(|tool| tool["name"] == "ui_get_link")
         .ok_or("managed ledger connection omitted ui_get_link")?;
     assert_eq!(advertised["annotations"]["readOnlyHint"], true);
-    for name in ["ui_show_view", "ui_highlight", "ui_status", "txn_post"] {
+    assert!(tools.iter().any(|tool| tool["name"] == "txn_post"));
+    for name in [
+        "ui_show_view",
+        "ui_highlight",
+        "ui_status",
+        "txn_approve",
+        "txn_reverse",
+    ] {
         assert!(!tools.iter().any(|tool| tool["name"] == name));
     }
 
@@ -493,15 +496,292 @@ fn assert_managed_link(tools: &Value, link: &Value, navigation: &Value, base: &s
 }
 
 #[cfg(target_os = "linux")]
-fn write_stub_registration(config: &std::path::Path, bin: &std::path::Path) -> TestResult {
-    use std::{fs, os::unix::fs::PermissionsExt};
-    fs::write(
-        config.join("systemd/user/beankeeper-desktop.service"),
-        "test registration",
+fn assert_managed_write_modes(
+    configured: &impl Fn() -> std::process::Command,
+    books: &std::path::Path,
+    direct_access: &Value,
+) -> TestResult {
+    use beankeeper_cli::{
+        db::{self, Actor, Db},
+        identity,
+    };
+    use secrecy::{ExposeSecret, SecretString};
+    use std::fs;
+
+    let db = Db::open_existing(
+        books,
+        Some(&SecretString::from(fs::read_to_string(
+            books.with_extension("passphrase"),
+        )?)),
     )?;
+    let owner_file = books.with_extension("owner-token");
+    let owner_token = SecretString::from(fs::read_to_string(&owner_file)?);
+    let owner = identity::verify(db.read(), owner_token.expose_secret())?;
+    let actor = Actor::new("managed-test-owner".parse()?).with_identity(owner.clone());
+    create_managed_accounts(&db, &actor)?;
+    let agent_file = books.with_extension("agent-token");
+    let token = SecretString::from(fs::read_to_string(&agent_file)?);
+    let agent = identity::verify(db.read(), token.expose_secret())?;
+    let limits = db::spend_limits::list(db.read(), agent.uri(), None)?;
+    assert_eq!(
+        limits.first().map(db::spend_limits::SpendLimit::agent_uri),
+        None
+    );
+
+    let bridge = || {
+        let mut command = configured();
+        command.args(["mcp", "bridge", "--service"]);
+        command
+    };
+    let mut lifecycle = configured();
+    lifecycle.args(["service", "mcp"]);
+    let saved_owner_file = books.with_extension("owner-token.offline");
+    fs::rename(&owner_file, &saved_owner_file)?;
+    assert_eq!(
+        stdio_tool(lifecycle, "service_status", &json!({}))?["agent_access"],
+        *direct_access
+    );
+    assert_eq!(
+        stdio_tool(bridge(), "setup_status", &json!({}))?["agent_access"],
+        *direct_access
+    );
+
+    let posting = |reference| {
+        json!({
+            "company": "personal", "date": "2026-11-22", "description": "Managed sale",
+            "reference": reference,
+            "debits": [{"account": "1000", "amount": "1250.00"}],
+            "credits": [{"account": "4000", "amount": "1250.00"}]
+        })
+    };
+    let posted = stdio_tool(bridge(), "txn_post", &posting("managed-direct"))?;
+    assert_eq!(posted["created"], true);
+    let posted_id = posted["id"].as_i64().ok_or("posted transaction ID")?;
+    assert_transaction_actor(&db, posted_id, &agent)?;
+
+    let proposal_credential = issue_sign_off_grant(&db, &actor)?;
+    fs::write(&agent_file, proposal_credential.token().expose_secret())?;
+    let output = configured()
+        .args(["service", "status", "--json"])
+        .output()?;
+    let status: Value = serde_json::from_slice(&output.stdout)?;
+    let access = &status["agent_access"];
+    assert_eq!(access["preset"], "bookkeeper");
+    assert_eq!(access["write_mode"], "propose-only");
+    assert!(
+        access["note"]
+            .as_str()
+            .ok_or("write mode note")?
+            .contains("sign-off")
+    );
+    assert_eq!(
+        stdio_tool(bridge(), "setup_status", &json!({}))?["agent_access"],
+        *access
+    );
+    let proposed = stdio_tool(bridge(), "txn_post", &posting("managed-proposal"))?;
+    assert_eq!(proposed["status"], "pending");
+    assert!(proposed["transaction_id"].is_null());
+    assert_eq!(
+        proposed["proposer_uri"],
+        proposal_credential.agent_uri.as_str()
+    );
+    let count = || {
+        db.read()
+            .query_row("SELECT COUNT(*) FROM transactions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+    };
+    assert_eq!(count()?, 1);
+
+    fs::rename(saved_owner_file, owner_file)?;
+    let mut undo = configured();
+    undo.env("BK_AGENT_TOKEN", owner_token.expose_secret())
+        .arg("--db")
+        .arg(books);
+    let reversal_id = reverse_managed_post(undo, posted_id)?;
+    assert_ne!(reversal_id, posted_id);
+    assert_transaction_actor(&db, reversal_id, &owner)?;
+    assert_eq!(count()?, 2);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn issue_sign_off_grant(
+    db: &beankeeper_cli::db::Db,
+    owner: &beankeeper_cli::db::Actor,
+) -> Result<beankeeper_cli::identity::IssuedCredential, beankeeper_cli::error::CliError> {
+    use beankeeper_cli::{
+        capability::Capability,
+        identity::{self, Admin, Granted, IssueRequest, WriteMode},
+    };
+
+    Granted::<Admin>::with_db(db, owner, |grant| {
+        identity::issue_credential_with_mode(
+            grant,
+            &IssueRequest {
+                name: "test_signoff",
+                capabilities: &[Capability::Read, Capability::Post, Capability::Propose]
+                    .map(|capability| capability.path().to_owned()),
+                ttl: Duration::from_secs(3600),
+                public_key: None,
+                generate_key: true,
+            },
+            WriteMode::ProposeOnly,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn create_managed_accounts(
+    db: &beankeeper_cli::db::Db,
+    actor: &beankeeper_cli::db::Actor,
+) -> TestResult {
+    use beankeeper::types::AccountType;
+    use beankeeper_cli::{
+        db,
+        identity::{Admin, Granted},
+    };
+
+    let company = "personal".parse()?;
+    for (code, name, account_type) in [
+        ("1000", "Checking", AccountType::Asset),
+        ("4000", "Sales", AccountType::Revenue),
+    ] {
+        Granted::<Admin>::with_db(db, actor, |grant| {
+            db::create_account(
+                grant,
+                &db::CreateAccountParams {
+                    company_slug: &company,
+                    code,
+                    name,
+                    account_type,
+                    default_tax_category: None,
+                },
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reverse_managed_post(mut command: std::process::Command, posted_id: i64) -> TestResult<i64> {
+    let output = command
+        .args([
+            "--company",
+            "personal",
+            "--json",
+            "txn",
+            "reverse",
+            &posted_id.to_string(),
+            "--date",
+            "2026-11-22",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reversed: Value = serde_json::from_slice(&output.stdout)?;
+    Ok(reversed["data"]["id"]
+        .as_i64()
+        .ok_or("reversal transaction ID")?)
+}
+
+#[cfg(target_os = "linux")]
+fn assert_transaction_actor(
+    db: &beankeeper_cli::db::Db,
+    id: i64,
+    agent: &beankeeper_cli::identity::VerifiedAgent,
+) -> TestResult {
+    let (uri, jti): (String, String) = db.read().query_row(
+        "SELECT agent_uri, token_jti FROM audit_log
+         WHERE company_slug = 'personal' AND entity = 'transaction' AND action = 'create' AND entity_id = ?",
+        [id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(uri, agent.uri());
+    assert_eq!(jti, agent.jti());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn stdio_tool(
+    mut command: std::process::Command,
+    name: &str,
+    arguments: &Value,
+) -> TestResult<Value> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().ok_or("stdio input")?;
+    let output = child.stdout.take().ok_or("stdio output")?;
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let result = (|| -> TestResult<Value> {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-write-test","version":"1"}}})
+        )?;
+        input.flush()?;
+        let initialized: Value =
+            serde_json::from_str(&receive.recv_timeout(Duration::from_secs(15))??)?;
+        assert!(
+            initialized["result"]["serverInfo"].is_object(),
+            "{initialized}"
+        );
+        for message in [
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+        ] {
+            writeln!(input, "{message}")?;
+        }
+        input.flush()?;
+        Ok(serde_json::from_str(
+            &receive.recv_timeout(Duration::from_secs(15))??,
+        )?)
+    })();
+    drop(input);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output()?;
+    let mut reply = result.map_err(|error| {
+        format!(
+            "{name}: {error}. {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(reply["id"], 2, "{reply}");
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let data = reply["result"]["structuredContent"].take();
+    assert!(!data.is_null(), "{reply}");
+    Ok(data)
+}
+
+#[cfg(target_os = "linux")]
+fn write_stub_manager(bin: &std::path::Path) -> TestResult {
+    use std::{fs, os::unix::fs::PermissionsExt};
     // Read-only discovery must work even when systemctl cannot reach a bus.
     fs::write(bin.join("systemctl"), "#!/bin/sh\nexit 1\n")?;
     fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755))?;
+    // CI can run these fixture processes as root. The real manager is stubbed.
+    fs::write(bin.join("id"), "#!/bin/sh\nprintf '1000\\n'\n")?;
+    fs::set_permissions(bin.join("id"), fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
