@@ -358,12 +358,13 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     let ledger = Ledger::new()?;
     {
         let db = ledger.db()?;
-        // Undo migration 22 to reproduce the prior ledger schema.
+        // Undo the two setup migrations to reproduce the prior ledger schema.
         db.conn().execute_batch(
             "BEGIN;
+             DROP TABLE setup_statement_batches;
              DROP TABLE setup_requests;
              DROP TABLE setup_book_profiles;
-             DELETE FROM schema_version WHERE version = 22;
+             DELETE FROM schema_version WHERE version IN (22, 23);
              COMMIT;",
         )?;
         assert_eq!(get_schema_version(db.conn())?, 21);
@@ -372,14 +373,16 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
     let passphrase = std::fs::read_to_string(&ledger.secret)?.into();
     let migrated = Db::open_snapshot(&ledger.path, Some(&passphrase))?;
-    assert_eq!(get_schema_version(migrated.conn())?, 22);
+    assert_eq!(get_schema_version(migrated.conn())?, 23);
     let setup_tables: u32 = migrated.conn().query_row(
         "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'table' AND name IN ('setup_book_profiles', 'setup_requests')",
+         WHERE type = 'table' AND name IN (
+             'setup_book_profiles', 'setup_requests', 'setup_statement_batches'
+         )",
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(setup_tables, 2);
+    assert_eq!(setup_tables, 3);
     server.initialize(Some(token(&ledger.reader)?))?;
     server.pair()?;
     assert_eq!(server.client.get(&server.base).send()?.status(), 200);

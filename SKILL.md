@@ -223,14 +223,33 @@ pending proposal for review by the owner with approval authority, then check
 whether it posted. If the inputs change, preview them again and confirm the
 changes with the owner before reserving.
 
-For each write, send the company, setup generation and a stable request
-reference. Reuse the same reference and inputs when retrying. Stop and explain
-what needs to be resolved if a tool reports a conflict.
+Before importing a statement, confirm the book, bank account, currency,
+statement dates, and which transactions the owner has already recorded.
+Use the committed statement counts from `setup_status` when available. Ask
+the owner to confirm the source of any other earlier activity.
+Confirm the suspense account for entries that still need categorization.
+Call `ledger_setup_statement_preview` with the active setup generation, the
+account codes, and a stable reference. Use `csv` for CSV and `ofx` for OFX or
+QFX. Supply the UTF-8 statement to the local tool and describe its preview in
+plain words so the owner can review the proposed entries.
+
+After review, have the owner use a separate live approval credential to call
+`ledger_setup_statement_commit` with the book, `batch_id`, and
+`preview_sha256` returned by the preview. Retry with the same ID and digest
+if the result is uncertain. Call `ledger_setup_statement_receipt` to confirm
+which transactions were created and which already existed. Give the owner
+those counts and identify any entries still awaiting categorization.
+
+For writes that take a setup target, send the company, setup generation and a
+stable request reference. Reuse the same reference and inputs when retrying.
+Stop and explain what needs to be resolved if a tool reports a conflict.
 
 After summarizing the outcome, have the owner finish the session or revoke it
-if they want to cancel access. Both actions deactivate the setup grant. Posted
-entries are corrected through normal ledger reversals. See the
-[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/4247a01a0c4f276a4af436968f9353cf03b9ba08/docs/beankeeper/references/commands.md#setup-sessions)
+if they want to cancel access. Both actions deactivate the setup grant. Use
+normal ledger reversals to correct posted entries. For an unused account or an
+empty book created by mistake, the owner can use the audited admin controls.
+See the
+[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/04e0c68e42be7a6c12f8997b6fbe5a2a3630beec/docs/beankeeper/references/commands.md#setup-sessions)
 for the CLI flags and MCP arguments.
 
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from

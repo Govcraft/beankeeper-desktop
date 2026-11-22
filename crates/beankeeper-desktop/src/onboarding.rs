@@ -10,7 +10,8 @@ use beankeeper_cli::{
     capability::Capability,
     cli::Cli,
     commands::setup::{
-        BookAccountCode, BookFacts, BookProfile, BookSettings, ProfileRevision, book_facts,
+        BookAccountCode, BookFacts, BookProfile, BookSettings, ProfileRevision,
+        StatementImportSummary, book_facts, statement_import_summary,
     },
     db::{self, Db},
     error::CliError,
@@ -24,6 +25,7 @@ use rmcp::{
     model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool},
 };
 use secrecy::ExposeSecret;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
@@ -49,6 +51,7 @@ struct Book {
     observed_currencies: Vec<CurrencyCode>,
     #[serde(flatten)]
     profile: ProfileStatus,
+    #[serde(flatten)]
     imported_history: ImportHistory,
 }
 
@@ -110,10 +113,25 @@ enum SettingState {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "imported_history", rename_all = "snake_case")]
 enum ImportHistory {
     NoTransactions,
     SourceUnknown,
+    StatementsRecorded {
+        #[serde(serialize_with = "serialize_statement_imports")]
+        statement_imports: StatementImportSummary,
+    },
+}
+
+fn serialize_statement_imports<S: Serializer>(
+    summary: &StatementImportSummary,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut counts = serializer.serialize_struct("StatementImportSummary", 3)?;
+    counts.serialize_field("committed_batches", &summary.committed_batches)?;
+    counts.serialize_field("created_transactions", &summary.created_transactions)?;
+    counts.serialize_field("preexisting_matches", &summary.preexisting_matches)?;
+    counts.end()
 }
 
 #[derive(Serialize)]
@@ -233,7 +251,10 @@ impl LedgerSnapshot {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let imported_history = if observed_currencies.is_empty() {
+                let statement_imports = statement_import_summary(db, &company_slug)?;
+                let imported_history = if statement_imports.committed_batches != 0 {
+                    ImportHistory::StatementsRecorded { statement_imports }
+                } else if observed_currencies.is_empty() {
                     ImportHistory::NoTransactions
                 } else {
                     ImportHistory::SourceUnknown

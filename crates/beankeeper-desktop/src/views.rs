@@ -588,17 +588,16 @@ fn transaction_table(
     company: &str,
     section: RegisterSection,
     html: &mut Markup,
-) -> Result<(), ViewError> {
+) {
     if rows.is_empty() {
         write_markup!(html, "<p class=\"empty\">No transactions to show.</p>");
-        return Ok(());
+        return;
     }
     write_markup!(
         html,
         "<div class=\"table-scroll\"><table><caption>Transaction register</caption><thead><tr><th scope=\"col\">Date</th><th scope=\"col\">Payee / description</th><th scope=\"col\">Reference</th><th scope=\"col\">Currency</th><th scope=\"col\">Entries</th></tr></thead><tbody>"
     );
     for (row, entries) in rows {
-        let currency = ledger_rows::currency(&row.currency)?;
         write_markup!(
             html,
             "<tr id=\"{}{}\"><td>{}</td><th scope=\"row\"><a href=\"/transactions/{}?company={}\">{}</a></th><td>{}</td><td>{}</td>",
@@ -609,11 +608,11 @@ fn transaction_table(
             encode(company),
             &row.description,
             row.reference.as_deref().unwrap_or("Not recorded"),
-            &row.currency
+            row.currency.code()
         );
         write_markup!(html, "<td><ul>");
         for entry in entries {
-            let values = EntryValues::read(entry, currency);
+            let values = EntryValues::read(entry, row.currency);
             write_markup!(
                 html,
                 "<li>{}: {} {} ({})</li>",
@@ -626,7 +625,6 @@ fn transaction_table(
         write_markup!(html, "</ul></td></tr>");
     }
     write_markup!(html, "</tbody></table></div>");
-    Ok(())
 }
 
 fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) -> bool {
@@ -762,7 +760,7 @@ fn register(
             write_markup!(html, "<p>{}: {}.</p>", label, value);
         }
     }
-    transaction_table(&rows, company, section, html)?;
+    transaction_table(&rows, company, section, html);
     write_markup!(
         html,
         "<p>{} matching transactions shown. Scanned source rows {} through {} of {} candidates after company, account, date, currency and amount filters.</p>",
@@ -823,7 +821,7 @@ fn detail(
     for (label, value) in [
         ("Company", Some(company)),
         ("Date", Some(txn.date.as_str())),
-        ("Currency", Some(txn.currency.as_str())),
+        ("Currency", Some(txn.currency.code())),
         ("Posted at", Some(txn.posted_at.as_str())),
         ("Reference", txn.reference.as_deref()),
         ("Posted by", txn.posted_by.as_deref()),
@@ -838,9 +836,8 @@ fn detail(
         html,
         "</pre></section><section><h2>Entries</h2><div class=\"table-scroll\"><table><caption>Entry amounts in transaction currency</caption><thead><tr><th scope=\"col\">Account</th><th scope=\"col\">Direction</th><th scope=\"col\">Amount</th><th scope=\"col\">Clearance</th><th scope=\"col\">Memo</th><th scope=\"col\">Tax category</th></tr></thead><tbody>"
     );
-    let currency = ledger_rows::currency(&txn.currency)?;
     for entry in &entries {
-        let values = EntryValues::read(entry, currency);
+        let values = EntryValues::read(entry, txn.currency);
         write_markup!(
             html,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",

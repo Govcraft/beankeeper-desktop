@@ -245,6 +245,7 @@ fn desktop_dispatches_owner_setup_lifecycle_across_cli_and_mcp() -> TestResult {
             "ledger_setup_chart_apply",
             OPENING_PREVIEW,
             OPENING_RESERVE,
+            "ledger_setup_statement_preview",
             LEDGER_SETUP_STATUS,
         ]
     );
