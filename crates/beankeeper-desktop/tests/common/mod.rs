@@ -26,6 +26,8 @@ pub struct Ledger {
     pub secret: PathBuf,
     pub reader: Value,
     pub writer: Value,
+    owner: Actor,
+    owner_token: secrecy::SecretString,
 }
 
 impl Ledger {
@@ -47,43 +49,43 @@ impl Ledger {
         let secret = dir.path().join("passphrase");
         std::fs::write(&secret, PASSPHRASE)?;
         let db = Db::open(&path, Some(&PASSPHRASE.into()))?;
-        let owner = Actor::new("owner");
-        db::create_company(db.conn(), &owner, "acme", "Acme", None)?;
-        identity::init_root(db.conn(), &owner)?;
+        let owner = Actor::new("owner".parse()?);
+        Granted::<Admin>::with_db(&db, &owner, |grant| {
+            db::create_company(grant, &"acme".parse()?, &"Acme".parse()?, None)
+        })?;
+        Granted::<Admin>::with_db(&db, &owner, identity::init_root)?;
         let issue = |name, capabilities: &[String]| {
-            identity::issue(
-                db.conn(),
-                &owner,
-                &IssueRequest {
-                    name,
-                    capabilities,
-                    ttl: Duration::from_secs(3600),
-                    public_key: None,
-                    generate_key: true,
-                },
-            )
+            Granted::<Admin>::with_db(&db, &owner, |grant| {
+                identity::issue(
+                    grant,
+                    &IssueRequest {
+                        name,
+                        capabilities,
+                        ttl: Duration::from_secs(3600),
+                        public_key: None,
+                        generate_key: true,
+                    },
+                )
+            })
         };
         let reader = issue("desktop_reader", &["ledger/read".into()])?;
         let writer = issue(
             "desktop_writer",
             &["ledger/read".into(), "ledger/post".into()],
         )?;
-        let admin = identity::issue_credential(
-            db.conn(),
-            &owner,
-            &IssueRequest {
-                name: "desktop_policy_admin",
-                capabilities: &[Capability::Admin.path().into()],
-                ttl: Duration::from_secs(3600),
-                public_key: None,
-                generate_key: true,
-            },
+        let admin = issue(
+            "desktop_policy_admin",
+            &[
+                Capability::Admin,
+                Capability::Post,
+                Capability::Reconcile,
+                Capability::Budget,
+            ]
+            .map(|capability| capability.path().to_owned()),
         )?;
-        let owner =
-            owner.with_identity(identity::verify(db.conn(), admin.token().expose_secret())?);
-        Granted::<Admin>::with(db.conn(), &owner, |grant| {
-            db::audit::set_policy(grant, true)
-        })?;
+        let owner_token = secrecy::SecretString::from(token(&admin)?);
+        let owner = owner.with_identity(identity::verify(db.read(), owner_token.expose_secret())?);
+        Granted::<Admin>::with_db(&db, &owner, |grant| db::audit::set_policy(grant, true))?;
         Ok((
             Self {
                 _dir: dir,
@@ -91,6 +93,8 @@ impl Ledger {
                 secret,
                 reader,
                 writer,
+                owner: owner.clone(),
+                owner_token,
             },
             owner,
         ))
@@ -102,6 +106,39 @@ impl Ledger {
     /// Returns an error when the fixture ledger cannot be opened.
     pub fn db(&self) -> TestResult<Db> {
         Ok(Db::open_existing(&self.path, Some(&PASSPHRASE.into()))?)
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &Actor {
+        &self.owner
+    }
+
+    /// Write a private owner credential for the browser approval fixture.
+    /// # Errors
+    /// Returns I/O or permissions errors from the temporary sidecar.
+    pub fn write_owner_token(&self, token: &str) -> TestResult {
+        let path = self.path.with_extension("owner-token");
+        std::fs::write(&path, token)?;
+        beankeeper_desktop::setup::keychain::restrict_file(&path)?;
+        Ok(())
+    }
+
+    /// Enable browser approval using the fixture owner.
+    /// # Errors
+    /// Returns I/O or permissions errors from the temporary sidecar.
+    pub fn enable_browser_review(&self) -> TestResult {
+        self.write_owner_token(self.owner_token.expose_secret())
+    }
+
+    /// Open a temporary fixture independently of the ledger API to exercise
+    /// schema migration, corruption detection or an injected SQLite failure.
+    /// # Errors
+    /// Returns connection or `SQLCipher` errors.
+    pub fn fixture_sql(&self) -> TestResult<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open(&self.path)?;
+        conn.pragma_update(None, "key", PASSPHRASE)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(conn)
     }
 
     #[must_use]

@@ -14,7 +14,7 @@ use beankeeper_cli::{
         BookAccountCode, BookFacts, BookProfile, BookSettings, ProfileRevision,
         StatementImportSummary, book_facts, statement_import_summary,
     },
-    db::{self, Db},
+    db::{self, Db, companies::CompanySlug},
     error::CliError,
     identity::{self, VerifiedAgent},
     mcp::{HostTool, HostToolEffect, HostToolHandler},
@@ -47,7 +47,7 @@ enum LedgerSnapshot {
 
 #[derive(Serialize)]
 struct Book {
-    id: String,
+    id: CompanySlug,
     name: String,
     accounts: Vec<Account>,
     observed_currencies: Vec<CurrencyCode>,
@@ -224,14 +224,14 @@ impl SetupReport {
 
 impl LedgerSnapshot {
     fn read(db: &Db) -> Result<Self, CliError> {
-        let conn = db.conn();
+        let conn = db.read();
         let mut currencies = conn.prepare(
             "SELECT DISTINCT currency FROM transactions WHERE company_slug = ?1 ORDER BY currency",
         )?;
         let books = db::list_companies(conn)?
             .into_iter()
             .map(|company| {
-                let company_slug = company.slug.parse()?;
+                let company_slug = company.slug;
                 let BookFacts {
                     name,
                     accounts,
@@ -246,7 +246,7 @@ impl LedgerSnapshot {
                     })
                     .collect();
                 let observed_currencies = currencies
-                    .query_map([&company.slug], |row| row.get::<_, String>(0))?
+                    .query_map([&company_slug], |row| row.get::<_, String>(0))?
                     .map(|code| {
                         Currency::from_code(&code?).map(CurrencyCode).map_err(|_| {
                             CliError::Database("a posted currency code is invalid".into())
@@ -261,12 +261,13 @@ impl LedgerSnapshot {
                 } else {
                     ImportHistory::SourceUnknown
                 };
+                let profile = profile.into();
                 Ok(Book {
-                    id: company.slug,
+                    id: company_slug,
                     name,
                     accounts,
                     observed_currencies,
-                    profile: profile.into(),
+                    profile,
                     imported_history,
                 })
             })
@@ -293,14 +294,15 @@ fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), Cl
         false,
     )?;
     let db = Db::open_snapshot(&cli.db, secret.as_ref())?;
-    let _snapshot = db.conn().unchecked_transaction()?;
-    let agent = identity::authorize(
-        db.conn(),
-        cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
-        Capability::Read,
-    )?;
-    let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?);
-    Ok((report, agent))
+    db.read_snapshot(|reader| {
+        let agent = identity::authorize(
+            reader,
+            cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
+            Capability::Read,
+        )?;
+        let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?);
+        Ok((report, agent))
+    })
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -411,8 +413,8 @@ impl HostToolHandler for DesktopTools {
             let db = status_db
                 .lock()
                 .map_err(|_| CliError::Database("setup status connection is unavailable".into()))?;
-            let _snapshot = db.conn().unchecked_transaction()?;
-            let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?);
+            let report =
+                db.read_snapshot(|_| LedgerSnapshot::read(&db).map(SetupReport::from_snapshot))?;
             let value = serde_json::to_value(&report).map_err(|error| {
                 CliError::General(format!("cannot encode setup status: {error}"))
             })?;

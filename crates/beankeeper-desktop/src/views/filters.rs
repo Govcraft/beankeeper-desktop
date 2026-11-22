@@ -1,5 +1,6 @@
 //! Parse browser wire parameters into filters that are safe to render and query.
 
+use beankeeper_cli::db::companies::CompanySlug;
 use serde::Deserialize;
 
 use crate::links::{
@@ -133,7 +134,7 @@ pub(super) struct Search {
 
 #[derive(Clone, Default)]
 pub(crate) struct Filters {
-    pub(crate) company: Option<String>,
+    pub(crate) company: Option<CompanySlug>,
     pub(crate) account: Option<String>,
     pub(crate) category: Option<String>,
     pub(crate) payee: Option<String>,
@@ -174,7 +175,9 @@ impl ViewQuery {
             .transpose()
             .map_err(|LinkError(message)| ViewError::Invalid(message))?;
         Ok(Filters {
-            company: nonempty(self.company),
+            company: nonempty(self.company)
+                .map(|slug| slug.parse().map_err(|_| ViewError::NotFound))
+                .transpose()?,
             account: nonempty(self.account),
             category: nonempty(self.category),
             payee: nonempty(self.payee),
@@ -204,6 +207,11 @@ impl ViewQuery {
 }
 
 impl Filters {
+    pub(crate) fn with_configured_company(mut self, company: Option<CompanySlug>) -> Self {
+        self.company = self.company.or(company);
+        self
+    }
+
     pub(crate) fn comparison_filters(&self) -> Option<Self> {
         Some(Self {
             dates: self.comparison?.bounds(),

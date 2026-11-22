@@ -1,6 +1,7 @@
 //! Browser-only proposal review using the upstream atomic ledger operations.
 
 use std::{
+    path::Path as FsPath,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,18 +14,19 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
-use beankeeper::types::{Currency, Money};
+use beankeeper::types::{Amount, Money};
 use beankeeper_cli::{
     capability::Capability,
-    commands::verify,
     db::{
         self, Actor, Db,
         companies::CompanySlug,
+        ids::TransactionId,
         proposals::{self, Proposal, ProposalId, ProposalState, Resolution, ResolvedBy},
         spend_limits::Cap,
+        verification::VerifiedLedger,
     },
     error::CliError,
-    identity::{self, IssueRequest},
+    identity::{self, Admin, Approve, Granted, IssueRequest, ResolveProposal},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use secrecy::{ExposeSecret, SecretString};
@@ -34,6 +36,8 @@ use crate::{
     markup::{Attribute, Markup, markup, write_markup},
     money,
     pairing::{self, HumanSession, HumanWrite, PairingState},
+    private_file::{BEARER_FILE_LIMIT, PrivateFile},
+    setup::OwnerCredential,
     ui,
     views::encode,
 };
@@ -52,38 +56,59 @@ struct Review {
 enum ApprovalAuthority {
     PolicyOff,
     Credential(SecretString),
+    Unavailable,
 }
 
 impl ApprovalAuthority {
-    fn for_launch(db: &Db) -> Result<Self, CliError> {
-        if !db::policy::get(db.conn())?.enforce {
+    fn for_launch(db: &Db, owner_file: &FsPath) -> Result<Self, CliError> {
+        if !db::policy::get(db.read())?.enforce {
             return Ok(Self::PolicyOff);
         }
 
-        let capabilities =
-            [Capability::Read, Capability::Approve].map(|capability| capability.path().to_owned());
-        let issued = identity::issue_credential(
-            db.conn(),
-            &Actor::new("desktop-local-human"),
-            &IssueRequest {
-                // Upstream generates a unique TypeID from this name prefix.
-                name: "desktop_human",
-                capabilities: &capabilities,
-                ttl: Duration::from_hours(12),
-                public_key: None,
-                generate_key: true,
-            },
-        )?;
-        Ok(Self::Credential(issued.token().clone()))
+        let Ok(owner_token) =
+            PrivateFile::open(owner_file).and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
+        else {
+            return Ok(Self::Unavailable);
+        };
+        let owner = match identity::verify(db.read(), owner_token.expose_secret().trim())
+            .and_then(OwnerCredential::try_from)
+        {
+            Ok(owner) => Actor::new("desktop-owner".parse()?).with_identity(owner.into()),
+            Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => {
+                return Ok(Self::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
+        match Granted::<Admin>::with_db(db, &owner, |grant| {
+            let capabilities = [Capability::Read, Capability::Approve]
+                .map(|capability| capability.path().to_owned());
+            identity::issue_credential(
+                grant,
+                &IssueRequest {
+                    name: "desktop_human",
+                    capabilities: &capabilities,
+                    ttl: Duration::from_hours(12),
+                    public_key: None,
+                    generate_key: true,
+                },
+            )
+        }) {
+            Ok(issued) => Ok(Self::Credential(issued.token().clone())),
+            Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => Ok(Self::Unavailable),
+            Err(error) => Err(error),
+        }
     }
 
     fn actor(&self, db: &Db) -> Result<Actor, CliError> {
-        let actor = Actor::new("desktop-local-human");
+        let actor = Actor::new("desktop-local-human".parse()?);
         match self {
             Self::Credential(token) => {
-                Ok(actor.with_identity(identity::verify(db.conn(), token.expose_secret())?))
+                Ok(actor.with_identity(identity::verify(db.read(), token.expose_secret())?))
             }
             Self::PolicyOff => Ok(actor),
+            Self::Unavailable => Err(CliError::Forbidden(
+                "browser review requires a private owner credential with ledger/admin".into(),
+            )),
         }
     }
 }
@@ -96,7 +121,7 @@ enum Verification {
 impl Verification {
     fn check(db: &Db) -> Self {
         let at = Utc::now();
-        match verify::execute_json(db) {
+        match VerifiedLedger::read(db) {
             Ok(_) => Self::Passed { at },
             Err(error) => Self::Failed { at, error },
         }
@@ -109,44 +134,75 @@ impl Verification {
     }
 }
 
-impl Review {
-    fn decide(
-        &mut self,
-        _write: &HumanWrite,
-        company: &RequestedCompany,
+struct VerifiedProposal<'grant, C> {
+    grant: Granted<'grant, C>,
+    proposal: Proposal,
+    _ledger: VerifiedLedger,
+}
+
+impl<'grant, C> VerifiedProposal<'grant, C> {
+    fn read(
+        grant: Granted<'grant, C>,
+        db: &Db,
+        company: &CompanySlug,
         id: &ProposalId,
-        decision: Decision,
-    ) -> Result<Response, CliError> {
-        let actor = self.authority.actor(&self.db)?;
-        let proposal = proposals::get(self.db.conn(), company.as_str(), id.as_str())?;
+        actor: &Actor,
+    ) -> Result<Self, CliError> {
+        let proposal = proposals::get(db.read(), company, id)?;
         if actor.agent_uri() == Some(proposal.proposer_uri.as_str()) {
             return Err(CliError::Forbidden(
                 "a proposer cannot approve or reject as the local human".into(),
             ));
         }
+        let ledger = VerifiedLedger::read(db)?;
+        Ok(Self {
+            grant,
+            proposal,
+            _ledger: ledger,
+        })
+    }
+}
 
+impl VerifiedProposal<'_, Approve> {
+    fn approve(self) -> Result<Proposal, CliError> {
+        db::audit::approve_proposal(self.grant, &self.proposal.company_slug, &self.proposal.id)
+    }
+}
+
+impl VerifiedProposal<'_, ResolveProposal> {
+    fn reject(self, reason: Option<&str>) -> Result<Proposal, CliError> {
+        db::audit::reject_proposal(
+            self.grant,
+            &self.proposal.company_slug,
+            &self.proposal.id,
+            reason,
+        )
+    }
+}
+
+impl Review {
+    fn decide(
+        &mut self,
+        _write: &HumanWrite,
+        company: &CompanySlug,
+        id: &ProposalId,
+        decision: Decision,
+    ) -> Result<Response, CliError> {
+        let actor = self.authority.actor(&self.db)?;
         // A failed fresh check must not leave an older intact result visible.
         self.verification = None;
-        // Full verification and resolution share one upstream savepoint.
-        let conn = self.db.conn();
-        db::audit::atomically(conn, || {
-            verify::execute_json(&self.db)?;
-            match decision {
-                Decision::Approve => {
-                    db::audit::approve_proposal(conn, &actor, company.as_str(), id.as_str())?;
-                }
-                Decision::Reject { reason } => {
-                    db::audit::reject_proposal(
-                        conn,
-                        &actor,
-                        company.as_str(),
-                        id.as_str(),
-                        reason.as_ref().map(NonEmptyReason::as_str),
-                    )?;
-                }
+        // Each grant reserves the ledger writer before verification or resolution.
+        match decision {
+            Decision::Approve => Granted::<Approve>::with_db(&self.db, &actor, |grant| {
+                VerifiedProposal::read(grant, &self.db, company, id, &actor)?.approve()
+            })?,
+            Decision::Reject { reason } => {
+                Granted::<ResolveProposal>::with_db(&self.db, &actor, |grant| {
+                    VerifiedProposal::read(grant, &self.db, company, id, &actor)?
+                        .reject(reason.as_ref().map(NonEmptyReason::as_str))
+                })?
             }
-            Ok(())
-        })?;
+        };
         Ok(Redirect::to(&format!(
             "/review/{id}?company={}",
             encode(company.as_str())
@@ -155,14 +211,15 @@ impl Review {
     }
 }
 
-/// The decrypted local trust root delegates approval to this launch only.
+/// The local owner delegates approval to this launch only.
 /// This credential never becomes an MCP fallback or a browser credential.
 pub(crate) fn router(
     db: Db,
     company: Option<CompanySlug>,
     pairing: PairingState,
+    owner_file: &FsPath,
 ) -> Result<Router, CliError> {
-    let authority = ApprovalAuthority::for_launch(&db)?;
+    let authority = ApprovalAuthority::for_launch(&db, owner_file)?;
     let state = ReviewState(Arc::new(Mutex::new(Review {
         db,
         company,
@@ -182,29 +239,19 @@ pub(crate) fn router(
         .with_state(state))
 }
 
-#[derive(Deserialize)]
-#[serde(transparent)]
-struct RequestedCompany(String);
-
-impl RequestedCompany {
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 #[derive(Default, Deserialize)]
 struct ReviewQuery {
-    company: Option<RequestedCompany>,
+    company: Option<CompanySlug>,
 }
 
 #[derive(Deserialize)]
 struct ApproveForm {
-    company: RequestedCompany,
+    company: CompanySlug,
 }
 
 #[derive(Deserialize)]
 struct RejectForm {
-    company: RequestedCompany,
+    company: CompanySlug,
     reason: Option<String>,
 }
 
@@ -238,7 +285,7 @@ fn failure(error: &CliError, session: Option<&HumanSession>) -> Response {
         }
         StatusCode::NOT_FOUND => "This proposal or company was not found.",
         StatusCode::FORBIDDEN => {
-            "Human approval authority is unavailable or expired. Restart the local server and pair again."
+            "Browser approval requires a private owner credential with ledger/admin. Check the credential, then restart Desktop and pair again."
         }
         _ => {
             "The ledger could not complete this request. Check the server log and re-run verification."
@@ -328,7 +375,7 @@ async fn resolve(
     write: HumanWrite,
     state: ReviewState,
     id: String,
-    company: RequestedCompany,
+    company: CompanySlug,
     decision: Decision,
 ) -> Response {
     run(state, None, move |review| {
@@ -360,107 +407,122 @@ fn render(
     id: Option<&str>,
     session: &HumanSession,
 ) -> Result<Response, CliError> {
+    let id = id
+        .map(|id| {
+            id.parse::<ProposalId>()
+                .map_err(|_| CliError::NotFound("proposal not found".into()))
+        })
+        .transpose()?;
     let verification = review
         .verification
         .get_or_insert_with(|| Verification::check(&review.db));
-    let actor = review.authority.actor(&review.db)?;
-    let _snapshot = review.db.conn().unchecked_transaction()?;
-    let companies = db::list_companies(review.db.conn())?;
-    let selected_company = query
-        .company
-        .as_ref()
-        .map(RequestedCompany::as_str)
-        .filter(|value| !value.is_empty())
-        .or_else(|| review.company.as_ref().map(CompanySlug::as_str))
-        .or_else(|| companies.first().map(|company| company.slug.as_str()));
-    let mut html = verification_panel(verification, session, selected_company);
-    let mut proposal_html = Markup::default();
-    let result = (|| -> Result<(), CliError> {
-        let html = &mut proposal_html;
-        if let Some(company) = selected_company {
-            if !companies.iter().any(|item| item.slug == company) {
-                return Err(CliError::NotFound("company not found".into()));
-            }
-            write_markup!(
-                html,
-                "<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">"
+    review.db.read_snapshot(|reader| {
+        let companies = db::list_companies(reader)?;
+        let selected = query
+            .company
+            .as_ref()
+            .or(review.company.as_ref())
+            .or_else(|| companies.first().map(|company| &company.slug));
+        let mut html = verification_panel(verification, session, selected);
+        if let Some(company) = selected {
+            let result = render_proposals(
+                &review.db,
+                &review.authority,
+                &companies,
+                company,
+                id.as_ref(),
+                session,
             );
-            for item in &companies {
-                write_markup!(
-                    html,
-                    "<option value=\"{}\"{}>{} ({})</option>",
-                    &item.slug,
-                    Attribute::Selected(item.slug == company),
-                    &item.name,
-                    &item.slug
-                );
-            }
-            write_markup!(
-                html,
-                "</select></label><button type=\"submit\">Show queue</button></form>"
-            );
-            if let Some(id) = id {
-                let id: ProposalId = id
-                    .parse()
-                    .map_err(|_| CliError::NotFound("proposal not found".into()))?;
-                let proposal = proposals::get(review.db.conn(), company, id.as_str())?;
-                proposal_detail(review, &proposal, session, html)?;
-            } else {
-                let pending = proposals::list(review.db.conn(), company, &actor, false)?;
-                write_markup!(html, "<section><h2>Pending proposals</h2>");
-                if pending.is_empty() {
+            match result {
+                Ok(proposals) => html.append(&proposals),
+                Err(error @ (CliError::NotFound(_) | CliError::Validation(_))) => return Err(error),
+                Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => {
+                    write_markup!(html, "<p>Browser approval requires a private owner credential with ledger/admin. Check the credential, then restart Desktop and pair again.</p>");
+                }
+                Err(error) => {
+                    eprintln!("Browser proposal data failed: {error}");
                     write_markup!(
                         html,
-                        "<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>"
+                        "<section><h2>Proposal data unavailable</h2><p>The ledger could not supply trustworthy proposal data. Review the verification result above, then check the server log and repair the ledger before deciding.</p></section>"
                     );
                 }
-                for proposal in &pending {
-                    write_markup!(
-                        html,
-                        "<article><h3><a href=\"/review/{}?company={}\">{}</a></h3>",
-                        proposal.id,
-                        encode(company),
-                        &proposal.payload.description
-                    );
-                    summary(review, proposal, html)?;
-                    write_markup!(html, "</article>");
-                }
-                write_markup!(html, "</section>");
             }
         } else {
-            write_markup!(
-                html,
-                "<p>No companies yet. Ask your agent to create your books.</p>"
-            );
+            write_markup!(html, "<p>No companies yet. Ask your agent to create your books.</p>");
         }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        if matches!(error, CliError::NotFound(_) | CliError::Validation(_)) {
-            return Err(error);
-        }
-        eprintln!("Browser proposal data failed: {error}");
+        html.append(&ui::session_controls(session));
+        Ok(ui::page(
+            "Review queue",
+            "Your agent proposes. You review the full posting and decide.",
+            "/review",
+            &html,
+        )
+        .into_response())
+    })
+}
+
+fn render_proposals(
+    db: &Db,
+    authority: &ApprovalAuthority,
+    companies: &[db::CompanyRow],
+    company: &CompanySlug,
+    id: Option<&ProposalId>,
+    session: &HumanSession,
+) -> Result<Markup, CliError> {
+    if !companies.iter().any(|item| &item.slug == company) {
+        return Err(CliError::NotFound("company not found".into()));
+    }
+    let actor = authority.actor(db)?;
+    let reader = db.read();
+    let mut html =
+        markup!("<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">");
+    for item in companies {
         write_markup!(
             html,
-            "<section><h2>Proposal data unavailable</h2><p>The ledger could not supply trustworthy proposal data. Review the verification result above, then check the server log and repair the ledger before deciding.</p></section>"
+            "<option value=\"{}\"{}>{} ({})</option>",
+            &item.slug,
+            Attribute::Selected(&item.slug == company),
+            &item.name,
+            &item.slug
         );
-    } else {
-        html.append(&proposal_html);
     }
-    html.append(&ui::session_controls(session));
-    Ok(ui::page(
-        "Review queue",
-        "Your agent proposes. You review the full posting and decide.",
-        "/review",
-        &html,
-    )
-    .into_response())
+    write_markup!(
+        html,
+        "</select></label><button type=\"submit\">Show queue</button></form>"
+    );
+    if let Some(id) = id {
+        let proposal = proposals::get(reader, company, id)?;
+        proposal_detail(db, &proposal, session, &mut html)?;
+        return Ok(html);
+    }
+
+    let pending = proposals::list(reader, company, &actor, false)?;
+    write_markup!(html, "<section><h2>Pending proposals</h2>");
+    if pending.is_empty() {
+        write_markup!(
+            html,
+            "<p>No pending proposals. Ask your agent to propose a posting when work needs your review.</p>"
+        );
+    }
+    for proposal in &pending {
+        write_markup!(
+            html,
+            "<article><h3><a href=\"/review/{}?company={}\">{}</a></h3>",
+            proposal.id,
+            encode(company.as_str()),
+            &proposal.payload.description
+        );
+        summary(db, proposal, &mut html)?;
+        write_markup!(html, "</article>");
+    }
+    write_markup!(html, "</section>");
+    Ok(html)
 }
 
 fn verification_panel(
     verification: &Verification,
     session: &HumanSession,
-    company: Option<&str>,
+    company: Option<&CompanySlug>,
 ) -> Markup {
     let mut html = Markup::default();
     write_markup!(
@@ -483,19 +545,32 @@ fn verification_panel(
     }
     write_markup!(
         html,
-        "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input type=\"hidden\" name=\"company\" value=\"{}\"><button type=\"submit\">Re-run verification</button></form></section>",
+        "<form method=\"post\" action=\"/review/verify\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">",
         session.csrf_token(),
-        company.unwrap_or_default()
+    );
+    if let Some(company) = company {
+        write_markup!(
+            html,
+            "<input type=\"hidden\" name=\"company\" value=\"{}\">",
+            company
+        );
+    }
+    write_markup!(
+        html,
+        "<button type=\"submit\">Re-run verification</button></form></section>"
     );
     html
 }
 
-fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<(), CliError> {
+fn summary(db: &Db, proposal: &Proposal, html: &mut Markup) -> Result<(), CliError> {
     write_markup!(
         html,
         "<dl><dt>Company</dt><dd>{}</dd><dt>Amount (debit total)</dt><dd>{}</dd><dt>Proposer</dt><dd>{}</dd><dt>Proposer token ID</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Status</dt><dd>{}</dd><dt>Reason / purpose</dt><dd>{}</dd></dl>",
         &proposal.company_slug,
-        &money::minor(proposal.debit_total, &proposal.currency),
+        &money::ledger(Money::from_minor(
+            proposal.debit_total.into(),
+            proposal.currency
+        )),
         &proposal.proposer_uri,
         &proposal.proposer_jti,
         &proposal.created_at,
@@ -503,13 +578,12 @@ fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<()
         &proposal.payload.description
     );
     let limits = db::spend_limits::list(
-        review.db.conn(),
+        db.read(),
         &proposal.proposer_uri,
         Some(&proposal.company_slug),
     )?;
     write_markup!(html, "<p>Current spend-limit context: ");
-    let currency = Currency::from_code(&proposal.currency)
-        .map_err(|error| CliError::Validation(error.to_string()))?;
+    let currency = proposal.currency;
     if let Some(limit) = limits.iter().find(|limit| limit.currency() == currency) {
         let cap = |value: Option<Cap>| {
             value.map_or_else(
@@ -540,7 +614,7 @@ fn summary(review: &Review, proposal: &Proposal, html: &mut Markup) -> Result<()
 }
 
 fn proposal_detail(
-    review: &Review,
+    db: &Db,
     proposal: &Proposal,
     session: &HumanSession,
     html: &mut Markup,
@@ -551,7 +625,7 @@ fn proposal_detail(
         &proposal.payload.description,
         proposal.id
     );
-    summary(review, proposal, html)?;
+    summary(db, proposal, html)?;
     let posting = &proposal.payload;
     write_markup!(
         html,
@@ -566,7 +640,7 @@ fn proposal_detail(
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td></tr>",
             &entry.account_code,
             &entry.direction,
-            &money::minor(entry.amount, &posting.currency),
+            &money::ledger(Money::new(Amount::from(entry.amount), posting.currency)),
             entry.memo.as_deref().unwrap_or("Not recorded"),
             entry.tax_category.as_deref().unwrap_or("Not recorded")
         );
@@ -587,7 +661,10 @@ fn proposal_detail(
                 proposal.id,
                 session.csrf_token(),
                 &proposal.company_slug,
-                &money::minor(proposal.debit_total, &proposal.currency),
+                &money::ledger(Money::from_minor(
+                    proposal.debit_total.into(),
+                    proposal.currency
+                )),
                 proposal.id,
                 session.csrf_token(),
                 &proposal.company_slug
@@ -607,7 +684,7 @@ fn proposal_detail(
     write_markup!(
         html,
         "<p><a href=\"/review?company={}\">Back to pending proposals</a></p></section>",
-        encode(&proposal.company_slug)
+        encode(proposal.company_slug.as_str())
     );
     Ok(())
 }
@@ -615,7 +692,7 @@ fn proposal_detail(
 fn resolution_detail(
     proposal: &Proposal,
     resolution: &Resolution,
-    transaction: Option<i64>,
+    transaction: Option<TransactionId>,
     html: &mut Markup,
 ) {
     let resolver = match &resolution.by {
@@ -636,7 +713,7 @@ fn resolution_detail(
             html,
             "<p><a href=\"/transactions/{}?company={}\">View posted transaction</a></p>",
             id,
-            encode(&proposal.company_slug)
+            encode(proposal.company_slug.as_str())
         );
     }
 }

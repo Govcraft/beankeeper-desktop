@@ -17,8 +17,8 @@ workspace = true
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
 base64 = "0.23.1"
-beankeeper = { git = "https://github.com/Govcraft/beankeeper", version = "0.8.0", rev = "04e0c68e42be7a6c12f8997b6fbe5a2a3630beec" }
-beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", version = "0.28.0", rev = "04e0c68e42be7a6c12f8997b6fbe5a2a3630beec" }
+beankeeper = { git = "https://github.com/Govcraft/beankeeper", branch = "main" }
+beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", branch = "main" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 ed25519-dalek = "3.0.0"
@@ -47,6 +47,7 @@ zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2
 [dev-dependencies]
 assert_cmd = "2.2.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "form", "json"] }
+rusqlite = "0.39"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
 

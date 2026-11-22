@@ -6,7 +6,7 @@ use beankeeper_cli::{
         ScheduleRow, ScheduleSummary, TaxReport, VendorSummary, VendorThreshold, build_schedule_c,
         build_vendors, render_schedule_c_csv, render_vendors_csv,
     },
-    db::Db,
+    db::{Db, companies::CompanySlug},
 };
 use serde::Serialize;
 
@@ -35,7 +35,7 @@ pub(super) enum TaxData {
 impl TaxData {
     pub(super) fn read(
         db: &Db,
-        company: &str,
+        company: &CompanySlug,
         filters: &Filters,
         threshold: Option<&Threshold>,
         kind: TaxKind,
@@ -43,7 +43,7 @@ impl TaxData {
         let currency = resolve_currency(db, company, filters)?;
         let period = report_dates(filters)?;
         match kind {
-            TaxKind::Schedule => build_schedule_c(db, company, period, currency)
+            TaxKind::Schedule => build_schedule_c(db, company.as_str(), period, currency)
                 .map(Self::Schedule)
                 .map_err(report_error),
             TaxKind::Vendor => {
@@ -57,7 +57,7 @@ impl TaxData {
                     ),
                 };
                 let threshold = VendorThreshold::new(threshold).map_err(report_error)?;
-                build_vendors(db, company, period, threshold)
+                build_vendors(db, company.as_str(), period, threshold)
                     .map(Self::Vendor)
                     .map_err(report_error)
             }

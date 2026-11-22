@@ -1,7 +1,8 @@
-mod common;
+pub mod common;
 
+use beankeeper::types::AccountType;
 use beankeeper_cli::{
-    db::{self, Actor},
+    db,
     identity::{self, Admin, Granted, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, rpc, token};
@@ -13,15 +14,20 @@ use std::{
 };
 
 fn issue(ledger: &Ledger, name: &str) -> TestResult<Value> {
-    Ok(identity::issue(
-        ledger.db()?.conn(),
-        &Actor::new("owner"),
-        &IssueRequest {
-            name,
-            capabilities: &["ui/navigate".into()],
-            ttl: Duration::from_secs(3600),
-            public_key: None,
-            generate_key: true,
+    Ok(Granted::<Admin>::with_db(
+        &ledger.db()?,
+        ledger.owner(),
+        |grant| {
+            identity::issue(
+                grant,
+                &IssueRequest {
+                    name,
+                    capabilities: &["ui/navigate".into()],
+                    ttl: Duration::from_secs(3600),
+                    public_key: None,
+                    generate_key: true,
+                },
+            )
         },
     )?)
 }
@@ -167,9 +173,7 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
     server.initialize(Some(reader))?;
     let db = ledger.db()?;
     for enforce in [true, false] {
-        Granted::<Admin>::with(db.conn(), &owner, |grant| {
-            db::audit::set_policy(grant, enforce)
-        })?;
+        Granted::<Admin>::with_db(&db, &owner, |grant| db::audit::set_policy(grant, enforce))?;
         for bearer in [reader, token(&ledger.writer)?, nav] {
             let tools = rpc(server.request("tools/list", json!({}), Some(bearer))?)?;
             let tools = tools["result"]["tools"].as_array().ok_or("tools")?;
@@ -234,11 +238,10 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
             .status(),
         401
     );
-    identity::revoke(
-        ledger.db()?.conn(),
-        &Actor::new("owner"),
-        navigator["token_jti"].as_str().ok_or("jti")?,
-    )?;
+    let jti = navigator["token_jti"].as_str().ok_or("jti")?;
+    Granted::<Admin>::with_db(&ledger.db()?, ledger.owner(), |grant| {
+        identity::revoke(grant, jti)
+    })?;
     assert_eq!(
         server
             .request(
@@ -427,17 +430,18 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
 
 fn report_navigation_ledger() -> TestResult<Ledger> {
     let ledger = Ledger::new()?;
-    db::create_account(
-        ledger.db()?.conn(),
-        &Actor::new("owner"),
-        &db::CreateAccountParams {
-            company_slug: "acme",
-            code: "1000",
-            name: "Cash",
-            account_type: "asset",
-            default_tax_category: None,
-        },
-    )?;
+    Granted::<Admin>::with_db(&ledger.db()?, ledger.owner(), |grant| {
+        db::create_account(
+            grant,
+            &db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "1000",
+                name: "Cash",
+                account_type: AccountType::Asset,
+                default_tax_category: None,
+            },
+        )
+    })?;
     Ok(ledger)
 }
 

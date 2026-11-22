@@ -12,7 +12,9 @@ use beankeeper_cli::{
     },
     db::{
         self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow,
-        companies::Company, transactions::TransactionValueFilter,
+        companies::{Company, CompanySlug},
+        ids::TransactionId,
+        transactions::TransactionValueFilter,
     },
     error::CliError,
 };
@@ -160,7 +162,7 @@ fn company_form(
             html,
             "<option value=\"{}\"{}>{} ({})</option>",
             &item.slug,
-            Attribute::Selected(item.slug == company),
+            Attribute::Selected(item.slug.as_str() == company),
             &item.name,
             &item.slug
         );
@@ -285,11 +287,11 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
             TRANSACTIONS,
         ),
     };
-    let companies = db::list_companies(db.conn())?;
+    let companies = db::list_companies(db.read())?;
     let selected = query
         .company
-        .as_deref()
-        .or_else(|| companies.first().map(|company| company.slug.as_str()));
+        .as_ref()
+        .or_else(|| companies.first().map(|company| &company.slug));
     let Some(company) = selected else {
         let note = markup!(
             "<p class=\"empty\">No companies yet. Ask your agent to initialize your books and create a company.</p>"
@@ -306,29 +308,38 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
             nav,
         });
     };
-    if !companies.iter().any(|item| item.slug == company) {
-        return Err(ViewError::NotFound);
-    }
+    let book = Company::bind(db.read(), company.clone())?;
     if let Some(account) = query.account.as_deref() {
-        db::get_account(db.conn(), company, account)?;
+        db::get_account(&book, account)?;
     }
     let mut content = if matches!(route, LedgerRoute::Home | LedgerRoute::Summary) {
         Markup::default()
     } else {
-        company_form(&companies, company, query, path)
+        company_form(&companies, company.as_str(), query, path)
     };
     match route {
         LedgerRoute::Home => {
-            financial_snapshot(db, company, query, SnapshotView::Home, &mut content)?;
+            financial_snapshot(
+                db,
+                company.as_str(),
+                query,
+                SnapshotView::Home,
+                &mut content,
+            )?;
         }
         LedgerRoute::Summary => {
-            financial_snapshot(db, company, query, SnapshotView::Detail, &mut content)?;
+            financial_snapshot(
+                db,
+                company.as_str(),
+                query,
+                SnapshotView::Detail,
+                &mut content,
+            )?;
         }
-        LedgerRoute::Accounts => accounts(db, company, query, &mut content)?,
-        LedgerRoute::Register => render_register(db, company, query, &mut content)?,
+        LedgerRoute::Accounts => accounts(&book, query, &mut content)?,
+        LedgerRoute::Register => render_register(db, &book, query, &mut content)?,
         LedgerRoute::Transaction(id) => {
-            let id = i64::from(id);
-            detail(db, company, query, id, &mut content)?;
+            detail(db, &book, query, id.into(), &mut content)?;
         }
     }
     Ok(ViewPage {
@@ -341,11 +352,11 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
 
 fn render_register(
     db: &Db,
-    company: &str,
+    book: &Company<'_>,
     query: &Filters,
     content: &mut Markup,
 ) -> Result<(), ViewError> {
-    register(db, company, query, RegisterSection::Primary, content)?;
+    register(db, book, query, RegisterSection::Primary, content)?;
     if let Some(comparison) = query.comparison_filters() {
         write_markup!(
             content,
@@ -361,13 +372,7 @@ fn render_register(
                 .map(|date| date.to_string())
                 .unwrap_or_default()
         );
-        register(
-            db,
-            company,
-            &comparison,
-            RegisterSection::Comparison,
-            content,
-        )?;
+        register(db, book, &comparison, RegisterSection::Comparison, content)?;
         write_markup!(content, "</section>");
     }
     Ok(())
@@ -418,12 +423,12 @@ impl SnapshotView {
             ..SummaryArgs::default()
         };
         if let Self::Detail = self {
-            args.from = query.dates.from().map(|date| date.to_string());
-            args.to = query.dates.to().map(|date| date.to_string());
+            args.from = query.dates.from().map(|date| date.date().into());
+            args.to = query.dates.to().map(|date| date.date().into());
             if let Some(comparison) = query.comparison {
                 let bounds = comparison.bounds();
-                args.compare_from = bounds.from().map(|date| date.to_string());
-                args.compare_to = bounds.to().map(|date| date.to_string());
+                args.compare_from = bounds.from().map(|date| date.date().into());
+                args.compare_to = bounds.to().map(|date| date.date().into());
             }
             args.cash_account = selected_accounts(query.cash_account.as_ref());
             args.receivable_account = selected_accounts(query.receivable_account.as_ref());
@@ -449,7 +454,7 @@ fn financial_snapshot(
         "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>"
     );
     let currency = query.currency.as_ref().map_or_else(
-        || resolve_report_currency(db.conn(), company, None),
+        || resolve_report_currency(db.read(), company, None),
         |currency| Ok(currency.ledger()),
     );
     match currency {
@@ -520,11 +525,11 @@ fn snapshot_links(html: &mut Markup, company: Option<&str>, currency: Option<&Cu
     write_markup!(html, "</ul></section>");
 }
 
-fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
+fn accounts(book: &Company<'_>, query: &Filters, html: &mut Markup) -> Result<(), ViewError> {
+    let company = book.slug().as_str();
     let rows = db::list_accounts(
-        db.conn(),
+        book,
         &db::ListAccountParams {
-            company_slug: company,
             type_filter: None,
             name_filter: None,
         },
@@ -666,8 +671,8 @@ fn matches_extra(query: &Filters, txn: &TransactionRow, entries: &[EntryRow]) ->
                 .account
                 .as_deref()
                 .is_some_and(|account| entry.account_code != account)
-            || min.is_some_and(|min| entry.amount < min)
-            || max.is_some_and(|max| entry.amount > max)
+            || min.is_some_and(|min| entry.amount.minor_units() < min)
+            || max.is_some_and(|max| entry.amount.minor_units() > max)
         {
             continue;
         }
@@ -690,7 +695,7 @@ fn register_values(
     let currency = match (query.currency.as_ref(), min, max) {
         (Some(currency), _, _) => currency.ledger(),
         (None, None, None) => return Ok(None),
-        (None, _, _) => resolve_report_currency(db.conn(), company, None).map_err(|error| {
+        (None, _, _) => resolve_report_currency(db.read(), company, None).map_err(|error| {
             if matches!(error, CliError::Validation(_)) {
                 ViewError::Invalid("Choose a currency to filter amounts in these books.")
             } else {
@@ -710,34 +715,36 @@ fn register_values(
 
 fn register(
     db: &Db,
-    company: &str,
+    book: &Company<'_>,
     query: &Filters,
     section: RegisterSection,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
-    let book = Company::bind(db.conn(), company.parse()?)?;
-    let mut params = ListTransactionParams::for_company(book.slug().as_str());
-    params.account_filter = query.account.as_deref();
-    params.tax_category_filter = query.category.as_deref();
-    let from = query.dates.from().map(|date| date.to_string());
-    let to = query.dates.to().map(|date| date.to_string());
-    params.from_date = query.dates.from().map(Date::date);
-    params.to_date = query.dates.to().map(Date::date);
-    params.value_filter = register_values(db, company, query)?;
-    let total = db::count_transactions(db.conn(), &params)?;
+    let company = book.slug().as_str();
+    let from = query.dates.from();
+    let to = query.dates.to();
+    let mut params = ListTransactionParams {
+        account_filter: query.account.as_deref(),
+        tax_category_filter: query.category.as_deref(),
+        from_date: from.map(Date::date),
+        to_date: to.map(Date::date),
+        value_filter: register_values(db, company, query)?,
+        ..ListTransactionParams::default()
+    };
+    let total = db::count_transactions(book, &params)?;
     let start = query.offset.position();
     let mut cursor = start;
     let mut rows = Vec::new();
     while rows.len() < PAGE_SIZE && cursor < total && cursor - start < SCAN_LIMIT {
         params.offset = cursor;
         params.limit = 50;
-        let batch = db::list_transactions(db.conn(), &params)?;
+        let batch = db::list_transactions(book, &params)?;
         if batch.is_empty() {
             break;
         }
         for txn in batch {
             cursor += 1;
-            let entries = db::get_entries_for_transaction(&book, txn.id)?;
+            let entries = db::get_entries_for_transaction(book, txn.id)?;
             if matches_extra(query, &txn, &entries) {
                 rows.push((txn, entries));
             }
@@ -753,8 +760,8 @@ fn register(
     for (label, value) in [
         ("Tax category", query.category.as_deref()),
         ("Payee (exact)", query.payee.as_deref()),
-        ("From date", from.as_deref()),
-        ("Through date", to.as_deref()),
+        ("From date", from.map(|date| date.to_string()).as_deref()),
+        ("Through date", to.map(|date| date.to_string()).as_deref()),
     ] {
         if let Some(value) = value {
             write_markup!(html, "<p>{}: {}.</p>", label, value);
@@ -806,21 +813,22 @@ fn field(html: &mut Markup, label: &str, value: Option<&str>) {
 
 fn detail(
     db: &Db,
-    company: &str,
+    book: &Company<'_>,
     query: &Filters,
-    id: i64,
+    id: TransactionId,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
-    let (txn, entries) = db::get_transaction(db.conn(), company, id)?;
+    let (txn, entries) = db::get_transaction(book, id)?;
     write_markup!(
         html,
         "<section><h2>Transaction {}: {}</h2><dl>",
         id,
         &txn.description
     );
+    let date = txn.date.to_string();
     for (label, value) in [
-        ("Company", Some(company)),
-        ("Date", Some(txn.date.as_str())),
+        ("Company", Some(book.slug().as_str())),
+        ("Date", Some(date.as_str())),
         ("Currency", Some(txn.currency.code())),
         ("Posted at", Some(txn.posted_at.as_str())),
         ("Reference", txn.reference.as_deref()),
@@ -850,12 +858,12 @@ fn detail(
         );
     }
     write_markup!(html, "</tbody></table></div></section>");
-    audit(db, company, query, &txn, &entries, html)
+    audit(db, book.slug(), query, &txn, &entries, html)
 }
 
 fn audit(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     query: &Filters,
     txn: &TransactionRow,
     entries: &[EntryRow],
@@ -863,6 +871,7 @@ fn audit(
 ) -> Result<(), ViewError> {
     let start = query.offset.position();
     let params = ListAuditParams {
+        actor: None,
         agent_uri: None,
         company_slug: Some(company),
         entity: None,
@@ -870,8 +879,8 @@ fn audit(
         limit: SCAN_LIMIT,
         offset: start,
     };
-    let total = db::count_audit(db.conn(), &params)?;
-    let rows = db::list_audit(db.conn(), &params)?;
+    let total = db::count_audit(db.read(), &params)?;
+    let rows = db::list_audit(db.read(), &params)?;
     let count = i64::try_from(rows.len())
         .map_err(|_| ViewError::Invalid("The audit trail is too large to paginate."))?;
     let cursor = start + count;
@@ -928,14 +937,18 @@ fn audit(
         write_markup!(
             html,
             "<p class=\"note\">More audit rows remain. <a rel=\"next\" href=\"{}\">Continue audit trail</a></p>",
-            query.url(&format!("/transactions/{}", txn.id), company, cursor)
+            query.url(
+                &format!("/transactions/{}", txn.id),
+                company.as_str(),
+                cursor
+            )
         );
     }
     if start > 0 {
         write_markup!(
             html,
             "<a href=\"{}\">Back to newest audit rows</a>",
-            query.url(&format!("/transactions/{}", txn.id), company, 0)
+            query.url(&format!("/transactions/{}", txn.id), company.as_str(), 0)
         );
     }
     write_markup!(html, "</section>");
@@ -946,7 +959,11 @@ fn audit(
 mod tests {
     use super::filters::ViewQuery;
     use super::*;
-    use beankeeper_cli::db::{Actor, ConflictStrategy, PostEntryParams, PostTransactionParams};
+    use beankeeper::types::{AccountType, DebitOrCredit};
+    use beankeeper_cli::{
+        db::{Actor, ConflictStrategy, PostEntryParams, PostTransactionParams},
+        identity::{Admin, Granted, Post, Reconcile},
+    };
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -960,75 +977,86 @@ mod tests {
 
     fn fixture() -> TestResult<Db> {
         let db = Db::open_in_memory()?;
-        let owner = Actor::new("owner");
-        db::create_company(db.conn(), &owner, "acme", "Acme & Sons", None)?;
-        db::create_company(db.conn(), &owner, "other", "Other", None)?;
+        let owner = Actor::new("owner".parse()?);
+        Granted::<Admin>::with_db(&db, &owner, |grant| {
+            db::create_company(grant, &"acme".parse()?, &"Acme & Sons".parse()?, None)
+        })?;
+        Granted::<Admin>::with_db(&db, &owner, |grant| {
+            db::create_company(grant, &"other".parse()?, &"Other".parse()?, None)
+        })?;
         for company in ["acme", "other"] {
-            db::create_account(
-                db.conn(),
-                &owner,
-                &db::CreateAccountParams {
-                    company_slug: company,
-                    code: "1000",
-                    name: "Cash <bank>",
-                    account_type: "asset",
-                    default_tax_category: None,
-                },
-            )?;
-            db::create_account(
-                db.conn(),
-                &owner,
-                &db::CreateAccountParams {
-                    company_slug: company,
-                    code: "4000",
-                    name: "Sales",
-                    account_type: "revenue",
-                    default_tax_category: None,
-                },
-            )?;
+            Granted::<Admin>::with_db(&db, &owner, |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &company.parse()?,
+                        code: "1000",
+                        name: "Cash <bank>",
+                        account_type: AccountType::Asset,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
+            Granted::<Admin>::with_db(&db, &owner, |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &company.parse()?,
+                        code: "4000",
+                        name: "Sales",
+                        account_type: AccountType::Revenue,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
         }
         Ok(db)
     }
 
-    fn post(
+    pub(super) fn post(
         db: &Db,
         description: &str,
         reference: &str,
         amount: i64,
         currency: &str,
         actor: &Actor,
-    ) -> TestResult<i64> {
+    ) -> TestResult<TransactionId> {
         let entries = [
             PostEntryParams {
                 account_code: "1000".into(),
-                direction: "debit".into(),
-                amount,
+                direction: DebitOrCredit::Debit,
+                amount: amount.try_into()?,
                 memo: Some("<memo>".into()),
                 tax_category: None,
             },
             PostEntryParams {
                 account_code: "4000".into(),
-                direction: "credit".into(),
-                amount,
+                direction: DebitOrCredit::Credit,
+                amount: amount.try_into()?,
                 memo: None,
                 tax_category: Some("sales".into()),
             },
         ];
-        let result = db::post_transaction(
-            db.conn(),
-            &PostTransactionParams {
-                company_slug: "acme",
-                description,
-                metadata: Some("{\"note\":\"<script>\"}"),
-                currency,
-                date: "2024-02-29",
-                entries: &entries,
-                correlate: None,
-                reference: Some(reference),
-                on_conflict: ConflictStrategy::Error,
-                actor,
-            },
-        )?;
+        let currency = currency.parse()?;
+        let result = Granted::<Post>::with_db(db, actor, |grant| {
+            db::post_transaction(
+                grant,
+                &PostTransactionParams {
+                    company_slug: &"acme".parse()?,
+                    description,
+                    metadata: Some("{\"note\":\"<script>\"}"),
+                    currency,
+                    date: "2024-02-29".parse().map_err(|error: chrono::ParseError| {
+                        beankeeper_cli::error::CliError::Validation(error.to_string())
+                    })?,
+                    entries: &entries,
+                    correlate: None,
+                    reference: Some(reference),
+                    on_conflict: ConflictStrategy::Error,
+                    actor,
+                },
+            )
+        })?;
         match result {
             db::PostResult::Created(id) => Ok(id),
             db::PostResult::Skipped(_) => Err("expected created transaction".into()),
@@ -1128,7 +1156,7 @@ mod tests {
             "invoice&1",
             12345,
             "USD",
-            &Actor::new("owner"),
+            &Actor::new("owner".parse()?),
         )?;
         let query = ViewQuery {
             company: Some("acme".into()),
@@ -1181,7 +1209,7 @@ mod tests {
             "INVOICE%_ONE",
             250,
             "USD",
-            &Actor::new("owner"),
+            &Actor::new("owner".parse()?),
         )?;
         post(
             &db,
@@ -1189,17 +1217,18 @@ mod tests {
             "different",
             500,
             "USD",
-            &Actor::new("owner"),
+            &Actor::new("owner".parse()?),
         )?;
-        let (_, entries) = db::get_transaction(db.conn(), "acme", id)?;
-        db::set_entry_status(
-            db.conn(),
-            &Actor::new("owner"),
-            "acme",
-            id.try_into()?,
-            entries[0].id.try_into()?,
-            db::EntryStatus::Cleared,
-        )?;
+        let (_, entries) = db::get_transaction(&Company::bind(db.read(), "acme".parse()?)?, id)?;
+        Granted::<Reconcile>::with_db(&db, &Actor::new("owner".parse()?), |grant| {
+            db::set_entry_status(
+                grant,
+                &"acme".parse()?,
+                id,
+                entries[0].id,
+                db::EntryStatus::Cleared,
+            )
+        })?;
         let query = ViewQuery {
             company: Some("acme".into()),
             account: Some("1000".into()),
@@ -1252,7 +1281,7 @@ mod tests {
             ("BHD", 1234, "BHD 1.234"),
             ("MXN", 4_032_470, "MX$40,324.70"),
         ] {
-            let id = post(&db, code, code, amount, code, &Actor::new("owner"))?;
+            let id = post(&db, code, code, amount, code, &Actor::new("owner".parse()?))?;
             let query = ViewQuery {
                 company: Some("acme".into()),
                 ..Default::default()
@@ -1284,7 +1313,7 @@ mod tests {
                 &format!("ref{n}"),
                 100,
                 "USD",
-                &Actor::new("owner"),
+                &Actor::new("owner".parse()?),
             )?;
         }
         let query = ViewQuery {
@@ -1323,7 +1352,14 @@ mod tests {
     #[test]
     fn sparse_search_and_audit_scans_disclose_truncation_and_continue() -> TestResult {
         let db = fixture()?;
-        let first_id = post(&db, "First", "first", 100, "USD", &Actor::new("owner"))?;
+        let first_id = post(
+            &db,
+            "First",
+            "first",
+            100,
+            "USD",
+            &Actor::new("owner".parse()?),
+        )?;
         for n in 1..1_001 {
             post(
                 &db,
@@ -1331,10 +1367,17 @@ mod tests {
                 &format!("ref{n}"),
                 100,
                 "USD",
-                &Actor::new("owner"),
+                &Actor::new("owner".parse()?),
             )?;
         }
-        post(&db, "Needle", "last", 100, "USD", &Actor::new("owner"))?;
+        post(
+            &db,
+            "Needle",
+            "last",
+            100,
+            "USD",
+            &Actor::new("owner".parse()?),
+        )?;
         let query = ViewQuery {
             company: Some("acme".into()),
             search: Some("Needle".into()),
@@ -1400,8 +1443,22 @@ mod tests {
     #[test]
     fn mixed_currency_snapshot_requires_currency_before_aggregating() -> TestResult {
         let db = fixture()?;
-        post(&db, "USD sale", "usd", 100, "USD", &Actor::new("owner"))?;
-        post(&db, "MXN sale", "mxn", 200, "MXN", &Actor::new("owner"))?;
+        post(
+            &db,
+            "USD sale",
+            "usd",
+            100,
+            "USD",
+            &Actor::new("owner".parse()?),
+        )?;
+        post(
+            &db,
+            "MXN sale",
+            "mxn",
+            200,
+            "MXN",
+            &Actor::new("owner".parse()?),
+        )?;
         let query = ViewQuery {
             company: Some("acme".into()),
             ..Default::default()
@@ -1434,7 +1491,9 @@ mod tests {
                 .as_str()
                 .contains("No companies yet")
         );
-        db::create_company(db.conn(), &Actor::new("owner"), "empty", "Empty", None)?;
+        Granted::<Admin>::with_db(&db, &Actor::new("owner".parse()?), |grant| {
+            db::create_company(grant, &"empty".parse()?, &"Empty".parse()?, None)
+        })?;
         assert!(
             render_query(&db, "/accounts", &ViewQuery::default())?
                 .content
@@ -1468,9 +1527,10 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::filters::ViewQuery;
-    use super::tests::render_query;
+    use super::tests::{post, render_query};
     use super::*;
-    use beankeeper_cli::identity::{self, IssueRequest};
+    use beankeeper::types::AccountType;
+    use beankeeper_cli::identity::{self, Admin, Granted, IssueRequest};
     use std::time::Duration;
 
     #[test]
@@ -1480,73 +1540,46 @@ mod identity_tests {
             &dir.path().join("books.db"),
             Some(&"test-passphrase".into()),
         )?;
-        let owner = db::Actor::new("owner");
-        db::create_company(db.conn(), &owner, "acme", "Acme", None)?;
-        for (code, name, account_type) in [("1000", "Cash", "asset"), ("4000", "Sales", "revenue")]
-        {
-            db::create_account(
-                db.conn(),
-                &owner,
-                &db::CreateAccountParams {
-                    company_slug: "acme",
-                    code,
-                    name,
-                    account_type,
-                    default_tax_category: None,
-                },
-            )?;
+        let owner = db::Actor::new("owner".parse()?);
+        Granted::<Admin>::with_db(&db, &owner, |grant| {
+            db::create_company(grant, &"acme".parse()?, &"Acme".parse()?, None)
+        })?;
+        for (code, name, account_type) in [
+            ("1000", "Cash", AccountType::Asset),
+            ("4000", "Sales", AccountType::Revenue),
+        ] {
+            Granted::<Admin>::with_db(&db, &owner, |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &"acme".parse()?,
+                        code,
+                        name,
+                        account_type,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
         }
-        identity::init_root(db.conn(), &owner)?;
-        let issued = identity::issue(
-            db.conn(),
-            &owner,
-            &IssueRequest {
-                name: "bookkeeper",
-                capabilities: &["ledger/read".into(), "ledger/post".into()],
-                ttl: Duration::from_secs(3600),
-                public_key: None,
-                generate_key: true,
-            },
-        )?;
+        Granted::<Admin>::with_db(&db, &owner, identity::init_root)?;
+        let issued = Granted::<Admin>::with_db(&db, &owner, |grant| {
+            identity::issue(
+                grant,
+                &IssueRequest {
+                    name: "bookkeeper",
+                    capabilities: &["ledger/read".into(), "ledger/post".into()],
+                    ttl: Duration::from_secs(3600),
+                    public_key: None,
+                    generate_key: true,
+                },
+            )
+        })?;
         let token = issued["token"].as_str().ok_or("missing token")?;
-        let verified = identity::verify(db.conn(), token)?;
+        let verified = identity::verify(db.read(), token)?;
         let uri = verified.uri().to_owned();
         let jti = verified.jti().to_owned();
-        let actor = db::Actor::new("assistant").with_identity(verified);
-        let entries = [
-            db::PostEntryParams {
-                account_code: "1000".into(),
-                direction: "debit".into(),
-                amount: 100,
-                memo: None,
-                tax_category: None,
-            },
-            db::PostEntryParams {
-                account_code: "4000".into(),
-                direction: "credit".into(),
-                amount: 100,
-                memo: None,
-                tax_category: None,
-            },
-        ];
-        let result = db::post_transaction(
-            db.conn(),
-            &db::PostTransactionParams {
-                company_slug: "acme",
-                description: "Agent sale",
-                metadata: None,
-                currency: "USD",
-                date: "2024-01-01",
-                entries: &entries,
-                correlate: None,
-                reference: None,
-                on_conflict: db::ConflictStrategy::Error,
-                actor: &actor,
-            },
-        )?;
-        let db::PostResult::Created(id) = result else {
-            return Err("expected created".into());
-        };
+        let actor = db::Actor::new("assistant".parse()?).with_identity(verified);
+        let id = post(&db, "Agent sale", "identity-fixture", 100, "USD", &actor)?;
         let page = render_query(
             &db,
             &format!("/transactions/{id}"),

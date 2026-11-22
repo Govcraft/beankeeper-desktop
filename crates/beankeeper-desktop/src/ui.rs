@@ -129,7 +129,7 @@ async fn report(
     uri: Uri,
     query: Result<Query<ReportQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let Ok(Query(mut query)) = query else {
+    let Ok(Query(query)) = query else {
         return (
             StatusCode::BAD_REQUEST,
             page(
@@ -141,17 +141,14 @@ async fn report(
         )
             .into_response();
     };
-    if query.filters.company.is_none() {
-        query.filters.company = state.company.as_ref().map(ToString::to_string);
-    }
     let result = tokio::task::spawn_blocking(move || {
-        let query = match query.parse(uri.path()) {
+        let query = match query.parse_with_company(uri.path(), state.company) {
             Ok(query) => query,
             Err(error) => return Ok(Err(error)),
         };
         let db = state.db.lock().map_err(|_| ())?;
-        let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
-        Ok::<_, ()>(reports::render(&db, uri.path(), &query))
+        db.read_snapshot(|_| Ok(reports::render(&db, uri.path(), &query)))
+            .map_err(|_| ())
     })
     .await;
     match result {
@@ -213,7 +210,7 @@ async fn view(
     uri: Uri,
     query: Result<Query<ViewQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let Ok(Query(mut query)) = query else {
+    let Ok(Query(query)) = query else {
         return (
             StatusCode::BAD_REQUEST,
             page(
@@ -228,20 +225,17 @@ async fn view(
         )
             .into_response();
     };
-    if query.company.is_none() {
-        query.company = state.company.as_ref().map(ToString::to_string);
-    }
     let db = state.db;
     let path = uri.path().to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let query = match query.parse() {
-            Ok(query) => query,
+            Ok(query) => query.with_configured_company(state.company),
             Err(error) => return Ok(Err(error)),
         };
         let db = db.lock().map_err(|_| ())?;
         // Keep all reads for this page in one consistent upstream SQLite snapshot.
-        let _snapshot = db.conn().unchecked_transaction().map_err(|_| ())?;
-        Ok::<_, ()>(views::render(&db, &path, &query))
+        db.read_snapshot(|_| Ok(views::render(&db, &path, &query)))
+            .map_err(|_| ())
     })
     .await;
     match result {

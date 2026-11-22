@@ -1,7 +1,10 @@
 use beankeeper::types::{AccountType, Money};
 use beankeeper_cli::{
     commands::report::{compute_balance_sheet, compute_income_statement},
-    db::{self, BudgetCoverage, BudgetVarianceParams, BudgetVarianceReport, Db},
+    db::{
+        self, BudgetCoverage, BudgetVarianceParams, BudgetVarianceReport, Db,
+        companies::{Company, CompanySlug},
+    },
     output::statements::{BalanceSheet, IncomeStatement, StatementSection},
 };
 
@@ -19,27 +22,27 @@ use super::{report_dates, report_end, report_error, resolve_currency, table_star
 
 pub(super) fn read_income(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     filters: &Filters,
 ) -> Result<IncomeStatement, ViewError> {
     let dates = report_dates(filters)?;
     let currency = resolve_currency(db, company, filters)?;
-    compute_income_statement(db, company, dates, currency).map_err(report_error)
+    compute_income_statement(db, company.as_str(), dates, currency).map_err(report_error)
 }
 
 pub(super) fn read_balance(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     filters: &Filters,
 ) -> Result<BalanceSheet, ViewError> {
     let as_of = report_end(filters);
     let currency = resolve_currency(db, company, filters)?;
-    compute_balance_sheet(db, company, as_of, currency).map_err(report_error)
+    compute_balance_sheet(db, company.as_str(), as_of, currency).map_err(report_error)
 }
 
 pub(super) fn read_budget(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     filters: &Filters,
     budget: Option<BudgetWindow>,
 ) -> Result<BudgetVarianceReport, ViewError> {
@@ -48,7 +51,7 @@ pub(super) fn read_budget(
         .months();
     let currency = resolve_currency(db, company, filters)?;
     db::compute_budget_variance(
-        db.conn(),
+        db,
         &BudgetVarianceParams {
             company_slug: company,
             currency,
@@ -69,7 +72,7 @@ pub(super) fn income_dates(statement: &IncomeStatement) -> Result<DateBounds, Vi
 
 pub(super) fn income_context(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     statement: &IncomeStatement,
 ) -> Result<Markup, ViewError> {
     let dates = statement.dates();
@@ -86,16 +89,14 @@ pub(super) fn income_context(
     }
     // A zero net balance can contain offsetting postings. Check gross activity
     // with the same company, currency and inclusive dates as the statement.
-    let from = dates.from().to_string();
-    let to = dates.to().to_string();
+    let book = Company::bind(db.read(), company.clone())?;
     let currency = statement.currency();
     for account_type in [AccountType::Revenue, AccountType::Expense] {
         let balances = db::compute_trial_balance(
-            db.conn(),
-            company,
-            Some(account_type.code()),
-            Some(&from),
-            Some(&to),
+            &book,
+            Some(account_type),
+            Some(dates.from()),
+            Some(dates.to()),
             currency,
         )?;
         if balances
@@ -109,7 +110,7 @@ pub(super) fn income_context(
         html,
         "<p class=\"empty\">No revenue or expense activity in this range for {}. Choose different dates above to see another period, or <a href=\"/transactions?company={}&amp;currency={}\">view company transactions across all dates</a>.</p>",
         currency.code(),
-        encode(company),
+        encode(company.as_str()),
         encode(currency.code())
     );
     Ok(html)

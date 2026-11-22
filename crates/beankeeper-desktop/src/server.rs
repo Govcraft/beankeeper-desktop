@@ -103,7 +103,12 @@ pub fn application(
         },
     )?;
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
-    let review = review::router(review_db, cli.company.clone(), pairing.clone())?;
+    let review = review::router(
+        review_db,
+        cli.company.clone(),
+        pairing.clone(),
+        &cli.db.with_extension("owner-token"),
+    )?;
     drop(passphrase);
     let fallback = cli.agent_token.clone();
     let mcp = mcp.layer(middleware::from_fn_with_state(
