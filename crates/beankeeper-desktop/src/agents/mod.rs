@@ -20,7 +20,7 @@ use crate::{
     output::{Envelope, Metadata},
     service,
 };
-use adapters::{Agent, Locations};
+use adapters::{Agent, ExtensionRegistration, Locations};
 use config::{Change, Registration};
 
 /// Detect, register or verify a user's local agent connections.
@@ -69,6 +69,7 @@ enum AgentError {
     Home,
     Binary(io::Error),
     InvalidBinary(PathBuf),
+    ClaudeProfileAmbiguous,
     Invalid(PathBuf),
     Conflict(PathBuf),
     Io(PathBuf, io::Error),
@@ -79,6 +80,7 @@ impl AgentError {
         match self {
             Self::Home => "AGENT_HOME_UNAVAILABLE",
             Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
+            Self::ClaudeProfileAmbiguous => "AGENT_CLAUDE_PROFILE_AMBIGUOUS",
             Self::Invalid(_) => "AGENT_INVALID_CONFIG",
             Self::Conflict(_) => "AGENT_CONFIG_CONFLICT",
             Self::Io(..) => "AGENT_CONFIG_IO",
@@ -97,6 +99,9 @@ impl fmt::Display for AgentError {
                 f,
                 "MCP clients need an absolute Unicode executable path: {}",
                 path.display()
+            ),
+            Self::ClaudeProfileAmbiguous => f.write_str(
+                "Several Claude Desktop profiles were found. Set CLAUDE_USER_DATA_DIR to the absolute path of the profile Claude Desktop is using, then retry.",
             ),
             Self::Invalid(path) => write!(
                 f,
@@ -153,6 +158,8 @@ enum State {
     Configured,
     Disconnected,
     ExtensionManaged,
+    ExtensionDisabled,
+    ExtensionBlocked,
     Error,
 }
 
@@ -372,7 +379,11 @@ fn check_agent(
     operation: Operation,
     explicit: bool,
 ) -> ClientStatus {
-    let Some(adapter) = agent.adapter(locations) else {
+    let adapter = match agent.adapter(locations) {
+        Ok(adapter) => adapter,
+        Err(error) => return ClientStatus::new(agent, State::Error, "").failure(error.into()),
+    };
+    let Some(adapter) = adapter else {
         let message = "No supported local MCP configuration is available. Use an agent that can connect to the local Beankeeper service.";
         let status = ClientStatus::new(agent, State::Unsupported, message);
         return if explicit {
@@ -390,23 +401,10 @@ fn check_agent(
             status
         };
     }
-    let extension_managed = match adapter.extension_installed() {
-        Ok(installed) => installed,
+    match adapter.extension_registration() {
+        Ok(Some(registration)) => return extension_status(agent, operation, registration),
+        Ok(None) => {}
         Err(error) => return ClientStatus::new(agent, State::Error, "").failure(error.into()),
-    };
-    if extension_managed {
-        let mut status = ClientStatus::new(
-            agent,
-            State::ExtensionManaged,
-            "The Beankeeper extension manages this connection.",
-        );
-        if matches!(operation, Operation::Disconnect) {
-            status = status.failure(Failure::new(
-                "AGENT_EXTENSION_MANAGED",
-                "Remove the Beankeeper extension in Claude Desktop Settings to disconnect it.",
-            ));
-        }
-        return status;
     }
     let outcome = match operation {
         Operation::Connect => adapter.change(binary, Change::Connect).map(|()| {
@@ -439,6 +437,39 @@ fn check_agent(
     };
     status.config = Some(adapter.config);
     status
+}
+
+fn extension_status(
+    agent: Agent,
+    operation: Operation,
+    registration: ExtensionRegistration,
+) -> ClientStatus {
+    let (state, message, problem) = match registration {
+        ExtensionRegistration::Enabled => (
+            State::ExtensionManaged,
+            "The Beankeeper extension manages this connection.",
+            None,
+        ),
+        ExtensionRegistration::Disabled => (
+            State::ExtensionDisabled,
+            "Enable the Beankeeper extension in Claude Desktop Settings, then retry.",
+            Some("AGENT_EXTENSION_DISABLED"),
+        ),
+        ExtensionRegistration::Blocked => (
+            State::ExtensionBlocked,
+            "Ask your Claude workspace administrator to allow the Beankeeper extension.",
+            Some("AGENT_EXTENSION_BLOCKED"),
+        ),
+    };
+    let status = ClientStatus::new(agent, state, message);
+    match (operation, problem) {
+        (Operation::Disconnect, _) => status.failure(Failure::new(
+            "AGENT_EXTENSION_MANAGED",
+            "Remove the Beankeeper extension in Claude Desktop Settings to disconnect it.",
+        )),
+        (Operation::Doctor, Some(code)) => status.failure(Failure::new(code, message)),
+        _ => status,
+    }
 }
 
 fn registration_status(
