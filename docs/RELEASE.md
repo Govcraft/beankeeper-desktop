@@ -9,10 +9,11 @@ required to build or merge this work.
 
 Until Beankeeper ships a stable release, both upstream crates track the Git
 `main` branch. `Cargo.lock` is the sole lock, and regular CI and releases build
-with `--locked`. The separate `upstream-main` CI job refreshes both crates on
-pull requests, pushes to `main` and a daily schedule, then prints the revisions
-it built and tested. Once Beankeeper ships a stable release, switch both crates
-to stable release tags or crates.io versions and retire or repurpose the job.
+with `--locked`. The `upstream-main` job refreshes both crates when CI selects
+Rust checks and on a daily schedule. It reports the revisions before building,
+linting and testing them. Once Beankeeper ships a stable release, switch both
+crates to stable release tags or crates.io versions and retire or repurpose the
+job.
 
 ## Artifacts and versions
 
