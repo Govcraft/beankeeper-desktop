@@ -8,28 +8,30 @@ mod session;
 use std::{
     error::Error,
     fmt, fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use beankeeper_cli::cli::Cli;
 use clap::{Args, Subcommand};
-use reqwest::{Url, blocking::Client, redirect::Policy};
+use reqwest::Url;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     bridge,
+    instance::{self, BooksPath, Health, InstanceId, ListenerAddress, LiveListener},
     private_file::PrivateFile,
     setup::{self, ClientRegistration, ServiceSecretStorage, keychain},
 };
 
+pub use crate::instance::PortWarning;
 pub(crate) use extension::connection as extension_connection;
 use session::UserSessionEnv;
 
-const DEFAULT_PORT: u16 = 8750;
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
 
 /// Lifecycle controls run with the current OS user's authority.
@@ -91,6 +93,10 @@ pub enum ServiceError {
     EndpointConnect,
     /// The responding endpoint did not match the service descriptor.
     EndpointIdentity,
+    /// No live Desktop instance matches the selected books and optional address.
+    BooksNotServed(PathBuf),
+    /// More than one live instance serves the same books.
+    MultipleInstances,
     /// The endpoint was reached, but opening an authenticated MCP session failed.
     EndpointMcp(Box<crate::bridge::BridgeError>),
     /// Encrypted provisioning failed.
@@ -113,6 +119,8 @@ impl ServiceError {
             Self::NotInstalled => "SERVICE_NOT_INSTALLED",
             Self::EndpointConnect => "SERVICE_ENDPOINT_UNREACHABLE",
             Self::EndpointIdentity => "SERVICE_ENDPOINT_IDENTITY",
+            Self::BooksNotServed(_) => "DESKTOP_BOOKS_NOT_SERVED",
+            Self::MultipleInstances => "DESKTOP_MULTIPLE_INSTANCES",
             Self::EndpointMcp(error) => error.diagnostic_code(),
             Self::Setup(_) => "SERVICE_SETUP",
             Self::Desktop(_) => "SERVICE_HOST",
@@ -129,6 +137,8 @@ impl fmt::Display for ServiceError {
             Self::NotInstalled => f.write_str("Beankeeper is not installed as a background service. Run bk service install."),
             Self::EndpointConnect => f.write_str("Cannot connect to the published Desktop endpoint. Run bk service status --json and inspect the private service log."),
             Self::EndpointIdentity => f.write_str("The published endpoint did not identify itself as the expected Beankeeper process. Run bk service status --json and inspect the private service log."),
+            Self::BooksNotServed(books) => write!(f, "No matching Desktop instance is serving {}. Each instance serves one books file. Start Desktop for these books, or answer without a detail link.", books.display()),
+            Self::MultipleInstances => f.write_str("Multiple Desktop instances serve these books. Select the intended listener with --bind."),
             Self::EndpointMcp(error) => error.fmt(f),
             Self::Setup(error) => write!(f, "{error}"),
             Self::Desktop(error) => write!(f, "{error}"),
@@ -260,9 +270,11 @@ impl Config {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Runtime {
-    bind: SocketAddr,
-    pid: u32,
-    books: PathBuf,
+    bind: ListenerAddress,
+    pid: NonZeroU32,
+    books: BooksPath,
+    #[serde(default)]
+    id: Option<InstanceId>,
 }
 
 /// A snapshot contains no credentials or recovery material.
@@ -289,6 +301,9 @@ pub struct Status {
     /// Named failure when the advertised service cannot be reached or authenticated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<&'static str>,
+    /// A competing Beankeeper listener on the default port, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<PortWarning>,
     /// Plain-language status.
     pub message: String,
 }
@@ -313,13 +328,18 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         log: paths.log(),
         service_definition: paths.definition.clone(),
         error_code: None,
+        warning: None,
         message: ServiceError::NotInstalled.to_string(),
     };
-    if !result.installed {
-        return Ok(result);
-    }
-    match authenticated_endpoint(paths, &result.books) {
+    let endpoint = if result.installed {
+        authenticated_endpoint(paths, &result.books)
+    } else {
+        Ok(None)
+    };
+    let mut address = None;
+    match endpoint {
         Ok(Some(AuthenticatedEndpoint(endpoint))) => {
+            address = Some(endpoint.address.into());
             result.running = true;
             result.desktop_url = Some(endpoint.desktop_url().into());
             result.mcp_endpoint = Some(endpoint.url.into());
@@ -327,7 +347,10 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
             result.pid = Some(endpoint.pid);
             result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
         }
-        Ok(None) => result.message = "Beankeeper is stopped. Run bk service start.".into(),
+        Ok(None) if result.installed => {
+            result.message = "Beankeeper is stopped. Run bk service start.".into();
+        }
+        Ok(None) => {}
         Err(
             error @ (ServiceError::EndpointConnect
             | ServiceError::EndpointIdentity
@@ -338,11 +361,24 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         }
         Err(error) => return Err(error),
     }
+    result.warning = instance::default_port_warning(&paths.state, &result.books, address);
     Ok(result)
+}
+
+pub(crate) fn port_warning() -> Option<PortWarning> {
+    let paths = Paths::discover().ok()?;
+    let config = Config::load(&paths).ok()?;
+    let books = config.map_or_else(|| paths.data.join("books.db"), |config| config.books);
+    let address = endpoint_at(&paths, &books)
+        .ok()
+        .flatten()
+        .map(|endpoint| endpoint.address.into());
+    instance::default_port_warning(&paths.state, &books, address)
 }
 
 /// An endpoint from the private descriptor whose health response matched its process.
 pub(crate) struct Endpoint {
+    address: LiveListener,
     url: Url,
     token_file: PathBuf,
     version: String,
@@ -371,55 +407,78 @@ fn endpoint_at(paths: &Paths, books: &Path) -> Result<Option<Endpoint>, ServiceE
         Err(ServiceError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if runtime.books != books
-        || runtime.bind.ip() != Ipv4Addr::LOCALHOST
-        || runtime.bind.port() == 0
-        || runtime.pid == 0
+    if runtime.books.as_ref() != books || SocketAddr::from(runtime.bind).ip() != Ipv4Addr::LOCALHOST
     {
         return Err(ServiceError::Configuration(
             "invalid service runtime descriptor",
         ));
     }
-    let mut url = Url::parse(&crate::server::local_url(runtime.bind))
-        .map_err(|_| ServiceError::Configuration("invalid service runtime address"))?;
-    url.set_path("/health");
-    let response = Client::builder()
-        .no_proxy()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(2))
-        .build()
-        .and_then(|client| client.get(url.clone()).send())
-        .map_err(|_| ServiceError::EndpointConnect)?;
-    let pid = response
-        .headers()
-        .get("x-beankeeper-desktop-pid")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u32>().ok());
-    let version = response
-        .headers()
-        .get("x-beankeeper-desktop-version")
-        .and_then(|value| value.to_str().ok())
-        .filter(|version| !version.is_empty())
-        .map(str::to_owned)
+    let health = Health::probe(runtime.bind)?;
+    let address = health
+        .verify(runtime.bind, runtime.pid, runtime.id.as_ref())
         .ok_or(ServiceError::EndpointIdentity)?;
-    if !response.status().is_success() || pid != Some(runtime.pid) {
-        return Err(ServiceError::EndpointIdentity);
-    }
-    let mut body = String::new();
-    response
-        .take(64)
-        .read_to_string(&mut body)
-        .map_err(|_| ServiceError::EndpointConnect)?;
-    if body != crate::ui::HEALTH {
-        return Err(ServiceError::EndpointIdentity);
-    }
-    url.set_path("/mcp");
     Ok(Some(Endpoint {
-        url,
-        token_file: runtime.books.with_extension("agent-token"),
-        version,
-        pid: runtime.pid,
+        address,
+        url: runtime.bind.url("/mcp")?,
+        token_file: runtime.books.as_ref().with_extension("agent-token"),
+        version: health.version,
+        pid: runtime.pid.get(),
     }))
+}
+
+/// Select the books that an optional Desktop link should display.
+#[derive(Clone, Copy, Debug)]
+pub enum LinkBooks<'a> {
+    /// Use the books explicitly selected by the caller.
+    Explicit(&'a Path),
+    /// Prefer managed books, falling back to the upstream CLI default path.
+    ManagedOrDefault(&'a Path),
+}
+
+impl<'a> LinkBooks<'a> {
+    fn config(self, paths: &Paths) -> Result<Option<Config>, ServiceError> {
+        match self {
+            Self::Explicit(_) => Ok(Config::load(paths).ok().flatten()),
+            Self::ManagedOrDefault(_) => Config::load(paths),
+        }
+    }
+
+    fn path(self, config: Option<&'a Config>) -> &'a Path {
+        match self {
+            Self::Explicit(path) => path,
+            Self::ManagedOrDefault(default) => {
+                config.map_or(default, |config| config.books.as_path())
+            }
+        }
+    }
+}
+
+pub(crate) fn link_address(
+    target: LinkBooks<'_>,
+    bind: Option<ListenerAddress>,
+) -> Result<LiveListener, ServiceError> {
+    let paths = Paths::discover()?;
+    let config = target.config(&paths)?;
+    let requested = target.path(config.as_ref());
+    let books = match BooksPath::try_from(requested) {
+        Ok(books) => books,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ServiceError::BooksNotServed(std::path::absolute(
+                requested,
+            )?));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if config
+        .as_ref()
+        .is_some_and(|config| config.books == books.as_ref())
+        && let Ok(Some(endpoint)) = endpoint_at(&paths, books.as_ref())
+        && bind.is_none_or(|bind| bind == endpoint.address.into())
+    {
+        return Ok(endpoint.address);
+    }
+    instance::discover(&paths.state, &books, bind)?
+        .ok_or_else(|| ServiceError::BooksNotServed(books.into()))
 }
 
 /// A live bridge endpoint only needs its private descriptor and HTTP health.
@@ -501,6 +560,9 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
             );
             if let Some(endpoint) = status.mcp_endpoint {
                 println!("MCP: {endpoint}");
+            }
+            if let Some(warning) = status.warning {
+                eprintln!("{}", warning.message());
             }
         }
         return Ok(());
@@ -621,7 +683,10 @@ fn install(
         }
         | InstallMode::Extension => ClientRegistration::Skip,
     };
-    let port = previous.map_or(DEFAULT_PORT, |config| config.port);
+    let port = previous.map_or_else(
+        || SocketAddr::from(ListenerAddress::default()).port(),
+        |config| config.port,
+    );
     setup::run_service(
         cli,
         &paths.home,
@@ -667,24 +732,32 @@ fn wait_ready(paths: &Paths, books: &Path) -> Result<(), ServiceError> {
     Err(last_error)
 }
 fn host(paths: &Paths) -> Result<(), ServiceError> {
-    let config = Config::load(paths)?.ok_or(ServiceError::Configuration(
+    let mut config = Config::load(paths)?.ok_or(ServiceError::Configuration(
         "service registration is missing",
     ))?;
     paths.prepare()?;
     let _lock = lock(&paths.state.join("service-host.lock"))?;
     let listener = bind_listener(config.port)?;
-    let bind = listener.local_addr()?;
+    let bound = listener.local_addr()?;
+    let bind = ListenerAddress::try_from(bound).map_err(ServiceError::Configuration)?;
+    let id = InstanceId::default();
     let runtime = Runtime {
         bind,
-        pid: std::process::id(),
-        books: config.books.clone(),
+        pid: NonZeroU32::try_from(std::process::id())
+            .map_err(|_| ServiceError::EndpointIdentity)?,
+        books: BooksPath::try_from(config.books.as_path())?,
+        id: Some(id.clone()),
     };
     let mut cli = <Cli as clap::Parser>::try_parse_from(["bk", "mcp", "serve"])
         .map_err(|_| ServiceError::Configuration("cannot construct service ledger options"))?;
-    cli.db = config.books;
+    cli.db.clone_from(&config.books);
     let _passphrase = setup::stored_passphrase(&mut cli)?;
+    if bound.port() != config.port {
+        config.port = bound.port();
+        private_json(&paths.config(), &config)?;
+    }
     private_json(&paths.runtime(), &runtime)?;
-    let result = crate::server::serve_listener(&cli, listener);
+    let result = crate::server::serve_listener(&cli, listener, id);
     let _ = remove_if_exists(&paths.runtime());
     result.map_err(Into::into)
 }
@@ -710,7 +783,7 @@ fn lock(path: &Path) -> Result<fs::File, ServiceError> {
     })?;
     Ok(file)
 }
-fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ServiceError> {
+pub(crate) fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ServiceError> {
     let bytes = PrivateFile::open(path)?.read_bytes(SERVICE_STATE_LIMIT)?;
     serde_json::from_slice(bytes.expose_secret()).map_err(|_| {
         ServiceError::Configuration(
@@ -718,7 +791,7 @@ fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Servic
         )
     })
 }
-fn private_json(path: &Path, value: &impl Serialize) -> Result<(), ServiceError> {
+pub(crate) fn private_json(path: &Path, value: &impl Serialize) -> Result<(), ServiceError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|_| ServiceError::Configuration("cannot serialize service state"))?;
     private_write(path, &bytes)

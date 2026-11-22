@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use axum::{Router, middleware};
+use axum::{Router, middleware, routing::get};
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
@@ -16,6 +16,7 @@ use beankeeper_cli::{
 use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
+    instance::{self, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
     pairing::{self, PairingState},
@@ -77,6 +78,24 @@ pub fn application(
     config: StreamableHttpServerConfig,
     pairing: PairingState,
 ) -> Result<Router, DesktopError> {
+    application_with_id(
+        cli,
+        read_only,
+        bound,
+        config,
+        pairing,
+        InstanceId::default(),
+    )
+}
+
+fn application_with_id(
+    cli: &Cli,
+    read_only: bool,
+    bound: SocketAddr,
+    config: StreamableHttpServerConfig,
+    pairing: PairingState,
+    id: InstanceId,
+) -> Result<Router, DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
         .with_allowed_hosts(boundary.authorities())
@@ -120,6 +139,7 @@ pub fn application(
         .merge(navigation::router(navigation, pairing.clone()))
         .merge(pairing::router(pairing))
         .merge(mcp)
+        .route("/health", get(move || async move { instance::health(&id) }))
         .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
 }
 
@@ -129,7 +149,7 @@ pub fn application(
 /// Returns bind, runtime, passphrase, ledger or server failures.
 pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), DesktopError> {
     let listener = std::net::TcpListener::bind(bind.address())?;
-    serve_bound(cli, listener, read_only)
+    serve_bound(cli, listener, read_only, InstanceId::default())
 }
 
 /// Host an already-bound loopback socket, preserving port fallback without a bind race.
@@ -139,36 +159,41 @@ pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), Desk
 pub(crate) fn serve_listener(
     cli: &Cli,
     listener: std::net::TcpListener,
+    id: InstanceId,
 ) -> Result<(), DesktopError> {
     validate_bind(listener.local_addr()?, false)?;
-    serve_bound(cli, listener, false)
+    serve_bound(cli, listener, false, id)
 }
 
 fn serve_bound(
     cli: &Cli,
     listener: std::net::TcpListener,
     read_only: bool,
+    id: InstanceId,
 ) -> Result<(), DesktopError> {
     listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let listener = {
+    let serving = {
         let _enter = runtime.enter();
-        tokio::net::TcpListener::from_std(listener)?
+        tokio::net::TcpListener::from_std(listener.try_clone()?)?
     };
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
-    let app = application(cli, read_only, bound, config, pairing)?;
-    if let Ok(directory) = crate::product::state_dir() {
-        crate::updates::background(
-            directory.join("updates.json"),
-            crate::product::update_checks(),
-        );
-    }
+    let app = application_with_id(cli, read_only, bound, config, pairing, id.clone())?;
+    let directory = crate::product::state_dir().map_err(DesktopError::Product)?;
+    let registration = ListenerAddress::from_bound(bound)
+        .map(|address| Registration::publish(&directory, cli.db.as_path().try_into()?, address, id))
+        .transpose()
+        .map_err(|error| DesktopError::Service(Box::new(error)))?;
+    crate::updates::background(
+        directory.join("updates.json"),
+        crate::product::update_checks(),
+    );
     eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
     eprintln!("Open the link, then select Pair this browser to confirm.");
     eprintln!(
@@ -180,15 +205,17 @@ fn serve_bound(
             "Remote listener enabled: plaintext HTTP, no TLS; Host/Origin remain restricted to localhost, 127.0.0.1 and [::1]"
         );
     }
-    runtime.block_on(async move {
-        axum::serve(listener, app)
+    let result = runtime.block_on(async move {
+        axum::serve(serving, app)
             .with_graceful_shutdown(async move {
                 shutdown_signal().await;
                 cancellation.cancel();
             })
             .await
-    })?;
-    Ok(())
+    });
+    drop(registration);
+    drop(listener);
+    result.map_err(Into::into)
 }
 
 async fn shutdown_signal() {

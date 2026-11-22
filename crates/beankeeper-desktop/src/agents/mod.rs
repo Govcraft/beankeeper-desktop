@@ -230,6 +230,8 @@ struct Report {
     agents: Vec<ClientStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<ServiceCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<crate::instance::PortWarning>,
 }
 
 type Output = Envelope<Operation, Report, Failure>;
@@ -311,6 +313,9 @@ fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write)
             }
             None => {}
         }
+        if let Some(warning) = &data.warning {
+            writeln!(errors, "{}", warning.message())?;
+        }
     } else if let Some(error) = &output.error {
         writeln!(errors, "{}: {}", error.code, error.message)?;
     }
@@ -341,7 +346,16 @@ fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, Agen
             .map(|error| ServiceCheck::unavailable(error.code(), error.to_string())),
         Operation::Detect | Operation::Disconnect => None,
     };
-    Ok(Report { agents, service })
+    let warning = if matches!(operation, Operation::Doctor) {
+        service::port_warning()
+    } else {
+        None
+    };
+    Ok(Report {
+        agents,
+        service,
+        warning,
+    })
 }
 
 fn mutation_lock() -> Result<fs::File, AgentError> {

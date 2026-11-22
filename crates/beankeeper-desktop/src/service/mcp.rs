@@ -148,10 +148,14 @@ fn execute(operation: Option<Operation>) -> Result<Value, ServiceError> {
         .map_err(|_| ServiceError::Configuration("cannot serialize service status"))
 }
 fn reply(payload: Value) -> CallToolResult {
-    let message = payload["message"]
+    let mut message = payload["message"]
         .as_str()
         .unwrap_or("Service operation completed.")
         .to_owned();
+    if let Some(warning) = payload["warning"]["message"].as_str() {
+        message.push('\n');
+        message.push_str(warning);
+    }
     let mut result = CallToolResult::structured(payload);
     result.content = vec![ContentBlock::text(message)];
     result

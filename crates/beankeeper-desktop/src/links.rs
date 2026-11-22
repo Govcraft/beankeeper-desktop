@@ -14,6 +14,8 @@ use filters::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::{DesktopError, instance::ListenerAddress, service::LinkBooks};
+
 /// The report catalog, route lookup, and address encoders share this set.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
@@ -496,30 +498,47 @@ pub struct LinkOptions {
     view_id: View,
     #[command(flatten)]
     state: RawLinkFlags,
-    /// Address of Desktop; link generation does not probe the listener.
-    #[arg(long, default_value = "127.0.0.1:8750", value_parser = crate::cli::loopback_address)]
-    bind: std::net::SocketAddr,
+    /// Select a particular listener when more than one instance serves these books.
+    #[arg(long)]
+    bind: Option<ListenerAddress>,
+}
+
+impl TryFrom<(LinkOptions, Option<&CompanySlug>)> for ViewAddress {
+    type Error = LinkError;
+
+    fn try_from(
+        (mut options, company): (LinkOptions, Option<&CompanySlug>),
+    ) -> Result<Self, Self::Error> {
+        if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
+            options.state.company = company.map(ToString::to_string);
+        }
+        Self::try_from(serde_json::json!({
+            "view_id":options.view_id,"state":options.state
+        }))
+    }
 }
 
 /// Print a credential-free Desktop link using the same contract as MCP.
 ///
 /// # Errors
-/// Returns VALIDATION for malformed selectors, values or unsupported filters.
+/// Returns VALIDATION for malformed selectors or a named instance lookup error.
 pub fn run(
-    mut options: LinkOptions,
-    company: Option<&CompanySlug>,
-    json: bool,
-) -> Result<(), LinkError> {
-    if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
-        options.state.company = company.map(ToString::to_string);
-    }
+    options: LinkOptions,
+    ledger: &beankeeper_cli::cli::Cli,
+    books: LinkBooks<'_>,
+) -> Result<(), DesktopError> {
+    let json = ledger.is_json();
     let result = (|| {
-        let address = ViewAddress::try_from(serde_json::json!({
-            "view_id":options.view_id,"state":options.state
-        }))?;
-        let link = ViewLink::try_from((&address, options.bind))?;
+        let bind = options.bind;
+        let address = ViewAddress::try_from((options, ledger.company.as_ref()))
+            .map_err(DesktopError::Link)?;
+        let bind = crate::service::link_address(books, bind)
+            .map_err(|error| DesktopError::Service(Box::new(error)))?;
+        let link = ViewLink::try_from((&address, bind.into())).map_err(DesktopError::Link)?;
         if json {
-            link.payload().map(|payload| payload.to_string())
+            link.payload()
+                .map(|payload| payload.to_string())
+                .map_err(DesktopError::Link)
         } else {
             Ok(link.url)
         }
@@ -528,10 +547,12 @@ pub fn run(
         Ok(result) => result,
         Err(error) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"code":"VALIDATION","message":error.to_string()})
-                );
+                let (code, message) = match &error {
+                    DesktopError::Service(error) => (error.code(), error.to_string()),
+                    DesktopError::Link(error) => ("VALIDATION", error.to_string()),
+                    _ => return Err(error),
+                };
+                println!("{}", serde_json::json!({"code":code,"message":message}));
             }
             return Err(error);
         }
