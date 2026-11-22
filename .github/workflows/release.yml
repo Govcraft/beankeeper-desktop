@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
@@ -22,6 +25,7 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -66,6 +70,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-2022
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -86,13 +91,15 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}${{ runner.os == 'Linux' && '-glibc-2.35' || '' }}
-          cache-on-failure: true
+          # Only main writes shared caches; PR and tag runs restore them.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Select native Windows Perl for vendored OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
@@ -256,6 +263,7 @@ jobs:
   collect:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v6
@@ -281,6 +289,7 @@ jobs:
     if: github.event_name == 'push'
     needs: [preflight, collect]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
       id-token: write
