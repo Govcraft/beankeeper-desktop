@@ -276,7 +276,7 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
     assert_stale_runtime_fails(&configured, &agent_command, &state)?;
-    assert_managed_stdio_launchers(&configured, &state)?;
+    assert_managed_stdio_launchers(&configured, &state, &server.base)?;
     assert_managed_auth_failure(&configured, &agent_command, &books)?;
     drop(server);
     let output = configured()
@@ -388,6 +388,7 @@ fn assert_managed_auth_failure(
 fn assert_managed_stdio_launchers(
     configured: &impl Fn() -> std::process::Command,
     state: &std::path::Path,
+    base: &str,
 ) -> TestResult {
     // Both stdio launchers discover the same running service. The extension
     // leaves its installation alone and adds its MCP onboarding instructions.
@@ -401,15 +402,30 @@ fn assert_managed_stdio_launchers(
             .stdout(Stdio::piped())
             .spawn()?;
         let mut input = transport.stdin.take().ok_or("stdin")?;
-        writeln!(
-            input,
-            "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-test","version":"1"}}})
-        )?;
+        for request in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"managed-test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ui_get_link","arguments":{
+                "view_id":"income-statement","state":{"currency":"USD","from":"2026-11-01","to":"2026-11-30"}
+            }}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ui_show_view","arguments":{"view_id":"income-statement"}}}),
+        ] {
+            writeln!(input, "{request}")?;
+        }
         drop(input);
         let output = transport.wait_with_output()?;
         assert!(output.status.success());
-        let initialized: Value = serde_json::from_slice(&output.stdout)?;
+        let replies: Vec<Value> = String::from_utf8(output.stdout)?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        let [initialized, tools, link, navigation] = replies.as_slice() else {
+            return Err(format!(
+                "expected initialize, list, link, and navigation replies: {replies:?}"
+            )
+            .into());
+        };
         assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
         let instructions = initialized["result"]["instructions"]
             .as_str()
@@ -420,7 +436,34 @@ fn assert_managed_stdio_launchers(
             args.ends_with(&["extension"])
         );
         assert!(!state.join("claude-extension").exists());
+        assert_managed_link(tools, link, navigation, base)?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_managed_link(tools: &Value, link: &Value, navigation: &Value, base: &str) -> TestResult {
+    let tools = tools["result"]["tools"].as_array().ok_or("missing tools")?;
+    let advertised = tools
+        .iter()
+        .find(|tool| tool["name"] == "ui_get_link")
+        .ok_or("managed ledger connection omitted ui_get_link")?;
+    assert_eq!(advertised["annotations"]["readOnlyHint"], true);
+    for name in ["ui_show_view", "ui_highlight", "ui_status", "txn_post"] {
+        assert!(!tools.iter().any(|tool| tool["name"] == name));
+    }
+
+    assert_eq!(link["result"]["isError"], false, "{link}");
+    let detail = &link["result"]["structuredContent"];
+    let path = "/reports/income-statement?from=2026-11-01&to=2026-11-30&currency=USD";
+    assert_eq!(detail["url"], format!("{base}{path}"));
+    assert_eq!(detail["path"], path);
+    assert_eq!(detail["view_id"], "income-statement");
+    assert_eq!(detail["state"]["from"], "2026-11-01");
+    assert_eq!(
+        navigation["result"]["structuredContent"]["code"], "FORBIDDEN",
+        "{navigation}"
+    );
     Ok(())
 }
 

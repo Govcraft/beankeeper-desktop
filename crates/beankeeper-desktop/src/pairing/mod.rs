@@ -168,10 +168,6 @@ pub struct PairingState {
 }
 
 impl PairingState {
-    pub(crate) fn base_url(&self) -> &str {
-        &self.base
-    }
-
     /// Generate the launch's single-use browser pairing URL (valid five minutes).
     ///
     /// # Errors

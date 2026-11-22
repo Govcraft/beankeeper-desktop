@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.14] - 2026-11-22
+
+### Fixed
+
+- Advertise `ui_get_link` as a read-only tool on the managed ledger MCP
+  connection and build its URL from the same typed view as `bk ui link`.
+
 ## [0.1.0-rc.13] - 2026-11-22
 
 ### Fixed
