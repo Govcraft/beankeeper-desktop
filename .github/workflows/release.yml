@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: read
+  # Nightly qualification checks earlier runs before repeating them.
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -25,6 +27,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
       matrix: ${{ steps.plan.outputs.packaging }}
+      needed: ${{ steps.qualified.outputs.needed }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -53,9 +56,15 @@ jobs:
       - name: Select every release target
         id: plan
         run: python scripts/ci/plan.py --full
+      - name: Skip a nightly run for an already qualified commit
+        id: qualified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/evidence.py qualified
 
   packaging:
     needs: preflight
+    if: needs.preflight.outputs.needed == 'true'
     uses: ./.github/workflows/packaging.yml
     with:
       matrix: ${{ needs.preflight.outputs.matrix }}
@@ -99,7 +108,7 @@ jobs:
             release/*.mcpb
             release/checksums-sha256.txt
             release/update-manifest.json
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: Beankeeper Desktop v${{ needs.preflight.outputs.version }}
           prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}

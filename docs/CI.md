@@ -35,6 +35,25 @@ otherwise. Dependency changes do not package on pull requests; the nightly
 `ci-gate` fails on any failed or cancelled job, and on any job that was skipped
 or ran contrary to the plan, so it is the only check branch protection needs.
 
+## Reusing validation
+
+When `ci-gate` passes, it uploads a `ci-evidence` artifact recording the
+validated source tree and the checks that ran. On a `main` push,
+`scripts/ci/evidence.py` looks for a successful same-repository pull request
+run whose head commit has exactly the pushed tree and whose evidence includes
+every check `main`'s plan needs. If one exists, the push runs only planning and
+the gate. This applies when a pull request was up to date with `main` at merge;
+otherwise `main` validates normally. Force pushes never reuse evidence.
+
+The nightly `release.yml` run likewise skips packaging when an earlier
+scheduled or manual release run already qualified the same commit.
+
+## Action pinning
+
+Third-party actions and container images are pinned to a commit SHA or image
+digest, with the version in a comment; GitHub's own `actions/*` keep version
+tags. `test_third_party_actions_are_pinned_to_immutable_revisions` enforces it.
+
 ## Caches
 
 `scripts/ci/cache.py` names each cache family (for example `dev-linux`,

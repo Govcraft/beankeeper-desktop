@@ -56,6 +56,16 @@ class WorkflowConsistencyTests(unittest.TestCase):
             self.assertIn(f"runs-on: {families()[family].runner}\n", block, job)
             self.assertIn(f"family: {family}\n", block, job)
 
+    def test_third_party_actions_are_pinned_to_immutable_revisions(self):
+        for path in GITHUB.rglob("*.yml"):
+            for reference in re.findall(r"uses: (\S+)", path.read_text()):
+                if reference.startswith(("./", "actions/")):
+                    continue  # Local actions and GitHub's own actions.
+                if reference.startswith("docker://"):
+                    self.assertRegex(reference, r"@sha256:[0-9a-f]{64}$", path)
+                else:
+                    self.assertRegex(reference, r"@[0-9a-f]{40}$", path)
+
     def test_msrv_job_name_matches_the_workspace(self):
         major_minor = msrv_toolchain().rsplit(".", 1)[0]
         self.assertIn(f"name: MSRV / Rust {major_minor}\n", text("workflows/ci.yml"))
