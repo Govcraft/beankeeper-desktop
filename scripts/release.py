@@ -7,7 +7,7 @@ import io
 import json
 from datetime import datetime, timezone
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -24,6 +24,7 @@ TARGETS = {
     "x86_64-pc-windows-msvc": None,
 }
 TAG_PREFIX = "beankeeper-desktop-v"
+LINUX_GLIBC_CEILING = (2, 35, 0)
 
 
 # Numeric X.Y.Z, or an -rc.N prerelease that must match Cargo.toml and the git tag.
@@ -85,14 +86,60 @@ def stage(binary, release_version, target, work):
 
 def tar_bytes(files):
     data = io.BytesIO()
+    timestamp = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    parents = {
+        parent.as_posix()
+        for path, _, _ in files
+        for parent in PurePosixPath(path).parents
+        if parent.parts
+    }
     with tarfile.open(fileobj=data, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
+        for parent in sorted(parents):
+            entry = tarfile.TarInfo(parent)
+            entry.type = tarfile.DIRTYPE
+            entry.mode = 0o755
+            entry.mtime = timestamp
+            archive.addfile(entry)
         for path, content, mode in files:
             entry = tarfile.TarInfo(path)
             entry.size = len(content)
             entry.mode = mode
-            entry.mtime = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+            entry.mtime = timestamp
             archive.addfile(entry, io.BytesIO(content))
     return data.getvalue()
+
+
+def glibc_version_text(version):
+    parts = version if version[2] else version[:2]
+    return ".".join(str(part) for part in parts)
+
+
+def check_linux_abi(binary):
+    result = subprocess.run(
+        ["readelf", "--version-info", "--wide", str(binary)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    _, _, needs = result.stdout.partition("Version needs section")
+    names = re.findall(r"\bName:\s+(GLIBC_\S+)", needs)
+    if not names:
+        raise ValueError("Linux release binary has no measurable glibc version requirements")
+
+    versions = []
+    for name in names:
+        match = re.fullmatch(r"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", name)
+        if match is None:
+            raise ValueError(f"Unexpected glibc version requirement: {name}")
+        versions.append(tuple(int(part or 0) for part in match.groups()))
+    required = max(versions)
+    if required > LINUX_GLIBC_CEILING:
+        raise ValueError(
+            f"Linux binary requires glibc {glibc_version_text(required)}; "
+            f"release ceiling is {glibc_version_text(LINUX_GLIBC_CEILING)}"
+        )
+    return glibc_version_text(required)
 
 
 def debian(directory, release_version, target, output):
@@ -103,7 +150,7 @@ def debian(directory, release_version, target, output):
         f"Version: {debian_upstream_version(release_version)}\nArchitecture: {TARGETS[target]}\n"
         "Maintainer: Govcraft <roland@govcraft.ai>\n"
         "Section: utils\nPriority: optional\n"
-        "Depends: libc6 (>= 2.39), libgcc-s1\n"
+        f"Depends: libc6 (>= {glibc_version_text(LINUX_GLIBC_CEILING)}), libgcc-s1\n"
         "Conflicts: beankeeper-cli, bk, bk-bin\n"
         "Homepage: https://github.com/Govcraft/beankeeper-desktop\n"
         "Description: Beankeeper Desktop local browser workspace and MCP server\n"
@@ -274,7 +321,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "checksums", "update-manifest", "license-env"])
+    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--tag")
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary", type=Path)
@@ -283,6 +330,15 @@ def main():
     args = parser.parse_args()
     if args.command == "license-env":
         write_license_env()
+        return
+    if args.command == "linux-abi":
+        if args.binary is None:
+            parser.error("--binary is required")
+        try:
+            required = check_linux_abi(args.binary)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            parser.error(str(error))
+        print(f"Linux binary requires glibc {required} or later.")
         return
     release_version = version(args.tag)
     if args.command == "version":

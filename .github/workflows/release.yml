@@ -91,7 +91,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}${{ runner.os == 'Linux' && '-glibc-2.35' || '' }}
           cache-on-failure: true
       - name: Select native Windows Perl for vendored OpenSSL
         if: runner.os == 'Windows'
@@ -107,7 +107,26 @@ jobs:
           BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON: ${{ vars.BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON }}
           BEANKEEPER_LICENSE_SERVICE_URL: ${{ vars.BEANKEEPER_LICENSE_SERVICE_URL }}
         run: python scripts/release.py license-env
+      - name: Build Linux Desktop against Ubuntu 22.04
+        if: runner.os == 'Linux'
+        run: |
+          toolchain=$(rustc --print sysroot)
+          cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
+          docker build -f packaging/linux-release.Dockerfile -t beankeeper-linux-builder packaging
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+            --mount "type=bind,source=$toolchain,target=/opt/rust,readonly" \
+            --mount "type=bind,source=$cargo_home,target=/cargo" \
+            --env CARGO_HOME=/cargo \
+            --env BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON \
+            --env BEANKEEPER_LICENSE_SERVICE_URL \
+            beankeeper-linux-builder \
+            cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
+      - name: Check the Linux binary's glibc requirements
+        if: runner.os == 'Linux'
+        run: python scripts/release.py linux-abi --binary "target/$TARGET/release/bk"
       - name: Build Desktop binary and embedded UI
+        if: runner.os != 'Linux'
         run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
       - name: Stage binary and documents
         run: |
@@ -147,6 +166,17 @@ jobs:
           python scripts/check-license-embed.py "$binary"
       - name: Build OS installer
         run: python scripts/release.py installer --target "$TARGET"
+      - name: Install the Linux package on Ubuntu 22.04 and Debian 12
+        if: runner.os == 'Linux'
+        run: |
+          package="$GITHUB_WORKSPACE/dist/bk-$VERSION-$TARGET.deb"
+          for image in ubuntu:22.04 debian:12-slim; do
+            reported=$(docker run --rm --network none \
+              --mount "type=bind,source=$package,target=/release.deb,readonly" \
+              --env BK_NO_SERVICE=1 "$image" \
+              sh -ec 'dpkg -i /release.deb >&2; exec bk --version')
+            test "$reported" = "bk $VERSION"
+          done
       - name: Optional Apple signing, notarization and stapling
         if: runner.os == 'macOS'
         env:
