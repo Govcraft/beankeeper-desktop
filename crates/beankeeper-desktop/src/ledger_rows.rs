@@ -2,35 +2,24 @@
 
 use std::{collections::HashSet, error::Error, fmt, num::ParseIntError};
 
-use beankeeper::types::{
-    AccountType, Amount, ClearanceStatus, Currency, CurrencyError, DebitOrCredit, Money,
-};
+use beankeeper::types::{AccountType, Amount, ClearanceStatus, Currency, DebitOrCredit, Money};
 use beankeeper_cli::db::{
     AccountRow, AuditLogRow, EntryRow,
     audit::{AuditEntity, EntryStatus},
 };
 
 #[derive(Debug)]
-pub(crate) enum RowError {
-    Currency(CurrencyError),
-    AuditId(ParseIntError),
-}
+pub(crate) struct RowError(ParseIntError);
 
 impl fmt::Display for RowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Currency(error) => write!(f, "invalid transaction currency: {error}"),
-            Self::AuditId(error) => write!(f, "invalid ledger audit record ID: {error}"),
-        }
+        write!(f, "invalid ledger audit record ID: {}", self.0)
     }
 }
 
 impl Error for RowError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(match self {
-            Self::Currency(error) => error,
-            Self::AuditId(error) => error,
-        })
+        Some(&self.0)
     }
 }
 
@@ -65,10 +54,6 @@ pub(crate) fn accounts_by_kind(rows: &[AccountRow]) -> Vec<AccountGroup<'_>> {
     }
     groups.sort_by_key(|group| account_kind_order(group.kind));
     groups
-}
-
-pub(crate) fn currency(code: &str) -> Result<Currency, RowError> {
-    code.parse().map_err(RowError::Currency)
 }
 
 pub(crate) const fn clearance(status: EntryStatus) -> ClearanceStatus {
@@ -107,7 +92,7 @@ pub(crate) enum AuditSubject {
 
 impl AuditSubject {
     pub(crate) fn read(row: &AuditLogRow) -> Result<Option<Self>, RowError> {
-        let parse_id = || row.entity_id.parse().map_err(RowError::AuditId);
+        let parse_id = || row.entity_id.parse().map_err(RowError);
         match row.entity {
             AuditEntity::Transaction => parse_id().map(Self::Transaction).map(Some),
             AuditEntity::Entry => parse_id().map(Self::Entry).map(Some),
