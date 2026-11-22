@@ -7,7 +7,7 @@ use super::ServiceError;
 #[cfg(target_os = "linux")]
 use std::{
     env,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
@@ -22,9 +22,33 @@ const BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 pub(super) struct UserSessionEnv(#[cfg(target_os = "linux")] Option<PathBuf>);
 
 #[cfg(target_os = "linux")]
+enum RuntimeDirectory {
+    Inherited(PathBuf),
+    Fallback(PathBuf),
+}
+
+#[cfg(target_os = "linux")]
+impl From<(Option<OsString>, u32)> for RuntimeDirectory {
+    fn from((runtime, uid): (Option<OsString>, u32)) -> Self {
+        match runtime.filter(|path| !path.is_empty()) {
+            Some(path) => Self::Inherited(path.into()),
+            None => Self::Fallback(Path::new("/run/user").join(uid.to_string())),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AsRef<Path> for RuntimeDirectory {
+    fn as_ref(&self) -> &Path {
+        match self {
+            Self::Inherited(path) | Self::Fallback(path) => path,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 struct RuntimeEvidence {
-    path: PathBuf,
-    inherited: bool,
+    directory: RuntimeDirectory,
     uid: u32,
     directory_owner: Option<u32>,
     socket_owner: Option<u32>,
@@ -32,8 +56,10 @@ struct RuntimeEvidence {
 
 #[cfg(target_os = "linux")]
 impl RuntimeEvidence {
-    fn inspect(path: PathBuf, inherited: bool, uid: u32) -> Self {
-        let directory_owner = fs::symlink_metadata(&path)
+    fn inspect(runtime: Option<OsString>, uid: u32) -> Self {
+        let directory = RuntimeDirectory::from((runtime, uid));
+        let path = directory.as_ref();
+        let directory_owner = fs::symlink_metadata(path)
             .ok()
             .filter(fs::Metadata::is_dir)
             .map(|directory| directory.uid());
@@ -42,8 +68,7 @@ impl RuntimeEvidence {
             .filter(|socket| socket.file_type().is_socket())
             .map(|socket| socket.uid());
         Self {
-            path,
-            inherited,
+            directory,
             uid,
             directory_owner,
             socket_owner,
@@ -59,10 +84,7 @@ impl UserSessionEnv {
                 return Ok(session);
             }
             let uid = rustix::process::geteuid().as_raw();
-            let runtime = env::var_os(RUNTIME);
-            let inherited = runtime.is_some();
-            let path = runtime.map_or_else(|| Self::default_runtime(uid), PathBuf::from);
-            Self::try_from(RuntimeEvidence::inspect(path, inherited, uid))
+            Self::try_from(RuntimeEvidence::inspect(env::var_os(RUNTIME), uid))
         }
         #[cfg(not(target_os = "linux"))]
         Ok(Self())
@@ -73,11 +95,6 @@ impl UserSessionEnv {
         address
             .filter(|address| !address.is_empty())
             .map(|_| Self(None))
-    }
-
-    #[cfg(target_os = "linux")]
-    fn default_runtime(uid: u32) -> PathBuf {
-        Path::new("/run/user").join(uid.to_string())
     }
 
     pub(super) fn apply(&self, command: &mut Command) {
@@ -96,13 +113,16 @@ impl TryFrom<RuntimeEvidence> for UserSessionEnv {
     type Error = ServiceError;
 
     fn try_from(evidence: RuntimeEvidence) -> Result<Self, Self::Error> {
-        if !evidence.path.is_absolute()
+        if !evidence.directory.as_ref().is_absolute()
             || evidence.directory_owner != Some(evidence.uid)
             || evidence.socket_owner != Some(evidence.uid)
         {
             return Err(ServiceError::SessionEnvUnavailable);
         }
-        Ok(Self((!evidence.inherited).then_some(evidence.path)))
+        Ok(match evidence.directory {
+            RuntimeDirectory::Inherited(_) => Self(None),
+            RuntimeDirectory::Fallback(path) => Self(Some(path)),
+        })
     }
 }
 
@@ -112,26 +132,28 @@ mod tests {
 
     use super::*;
 
-    fn evidence(path: impl Into<PathBuf>, inherited: bool) -> RuntimeEvidence {
+    fn evidence(path: impl Into<OsString>, inherited: bool) -> RuntimeEvidence {
+        let uid = 1234;
         RuntimeEvidence {
-            path: path.into(),
-            inherited,
-            uid: 1234,
-            directory_owner: Some(1234),
-            socket_owner: Some(1234),
+            directory: RuntimeDirectory::from((inherited.then(|| path.into()), uid)),
+            uid,
+            directory_owner: Some(uid),
+            socket_owner: Some(uid),
         }
     }
 
     #[test]
-    fn absent_runtime_uses_the_current_users_runtime_directory() -> Result<(), ServiceError> {
-        let runtime = UserSessionEnv::default_runtime(1234);
-        let session = UserSessionEnv::try_from(evidence(runtime, false))?;
-        let mut command = Command::new("systemctl");
-        session.apply(&mut command);
-        assert_eq!(
-            command.get_envs().collect::<Vec<_>>(),
-            [(OsStr::new(RUNTIME), Some(OsStr::new("/run/user/1234")))]
-        );
+    fn absent_or_empty_runtime_uses_the_current_users_runtime_directory() -> Result<(), ServiceError>
+    {
+        for evidence in [evidence("", false), evidence("", true)] {
+            let session = UserSessionEnv::try_from(evidence)?;
+            let mut command = Command::new("systemctl");
+            session.apply(&mut command);
+            assert_eq!(
+                command.get_envs().collect::<Vec<_>>(),
+                [(OsStr::new(RUNTIME), Some(OsStr::new("/run/user/1234")))]
+            );
+        }
         Ok(())
     }
 
@@ -154,22 +176,21 @@ mod tests {
     fn fallback_requires_an_absolute_directory_and_socket_owned_by_the_user() {
         for invalid in [
             evidence("relative/runtime", true),
-            evidence("", true),
             RuntimeEvidence {
                 directory_owner: None,
-                ..evidence("/run/user/1234", false)
+                ..evidence("", false)
             },
             RuntimeEvidence {
                 directory_owner: Some(4321),
-                ..evidence("/run/user/1234", false)
+                ..evidence("", false)
             },
             RuntimeEvidence {
                 socket_owner: None,
-                ..evidence("/run/user/1234", false)
+                ..evidence("", false)
             },
             RuntimeEvidence {
                 socket_owner: Some(4321),
-                ..evidence("/run/user/1234", false)
+                ..evidence("", false)
             },
         ] {
             assert!(matches!(
@@ -185,8 +206,7 @@ mod tests {
         let bus = runtime.path().join("bus");
         let evidence = || {
             RuntimeEvidence::inspect(
-                runtime.path().into(),
-                false,
+                Some(runtime.path().as_os_str().to_owned()),
                 rustix::process::geteuid().as_raw(),
             )
         };
