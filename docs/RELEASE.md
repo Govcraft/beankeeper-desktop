@@ -1,16 +1,23 @@
 # Desktop release packaging
 
 The release workflow builds the Desktop `bk` binary, including its embedded UI,
-from this repository and the upstream revision pinned by `Cargo.lock`. It does
+from this repository and the upstream revision recorded in `Cargo.lock`. It does
 not publish crates, modify ledgers or run schema migrations. Apple Developer
 Program and Azure Artifact Signing accounts are **pending Roland's setup**.
 Paid signing hooks are disabled by default. No production credentials are
 required to build or merge this work.
 
+Until Beankeeper ships a stable release, both upstream crates track the Git
+`main` branch. `Cargo.lock` is the sole lock, and regular CI and releases build
+with `--locked`. The separate `upstream-main` CI job refreshes both crates on
+pull requests, pushes to `main` and a daily schedule, then prints the revisions
+it built and tested. Once Beankeeper ships a stable release, switch both crates
+to stable release tags or crates.io versions and retire or repurpose the job.
+
 ## Artifacts and versions
 
-Desktop uses its own workspace version, currently `0.1.0-rc.4`, rather than upstream's
-CLI version. Keep the upstream tag convention `beankeeper-desktop-vVERSION` and
+Desktop uses its own workspace version. Keep the tag convention
+`beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
 A tag must exactly match `[workspace.package].version` in `Cargo.toml`.

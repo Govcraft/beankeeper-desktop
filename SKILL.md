@@ -368,9 +368,10 @@ browser confirmation; use `ui_status` to inspect the loaded view.
 [navigation catalog](docs/navigation.md) for arguments and examples.
 Desktop's supported workflow is agent proposes, human approves in the browser.
 Do not ask for approval tokens or call MCP approval tools on the human's behalf.
-The server supplies its own ephemeral human authority behind cookie/CSRF checks;
-no agent token is an approver on browser routes. Do not grant the agent owner
-authority to work around these boundaries.
+On enforced ledgers, Desktop uses the private owner-token file to issue
+short-lived approval authority for the paired human. If the review page says
+approval is unavailable, tell the human to check their private owner credential
+and restart Desktop. Keep owner and approval credentials out of agent sessions.
 
 See [docs/setup.md](docs/setup.md) for the full command reference, all config and
 credential paths, headless test options, lifecycle and recovery instructions.

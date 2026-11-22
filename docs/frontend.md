@@ -45,7 +45,7 @@ while forbidding inline and third-party scripts.
 
 ## Core views and read boundary
 
-D5 calls the pinned upstream CLI library's company, account, report, transaction
+D5 calls the upstream CLI library's company, account, report, transaction
 and audit query functions from a read-only `Db::open_snapshot` connection. Each
 page runs on a blocking worker under one database read transaction. There is no
 browser ledger JSON API, parallel ledger or migration. MCP retains its upstream
@@ -88,14 +88,15 @@ custom mutation SQL. Full verification and resolution run in the same savepoint.
 The read-only core view connection stays separate. Review pages read one SQLite
 snapshot on a blocking worker.
 
-Enforced ledgers require a verified approval identity. Desktop issues one unique
-12-hour, read/approve-only identity per server launch from the local trust root,
-keeps its token in memory, and verifies it again for each review operation. The
-actor name is `desktop-local-human`; request bearer tokens, MCP fallback tokens
-and offline owner-token files never supply that authority. Identity issuance is
-audited. The browser guard is the human authorization boundary. Policy-disabled
-ledgers use the same actor name without a token. `--read-only` remains an MCP
-tool ceiling, independent of human decisions. No MCP approval handlers change.
+Enforced ledgers require a verified approval identity. At launch Desktop verifies
+the private owner-token sidecar and uses its live `Admin` grant to issue a unique
+12-hour identity with read and approval rights. Desktop keeps the issued token
+in memory and verifies it on each review operation. Audited issuance names
+`desktop-owner`. Browser decisions name `desktop-local-human` and require the
+paired browser's Origin and CSRF proof. Request bearer and MCP fallback tokens
+serve the agent interface. Verification stays available if the sidecar is
+missing or rejected. Policy-disabled ledgers record the local actor without a
+token. `--read-only` applies to agent MCP tools.
 
 The queue labels spend caps as current and uses the posting description as its
 purpose because upstream stores no separate proposal rationale. It offers reject
