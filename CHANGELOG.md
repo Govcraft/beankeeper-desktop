@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.18] - 2026-11-22
+
+### Fixed
+
+- Recognize Claude Code registrations that explicitly declare stdio or an empty
+  environment. Install the managed skill and name custom fields in registration
+  conflicts.
+
 ## [0.1.0-rc.17] - 2026-11-22
 
 ### Fixed
