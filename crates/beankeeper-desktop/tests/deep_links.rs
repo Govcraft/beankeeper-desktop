@@ -206,6 +206,7 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     server.pair()?;
     assert_view_links_resolve(&server, reader, transaction_id)?;
     assert_link_cli_parity(&server, reader, &ledger.path, state.path())?;
+    assert_inherited_company_parity(&server, reader, &ledger.path, state.path())?;
     Ok(())
 }
 
@@ -557,6 +558,51 @@ fn assert_link_cli_parity(server: &Server, reader: &str, books: &Path, state: &P
         let cli: Value = serde_json::from_slice(&cli.stdout)?;
         assert_eq!(cli["code"], "VALIDATION");
         assert_eq!(cli, mcp["result"]["structuredContent"]);
+    }
+    Ok(())
+}
+
+fn assert_inherited_company_parity(
+    server: &Server,
+    reader: &str,
+    books: &Path,
+    state: &Path,
+) -> TestResult {
+    let bind = server.base.strip_prefix("http://").ok_or("bind")?;
+    for (view, flags, expected_state) in [
+        (
+            "reports",
+            vec!["--report-kind", "trend", "--period", "quarter"],
+            json!({"company":"acme","report_kind":"trend","period":"quarter"}),
+        ),
+        ("settings", vec![], json!({})),
+    ] {
+        let output = clean_command()
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", state)
+            .arg("--db")
+            .arg(books)
+            .args([
+                "--company",
+                "acme",
+                "--json",
+                "ui",
+                "link",
+                "--view-id",
+                view,
+                "--bind",
+                bind,
+            ])
+            .args(flags)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout)?,
+            link(server, reader, view, expected_state)?
+        );
     }
     Ok(())
 }

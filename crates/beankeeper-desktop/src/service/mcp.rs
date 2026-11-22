@@ -10,9 +10,9 @@ use rmcp::{
     },
     service::RequestContext,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
-use super::{Config, Paths, ServiceError, UserSessionEnv};
+use super::{Config, Paths, ServiceError, Status, UserSessionEnv};
 
 struct Lifecycle;
 
@@ -124,7 +124,7 @@ impl ServerHandler for Lifecycle {
         .into())
     }
 }
-fn execute(operation: Option<Operation>) -> Result<Value, ServiceError> {
+fn execute(operation: Option<Operation>) -> Result<Status, ServiceError> {
     if let Some(operation) = operation {
         let mut command = Command::new(std::env::current_exe()?);
         // Preflight here so the session error reaches the agent as a named MCP
@@ -144,25 +144,25 @@ fn execute(operation: Option<Operation>) -> Result<Value, ServiceError> {
             ));
         }
     }
-    serde_json::to_value(super::status()?)
-        .map_err(|_| ServiceError::Configuration("cannot serialize service status"))
+    super::status()
 }
-fn reply(payload: Value) -> CallToolResult {
-    let mut message = payload["message"]
-        .as_str()
-        .unwrap_or("Service operation completed.")
-        .to_owned();
-    if let Some(warning) = payload["warning"]["message"].as_str() {
+fn reply(status: Status) -> CallToolResult {
+    let mut message = status.message.clone();
+    if let Some(warning) = &status.warning {
         message.push('\n');
-        message.push_str(warning);
+        message.push_str(warning.message());
     }
+    let Ok(payload) = serde_json::to_value(status) else {
+        let error = ServiceError::Configuration("cannot serialize service status");
+        return failure(error.code(), &error.to_string());
+    };
     let mut result = CallToolResult::structured(payload);
     result.content = vec![ContentBlock::text(message)];
     result
 }
 fn failure(code: &str, message: &str) -> CallToolResult {
-    let mut result = reply(json!({"code":code,"message":message}));
-    result.is_error = Some(true);
+    let mut result = CallToolResult::structured_error(json!({"code": code, "message": message}));
+    result.content = vec![ContentBlock::text(message)];
     result
 }
 
