@@ -1,7 +1,10 @@
 //! Stable Desktop addresses, validated once at CLI, MCP and saved-URL boundaries.
 
 mod filters;
+pub(crate) mod mcp;
 pub(crate) mod values;
+
+use std::net::SocketAddr;
 
 use beankeeper_cli::db::companies::CompanySlug;
 use filters::{
@@ -238,14 +241,39 @@ impl ViewAddress {
         };
         encode_path(route, &fields)
     }
+}
 
-    pub(crate) fn result(&self, base: &str) -> Result<serde_json::Value, LinkError> {
-        let path = self.path().map_err(LinkError)?;
-        let mut result =
-            serde_json::to_value(self).map_err(|_| LinkError("Invalid view address."))?;
-        result["url"] = serde_json::json!(format!("{}{path}", base.trim_end_matches('/')));
-        result["path"] = serde_json::json!(path);
-        Ok(result)
+impl TryFrom<serde_json::Value> for ViewAddress {
+    type Error = LinkError;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        serde_json::from_value(value)
+            .map_err(|_| LinkError("Invalid view or filters. Check the tool schema."))
+    }
+}
+
+#[derive(Serialize)]
+struct ViewLink<'a> {
+    #[serde(flatten)]
+    address: &'a ViewAddress,
+    path: LocalViewUrl,
+    url: String,
+}
+
+impl<'a> TryFrom<(&'a ViewAddress, SocketAddr)> for ViewLink<'a> {
+    type Error = LinkError;
+
+    fn try_from((address, bound): (&'a ViewAddress, SocketAddr)) -> Result<Self, Self::Error> {
+        let path = address.local_url().map_err(LinkError)?;
+        let base = crate::server::local_url(bound);
+        let url = format!("{}{}", base.trim_end_matches('/'), path.as_str());
+        Ok(Self { address, path, url })
+    }
+}
+
+impl ViewLink<'_> {
+    fn payload(&self) -> Result<serde_json::Value, LinkError> {
+        serde_json::to_value(self).map_err(|_| LinkError("Invalid view address."))
     }
 }
 
@@ -486,11 +514,15 @@ pub fn run(
         options.state.company = company.map(ToString::to_string);
     }
     let result = (|| {
-        let address: ViewAddress = serde_json::from_value(serde_json::json!({
+        let address = ViewAddress::try_from(serde_json::json!({
             "view_id":options.view_id,"state":options.state
-        }))
-        .map_err(|_| LinkError("Invalid view or filters. Check the tool schema."))?;
-        address.result(&crate::server::local_url(options.bind))
+        }))?;
+        let link = ViewLink::try_from((&address, options.bind))?;
+        if json {
+            link.payload().map(|payload| payload.to_string())
+        } else {
+            Ok(link.url)
+        }
     })();
     let result = match result {
         Ok(result) => result,
@@ -504,11 +536,7 @@ pub fn run(
             return Err(error);
         }
     };
-    if json {
-        println!("{result}");
-    } else if let Some(url) = result["url"].as_str() {
-        println!("{url}");
-    }
+    println!("{result}");
     Ok(())
 }
 

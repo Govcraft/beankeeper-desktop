@@ -1,6 +1,7 @@
 //! Setup readiness shared by local CLI and authenticated MCP.
 
 use std::{
+    net::SocketAddr,
     process::ExitCode,
     sync::{Arc, Mutex},
 };
@@ -29,6 +30,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
+    links::mcp as link_tool,
     navigation::Navigation,
     output::{Envelope, Metadata},
     setup,
@@ -361,6 +363,7 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
 struct StatusInput {}
 
 pub(crate) struct DesktopTools {
+    pub(crate) bound: SocketAddr,
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
 }
@@ -368,6 +371,7 @@ pub(crate) struct DesktopTools {
 impl HostToolHandler for DesktopTools {
     fn tools(&self) -> Vec<HostTool> {
         let mut tools = self.navigation.tools();
+        tools.push(link_tool::definition());
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
@@ -385,6 +389,12 @@ impl HostToolHandler for DesktopTools {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
+        if request.name == link_tool::NAME {
+            return Ok(link_tool::call(
+                serde_json::Value::Object(request.arguments.unwrap_or_default()),
+                self.bound,
+            ));
+        }
         if request.name != STATUS_TOOL {
             return self.navigation.call_tool(request, identity).await;
         }

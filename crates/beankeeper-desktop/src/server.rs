@@ -97,6 +97,7 @@ pub fn application(
         read_only,
         config,
         DesktopTools {
+            bound,
             navigation: navigation.clone(),
             status_db: Arc::clone(&association_db),
         },

@@ -134,18 +134,16 @@ enum NavigationTool {
     ShowView,
     Highlight,
     Status,
-    GetLink,
 }
 
 impl NavigationTool {
-    const ALL: [Self; 4] = [Self::ShowView, Self::Highlight, Self::Status, Self::GetLink];
+    const ALL: [Self; 3] = [Self::ShowView, Self::Highlight, Self::Status];
 
     fn name(self) -> &'static str {
         match self {
             Self::ShowView => "ui_show_view",
             Self::Highlight => "ui_highlight",
             Self::Status => "ui_status",
-            Self::GetLink => "ui_get_link",
         }
     }
 
@@ -171,12 +169,6 @@ impl NavigationTool {
                 "Report paired and live tabs, confirmed view URLs, highlight targets and a pairing link.",
                 schemars::schema_for!(Status),
                 Capability::Navigate,
-                HostToolEffect::ReadOnly,
-            ),
-            Self::GetLink => (
-                "Return an optional Desktop detail URL after answering in words. Does not navigate, open a browser or require pairing. Uses the same view_id/state as ui_show_view.",
-                schemars::schema_for!(ViewAddress),
-                Capability::Read,
                 HostToolEffect::ReadOnly,
             ),
         };
@@ -237,9 +229,6 @@ impl Navigation {
         arguments: Value,
         identity: &VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
-        if let NavigationTool::GetLink = tool {
-            return Ok(self.link_result(arguments));
-        }
         let agent = AgentKey::from_verified_identity(identity);
         let sessions = self
             .pairing
@@ -282,7 +271,6 @@ impl Navigation {
             NavigationTool::Status => {
                 return self.status_result(arguments, agent, &sessions, available);
             }
-            NavigationTool::GetLink => unreachable!("link handled before paired-tab access"),
         };
         let (wanted, description, event) = match parsed {
             Ok(Ok(value)) => value,
@@ -323,25 +311,6 @@ impl Navigation {
         };
         Ok(enqueue_event(agent, event, id, tab, &description))
     }
-    fn link_result(&self, arguments: Value) -> CallToolResult {
-        match serde_json::from_value::<ViewAddress>(arguments) {
-            Ok(address) => match address.result(self.pairing.base_url()) {
-                Ok(payload) => reply(
-                    format!(
-                        "Optional Desktop detail: {}. No browser was opened or changed.",
-                        payload["url"].as_str().unwrap_or_default()
-                    ),
-                    payload,
-                ),
-                Err(error) => failure(NavigationFailure::Validation, &error.to_string()),
-            },
-            Err(_) => failure(
-                NavigationFailure::Validation,
-                "Invalid view or filters. Check the tool schema.",
-            ),
-        }
-    }
-
     fn status_result(
         &self,
         arguments: Value,

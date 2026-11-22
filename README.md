@@ -189,8 +189,9 @@ allowed Host and network access to that interface.
 ## Optional detail links
 
 Answer in words first. Agents can then offer a matching Desktop view with
-`ui_get_link`, available to the ordinary `ledger/read` credential, including
-under `--read-only`. It returns a credential-free absolute URL and structured
+`ui_get_link` on the managed ledger MCP connection with its ordinary
+`ledger/read` grant, including under `--read-only`. It returns a
+credential-free absolute URL and structured
 view/filter identifiers without opening or changing a browser. No pairing,
 association or live tab is needed to generate a link. Browser access still
 requires human pairing.
