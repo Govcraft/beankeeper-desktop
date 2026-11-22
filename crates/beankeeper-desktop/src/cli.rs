@@ -5,11 +5,13 @@ use std::{net::SocketAddr, path::PathBuf};
 use beankeeper_cli::cli::{Cli, PassphraseOptions};
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser};
 
+use crate::instance::ListenerAddress;
+
 /// Options for the combined UI and MCP listener.
 #[derive(Args, Debug, Clone, Copy)]
 pub struct ServeOptions {
     /// Listen address; port 0 requests an available port.
-    #[arg(long, default_value = "127.0.0.1:8750")]
+    #[arg(long, default_value_t = ListenerAddress::default().into())]
     pub bind: SocketAddr,
     /// Permit a non-loopback listener over plaintext HTTP, without relaxing Host/Origin checks.
     #[arg(long)]
@@ -23,18 +25,15 @@ pub struct ServeOptions {
 #[derive(Args, Debug, Clone, Copy)]
 pub struct OpenOptions {
     /// Loopback address used by `bk serve`.
-    #[arg(long, default_value = "127.0.0.1:8750", value_parser = loopback_address)]
+    #[arg(long, default_value_t = ListenerAddress::default().into(), value_parser = loopback_address)]
     pub bind: SocketAddr,
 }
 
 pub(crate) fn loopback_address(value: &str) -> Result<SocketAddr, String> {
-    let address: SocketAddr = value
-        .parse()
-        .map_err(|error| format!("invalid address: {error}"))?;
-    if !crate::server::ui_loopback(address.ip()) || address.port() == 0 {
-        return Err("bk open requires 127.0.0.1 or [::1] with a nonzero port".into());
-    }
-    Ok(address)
+    value
+        .parse::<ListenerAddress>()
+        .map(Into::into)
+        .map_err(Into::into)
 }
 
 /// The upstream CLI extended with Desktop onboarding, hosting and bridging.

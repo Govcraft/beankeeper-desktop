@@ -1,16 +1,62 @@
 //! Validated wire values shared by every address entry point.
 
-use std::{fmt, str::FromStr};
+use std::{convert::Infallible, fmt, str::FromStr};
 
 use beankeeper::types::{
     AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency, Money,
 };
-use beankeeper_cli::db::{BudgetMonths, ids::TransactionId as LedgerTransactionId};
+use beankeeper_cli::db::{
+    BudgetMonths, companies::CompanySlug, ids::TransactionId as LedgerTransactionId,
+};
 use chrono::{Datelike, Month, NaiveDate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::LinkError;
+
+/// An exact company filter or the already validated global CLI company selection.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(from = "String")]
+#[schemars(with = "String")]
+pub(super) enum LinkCompany {
+    Filter(String),
+    Selected(CompanySlug),
+}
+
+impl From<String> for LinkCompany {
+    fn from(value: String) -> Self {
+        Self::Filter(value)
+    }
+}
+
+impl From<&CompanySlug> for LinkCompany {
+    fn from(value: &CompanySlug) -> Self {
+        Self::Selected(value.clone())
+    }
+}
+
+impl FromStr for LinkCompany {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(value.to_owned().into())
+    }
+}
+
+impl AsRef<str> for LinkCompany {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Filter(value) => value,
+            Self::Selected(value) => value.as_str(),
+        }
+    }
+}
+
+impl Serialize for LinkCompany {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_ref())
+    }
+}
 
 macro_rules! string_wire {
     ($name:ident) => {

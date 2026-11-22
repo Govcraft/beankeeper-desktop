@@ -2,7 +2,7 @@
 
 use std::{io::Read, net::SocketAddr, time::Duration};
 
-use crate::{DesktopError, server::local_url, ui::HEALTH};
+use crate::{DesktopError, instance::HEALTH, server::local_url};
 
 /// Verify the server identity and launch the default browser.
 ///

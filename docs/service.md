@@ -60,14 +60,15 @@ configure it in agents the owner trusts to manage local hosting. The HTTP ledger
 endpoint retains the existing upstream capability checks and browser pairing.
 Restart agent clients once after installation to load the new connections.
 
-Hosting always binds IPv4 `127.0.0.1`, trying port 8750 first and selecting an
-available loopback port if it is occupied. The bound socket stays reserved
-through server startup. A private runtime descriptor publishes the actual port;
-`bridge --service` discovers it on each connection. Restart or reconnect the
+Hosting always binds IPv4 `127.0.0.1`. A fresh installation prefers port 8750.
+When the configured port is occupied, the service saves an available fallback
+port in `service.json` for future starts. The bound socket stays reserved through
+server startup. A private runtime descriptor publishes the actual port for
+status checks, `bk ui link` and each `bridge --service` connection. Restart or reconnect the
 ledger MCP client after service replacement. Explicit bridge `--url` and
 `--token-file` options still work for manual servers.
 
-Status verifies Desktop's health identity and PID before using the private agent
+Status verifies Desktop's launch identity and PID before using the private agent
 credential to open a short MCP session. It reads the version from the responding
 server. The running bridge and status check work from the published endpoint
 even when the calling agent has no connection to the OS service manager.
@@ -75,6 +76,12 @@ even when the calling agent has no connection to the OS service manager.
 cannot be reached, its process identity differs, or MCP authentication fails.
 If an agent credential has expired or been revoked, ask the owner to renew it
 using the upstream agent commands.
+
+`bk service status` and `bk agents doctor` warn when another Desktop instance
+is listening on port 8750. The warning names its books path when a local record
+identifies it. Older Linux instances with an explicit `--db` can also be
+identified from their launch arguments. If the path is unavailable, the warning
+still identifies the competing listener. These checks never open competing books.
 
 ## Platform behavior and files
 
@@ -84,14 +91,17 @@ using the upstream agent commands.
 | macOS | `~/Library/LaunchAgents/ai.govcraft.beankeeper-desktop.plist` | `~/Library/Application Support/beankeeper-desktop/books.db` | Same Application Support directory; log at `~/Library/Logs/beankeeper-desktop/service.log` |
 | Windows | Task Scheduler `Beankeeper-Desktop-<current-user-SID>`, interactive logon, limited privileges | `%LOCALAPPDATA%\beankeeper-desktop\books.db` | Same local app-data directory; log at `logs\service.log` |
 
-State includes `service.json`, `service-runtime.json`, lifecycle/host lock files,
-and native task/unit artifacts. It contains no passphrase or token value.
+State includes `service.json`, `service-runtime.json`, records under `instances/`
+keyed by canonical books path and listener, lifecycle and host lock files, and
+native task or unit artifacts. It contains no passphrase or token value.
 The private server log contains expiring pairing URLs. Keep it private and use
 normal OS log maintenance if a long-lived installation accumulates diagnostics.
 `BEANKEEPER_SERVICE_DATA_DIR`, `BEANKEEPER_DESKTOP_STATE_DIR` and
 `BEANKEEPER_SERVICE_LOG_DIR` override storage with absolute paths. When using
-custom paths, configure the same overrides in the lifecycle/bridge MCP client
-environment. A service definition records them for the hosted process.
+custom paths, configure the same overrides in the lifecycle and bridge MCP
+client environment. Use the same Desktop state directory when starting a
+foreground listener and generating CLI links for it. A service definition
+records its overrides for the hosted process.
 
 Linux uses `Restart=on-failure` with a two-second delay. Stop inspects its restart
 policy, disables startup and masks the unit. Start unmasks and relinks it.

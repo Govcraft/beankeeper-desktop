@@ -24,7 +24,6 @@ use crate::{
 const SHELL: &str = include_str!("../../../ui/index.html");
 const STYLE: &str = include_str!("../../../ui/style.css");
 const SESSION_CONTROLS: &str = include_str!("../../../ui/session.html");
-pub(crate) const HEALTH: &str = "beankeeper-desktop-v1";
 
 pub(crate) fn page(title: &str, description: &str, path: &str, content: &Markup) -> Html<String> {
     let mut navigation = Markup::default();
@@ -104,21 +103,6 @@ pub(crate) fn router(db: Db, company: Option<CompanySlug>, pairing: PairingState
     .route(
         "/assets/style.css",
         get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE) }),
-    )
-    .route(
-        "/health",
-        get(|| async {
-            (
-                [
-                    (
-                        "x-beankeeper-desktop-version",
-                        env!("CARGO_PKG_VERSION").to_owned(),
-                    ),
-                    ("x-beankeeper-desktop-pid", std::process::id().to_string()),
-                ],
-                HEALTH,
-            )
-        }),
     )
     .fallback(|| async { (StatusCode::NOT_FOUND, "Page not found") })
 }

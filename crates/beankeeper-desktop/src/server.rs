@@ -1,11 +1,13 @@
 //! Single-listener Desktop server; ledger and authentication remain upstream.
 
 use std::{
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
-use axum::{Router, middleware};
+use axum::{Router, middleware, routing::get, serve::Listener};
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
@@ -16,6 +18,7 @@ use beankeeper_cli::{
 use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
+    instance::{self, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
     pairing::{self, PairingState},
@@ -77,6 +80,24 @@ pub fn application(
     config: StreamableHttpServerConfig,
     pairing: PairingState,
 ) -> Result<Router, DesktopError> {
+    application_with_id(
+        cli,
+        read_only,
+        bound,
+        config,
+        pairing,
+        InstanceId::default(),
+    )
+}
+
+fn application_with_id(
+    cli: &Cli,
+    read_only: bool,
+    bound: SocketAddr,
+    config: StreamableHttpServerConfig,
+    pairing: PairingState,
+    id: InstanceId,
+) -> Result<Router, DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
         .with_allowed_hosts(boundary.authorities())
@@ -120,6 +141,7 @@ pub fn application(
         .merge(navigation::router(navigation, pairing.clone()))
         .merge(pairing::router(pairing))
         .merge(mcp)
+        .route("/health", get(move || async move { instance::health(&id) }))
         .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
 }
 
@@ -129,7 +151,7 @@ pub fn application(
 /// Returns bind, runtime, passphrase, ledger or server failures.
 pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), DesktopError> {
     let listener = std::net::TcpListener::bind(bind.address())?;
-    serve_bound(cli, listener, read_only)
+    serve_bound(cli, listener, read_only, InstanceId::default())
 }
 
 /// Host an already-bound loopback socket, preserving port fallback without a bind race.
@@ -139,36 +161,33 @@ pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), Desk
 pub(crate) fn serve_listener(
     cli: &Cli,
     listener: std::net::TcpListener,
+    id: InstanceId,
 ) -> Result<(), DesktopError> {
     validate_bind(listener.local_addr()?, false)?;
-    serve_bound(cli, listener, false)
+    serve_bound(cli, listener, false, id)
 }
 
 fn serve_bound(
     cli: &Cli,
     listener: std::net::TcpListener,
     read_only: bool,
+    id: InstanceId,
 ) -> Result<(), DesktopError> {
-    listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let listener = {
-        let _enter = runtime.enter();
-        tokio::net::TcpListener::from_std(listener)?
-    };
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
-    let app = application(cli, read_only, bound, config, pairing)?;
-    if let Ok(directory) = crate::product::state_dir() {
-        crate::updates::background(
-            directory.join("updates.json"),
-            crate::product::update_checks(),
-        );
-    }
+    let app = application_with_id(cli, read_only, bound, config, pairing, id.clone())?;
+    let directory = crate::product::state_dir().map_err(DesktopError::Product)?;
+    let serving = RegisteredListener::publish(listener, runtime.handle(), &directory, &cli.db, id)?;
+    crate::updates::background(
+        directory.join("updates.json"),
+        crate::product::update_checks(),
+    );
     eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
     eprintln!("Open the link, then select Pair this browser to confirm.");
     eprintln!(
@@ -181,7 +200,7 @@ fn serve_bound(
         );
     }
     runtime.block_on(async move {
-        axum::serve(listener, app)
+        axum::serve(serving, app)
             .with_graceful_shutdown(async move {
                 shutdown_signal().await;
                 cancellation.cancel();
@@ -189,6 +208,50 @@ fn serve_bound(
             .await
     })?;
     Ok(())
+}
+
+struct RegisteredListener {
+    // Fields drop in declaration order. Remove the record before the OS can
+    // give the port to another launch that would write a record at the same path.
+    _registration: Option<Registration>,
+    listener: tokio::net::TcpListener,
+}
+
+impl RegisteredListener {
+    fn publish(
+        listener: std::net::TcpListener,
+        runtime: &tokio::runtime::Handle,
+        state: &Path,
+        books: &Path,
+        id: InstanceId,
+    ) -> Result<Self, DesktopError> {
+        listener.set_nonblocking(true)?;
+        let listener = {
+            let _enter = runtime.enter();
+            tokio::net::TcpListener::from_std(listener)?
+        };
+        let registration = ListenerAddress::from_bound(listener.local_addr()?)
+            .map(|address| Registration::publish(state, books.try_into()?, address, id))
+            .transpose()
+            .map_err(|error| DesktopError::Service(Box::new(error)))?;
+        Ok(Self {
+            _registration: registration,
+            listener,
+        })
+    }
+}
+
+impl Listener for RegisteredListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        Listener::accept(&mut self.listener).await
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
 }
 
 async fn shutdown_signal() {
@@ -202,4 +265,70 @@ async fn shutdown_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::BooksPath;
+
+    #[test]
+    fn registered_listener_serves_health_and_removes_its_record_on_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(unix)]
+        use std::os::fd::AsRawFd;
+        #[cfg(windows)]
+        use std::os::windows::io::AsRawSocket;
+
+        let state = tempfile::Builder::new()
+            .prefix("bk service café 's owner’s-")
+            .tempdir()?;
+        let books = state.path().join("books.db");
+        std::fs::File::create(&books)?;
+        let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let bound = socket.local_addr()?;
+        #[cfg(unix)]
+        let original_socket = socket.as_raw_fd();
+        #[cfg(windows)]
+        let original_socket = socket.as_raw_socket();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let id = InstanceId::default();
+        let serving = RegisteredListener::publish(
+            socket,
+            runtime.handle(),
+            state.path(),
+            &books,
+            id.clone(),
+        )?;
+        #[cfg(unix)]
+        assert_eq!(serving.listener.as_raw_fd(), original_socket);
+        #[cfg(windows)]
+        assert_eq!(serving.listener.as_raw_socket(), original_socket);
+        let app = Router::new().route("/health", get(move || async move { instance::health(&id) }));
+        let (shutdown, signal) = tokio::sync::oneshot::channel();
+        let host = runtime.spawn(async move {
+            axum::serve(serving, app)
+                .with_graceful_shutdown(async {
+                    let _ = signal.await;
+                })
+                .await
+        });
+
+        let books = BooksPath::try_from(books.as_path())?;
+        let live = instance::discover(state.path(), &books, None);
+        let _ = shutdown.send(());
+        runtime.block_on(host)??;
+
+        assert_eq!(
+            SocketAddr::from(live?.ok_or("missing live listener")?),
+            bound
+        );
+        let mut records = std::fs::read_dir(state.path().join("instances"))?;
+        let directory = records.next().ok_or("missing books registry directory")??;
+        assert!(directory.path().read_dir()?.next().is_none());
+        Ok(())
+    }
 }

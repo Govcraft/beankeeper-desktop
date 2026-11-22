@@ -77,8 +77,12 @@ fn main() -> ExitCode {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
                 .unwrap_or_else(|error| error.exit());
-            let json = ledger.is_json();
-            links::run(*options, ledger.company.as_ref(), json).map_err(DesktopError::Link)
+            let books = if matches.value_source("db") == Some(ValueSource::DefaultValue) {
+                service::LinkBooks::ManagedOrDefault(&ledger.db)
+            } else {
+                service::LinkBooks::Explicit(&ledger.db)
+            };
+            links::run(*options, &ledger, books)
         }
         DesktopCommand::Agents(options) => {
             let json = matches.get_flag("json")

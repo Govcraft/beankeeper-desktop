@@ -4,18 +4,21 @@ mod filters;
 pub(crate) mod mcp;
 pub(crate) mod values;
 
-use std::net::SocketAddr;
+use std::{convert::Infallible, net::SocketAddr, str::FromStr};
 
 use beankeeper_cli::db::companies::CompanySlug;
 use filters::{
     Balance, BookFilter, Budget, CashFlowFilters, Dashboard, Empty, Period, Reconciliation,
-    ReportSelector, ReviewDetail, Summary, Transaction, Transactions, Trend, Validated, Vendor,
+    ReconciliationMode, ReportSelector, ReviewDetail, Summary, Transaction, Transactions, Trend,
+    TrendMetric, TrendPeriod, Validated, Vendor,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::{DesktopError, instance::ListenerAddress, service::LinkBooks};
+
 /// The report catalog, route lookup, and address encoders share this set.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Income,
     Balance,
@@ -73,6 +76,24 @@ impl ReportKind {
     }
 }
 
+impl FromStr for ReportKind {
+    type Err = LinkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "income-statement" => Ok(Self::Income),
+            "balance-sheet" => Ok(Self::Balance),
+            "cash-flow" => Ok(Self::Cash),
+            "trend" => Ok(Self::Trend),
+            "budget-variance" => Ok(Self::Budget),
+            "schedule-c" => Ok(Self::Schedule),
+            "1099" => Ok(Self::Vendor),
+            "reconciliation" => Ok(Self::Reconciliation),
+            _ => Err(LinkError::INVALID_FILTERS),
+        }
+    }
+}
+
 // CLI selectors and the MCP schema share one list of view names.
 macro_rules! desktop_views {
     ($($variant:ident as $wire:literal => $(#[$attr:meta])* $filters:ty),+ $(,)?) => {
@@ -87,6 +108,16 @@ macro_rules! desktop_views {
         #[schemars(extend("type" = "object"))]
         pub(crate) enum ViewAddress {
             $(#[serde(rename = $wire)] $variant { $(#[$attr])* state: $filters },)+
+        }
+
+        impl TryFrom<(View, &mut RawLinkFlags)> for ViewAddress {
+            type Error = LinkError;
+
+            fn try_from((view, flags): (View, &mut RawLinkFlags)) -> Result<Self, Self::Error> {
+                Ok(match view {
+                    $(View::$variant => Self::$variant { state: flags.try_into()? },)+
+                })
+            }
         }
     };
 }
@@ -247,8 +278,7 @@ impl TryFrom<serde_json::Value> for ViewAddress {
     type Error = LinkError;
 
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
-        serde_json::from_value(value)
-            .map_err(|_| LinkError("Invalid view or filters. Check the tool schema."))
+        serde_json::from_value(value).map_err(|_| LinkError::INVALID_FILTERS)
     }
 }
 
@@ -281,7 +311,7 @@ fn fields(value: &impl Serialize) -> Result<serde_json::Value, &'static str> {
     serde_json::to_value(value).map_err(|_| "Invalid view filters.")
 }
 
-/// Serialization only: all semantic checks have already run during deserialization.
+/// Serialization only: semantic checks have already run at the input boundary.
 fn encode_path(mut route: String, fields: &serde_json::Value) -> Result<String, &'static str> {
     const ORDER: &[&str] = &[
         "company",
@@ -384,8 +414,12 @@ pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
 }
 
 /// Invalid view selectors or filters. No ledger or browser state was changed.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct LinkError(pub(crate) &'static str);
+
+impl LinkError {
+    const INVALID_FILTERS: Self = Self("Invalid view or filters. Check the tool schema.");
+}
 
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -394,98 +428,75 @@ impl std::fmt::Display for LinkError {
 }
 impl std::error::Error for LinkError {}
 
-// Untrusted CLI spelling, consumed once by ViewAddress deserialization.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, clap::Args)]
+// Keep value errors for the link command to report as structured VALIDATION errors.
+#[derive(Clone, Debug)]
+struct LinkFlag<T>(Result<T, LinkError>);
 
-pub(crate) struct RawLinkFlags {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    company: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
+impl<T: FromStr> FromStr for LinkFlag<T> {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(value.parse().map_err(|_| LinkError::INVALID_FILTERS)))
+    }
+}
+
+impl<T> LinkFlag<T> {
+    fn take(flag: &mut Option<Self>) -> Result<Option<T>, LinkError> {
+        flag.take().map(|flag| flag.0).transpose()
+    }
+}
+
+macro_rules! link_flags {
+    ($($(#[$attr:meta])* $field:ident: $value:ty),+ $(,)?) => {
+        #[derive(Debug, clap::Args)]
+        pub(crate) struct RawLinkFlags {
+            $($(#[$attr])* #[arg(long)] $field: Option<LinkFlag<$value>>,)+
+        }
+
+        impl RawLinkFlags {
+            fn reject_unused(&self) -> Result<(), LinkError> {
+                if $(self.$field.is_some())||+ {
+                    return Err(LinkError::INVALID_FILTERS);
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+link_flags! {
+    company: values::LinkCompany,
     /// Exact upstream entry tax-category tag. Spending account categories use account.
-    category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
+    category: String,
     /// Exact metadata.payee string, preserving case and punctuation.
-    payee: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
+    payee: String,
     /// Inclusive comparison start, paired with `compare_to`.
-    compare_from: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
+    compare_from: values::Date,
     /// Inclusive comparison end; as-of balance sheets use this alone.
-    compare_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    account: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    from: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    min_amount: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    max_amount: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    search: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    offset: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    currency: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    transaction_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    proposal_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    report_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    period: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    metric: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    year: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    threshold: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    cash_account: Option<values::AccountSelection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    receivable_account: Option<values::AccountSelection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    payable_account: Option<values::AccountSelection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    statement: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    statement_balance: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    link_key: Option<String>,
+    compare_to: values::Date,
+    account: values::AccountCode,
+    from: values::Date,
+    to: values::Date,
+    min_amount: values::MinorAmount,
+    max_amount: values::MinorAmount,
+    search: String,
+    status: values::Clearance,
+    offset: values::Offset,
+    currency: values::Currency,
+    transaction_id: values::TransactionId,
+    proposal_id: values::ProposalId,
+    report_kind: ReportKind,
+    period: TrendPeriod,
+    metric: TrendMetric,
+    year: values::Year,
+    threshold: values::Threshold,
+    cash_account: values::AccountSelection,
+    receivable_account: values::AccountSelection,
+    payable_account: values::AccountSelection,
+    mode: ReconciliationMode,
+    statement: String,
+    statement_balance: values::DecimalAmount,
+    link_key: String,
 }
 
 /// Options for generating a link without starting or opening Desktop.
@@ -496,30 +507,48 @@ pub struct LinkOptions {
     view_id: View,
     #[command(flatten)]
     state: RawLinkFlags,
-    /// Address of Desktop; link generation does not probe the listener.
-    #[arg(long, default_value = "127.0.0.1:8750", value_parser = crate::cli::loopback_address)]
-    bind: std::net::SocketAddr,
+    /// Select a particular listener when more than one instance serves these books.
+    #[arg(long)]
+    bind: Option<ListenerAddress>,
+}
+
+impl TryFrom<(LinkOptions, Option<&CompanySlug>)> for ViewAddress {
+    type Error = LinkError;
+
+    fn try_from(
+        (mut options, company): (LinkOptions, Option<&CompanySlug>),
+    ) -> Result<Self, Self::Error> {
+        if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
+            options.state.company = company.map(|slug| LinkFlag(Ok(slug.into())));
+        }
+        let address = Self::try_from((options.view_id, &mut options.state))
+            .map_err(|_| LinkError::INVALID_FILTERS)?;
+        options.state.reject_unused()?;
+        Ok(address)
+    }
 }
 
 /// Print a credential-free Desktop link using the same contract as MCP.
 ///
 /// # Errors
-/// Returns VALIDATION for malformed selectors, values or unsupported filters.
+/// Returns VALIDATION for malformed selectors or a named instance lookup error.
 pub fn run(
-    mut options: LinkOptions,
-    company: Option<&CompanySlug>,
-    json: bool,
-) -> Result<(), LinkError> {
-    if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
-        options.state.company = company.map(ToString::to_string);
-    }
+    options: LinkOptions,
+    ledger: &beankeeper_cli::cli::Cli,
+    books: LinkBooks<'_>,
+) -> Result<(), DesktopError> {
+    let json = ledger.is_json();
     let result = (|| {
-        let address = ViewAddress::try_from(serde_json::json!({
-            "view_id":options.view_id,"state":options.state
-        }))?;
-        let link = ViewLink::try_from((&address, options.bind))?;
+        let bind = options.bind;
+        let address = ViewAddress::try_from((options, ledger.company.as_ref()))
+            .map_err(DesktopError::Link)?;
+        let bind = crate::service::link_address(books, bind)
+            .map_err(|error| DesktopError::Service(Box::new(error)))?;
+        let link = ViewLink::try_from((&address, bind.into())).map_err(DesktopError::Link)?;
         if json {
-            link.payload().map(|payload| payload.to_string())
+            link.payload()
+                .map(|payload| payload.to_string())
+                .map_err(DesktopError::Link)
         } else {
             Ok(link.url)
         }
@@ -528,10 +557,12 @@ pub fn run(
         Ok(result) => result,
         Err(error) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"code":"VALIDATION","message":error.to_string()})
-                );
+                let (code, message) = match &error {
+                    DesktopError::Service(error) => (error.code(), error.to_string()),
+                    DesktopError::Link(error) => ("VALIDATION", error.to_string()),
+                    _ => return Err(error),
+                };
+                println!("{}", serde_json::json!({"code":code,"message":message}));
             }
             return Err(error);
         }

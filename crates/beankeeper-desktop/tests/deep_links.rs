@@ -1,5 +1,7 @@
 pub mod common;
 
+use std::path::Path;
+
 use beankeeper::types::AccountType;
 use beankeeper::types::Currency;
 use beankeeper::types::DebitOrCredit;
@@ -181,7 +183,8 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     };
     drop(db);
     let reader = token(&ledger.reader)?;
-    let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
+    let state = tempfile::tempdir()?;
+    let mut server = serve_for_links(&ledger, state.path(), "127.0.0.1:0")?;
     server.initialize(Some(reader))?;
     let tools = rpc(server.request("tools/list", json!({}), Some(reader))?)?;
     assert!(
@@ -202,7 +205,8 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     );
     server.pair()?;
     assert_view_links_resolve(&server, reader, transaction_id)?;
-    assert_link_cli_parity(&server, reader)?;
+    assert_link_cli_parity(&server, reader, &ledger.path, state.path())?;
+    assert_inherited_company_parity(&server, reader, &ledger.path, state.path())?;
     Ok(())
 }
 
@@ -308,29 +312,25 @@ fn pairing_restores_the_exact_view_without_granting_access_on_get() -> TestResul
 }
 
 #[test]
-fn cli_links_need_no_server_or_ledger_and_reject_invalid_filters() -> TestResult {
+fn cli_links_require_a_running_instance_and_reject_invalid_filters_first() -> TestResult {
     let directory = tempfile::tempdir()?;
+    let books = directory.path().join("books.db");
+    std::fs::write(&books, b"Link discovery does not open the ledger")?;
     let output = clean_command()
         .current_dir(directory.path())
-        .args([
-            "ui",
-            "link",
-            "--view-id",
-            "settings",
-            "--bind",
-            "[::1]:54321",
-        ])
+        .env(
+            "BEANKEEPER_DESKTOP_STATE_DIR",
+            directory.path().join("state"),
+        )
+        .arg("--db")
+        .arg("books.db")
+        .args(["--json", "ui", "link", "--view-id", "settings"])
         .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout)?.trim(),
-        "http://[::1]:54321/settings"
-    );
-    assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["code"], "DESKTOP_BOOKS_NOT_SERVED");
+    assert!(result["url"].is_null());
+    assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
     let output = clean_command()
         .args([
             "--format",
@@ -372,9 +372,102 @@ fn cli_links_need_no_server_or_ledger_and_reject_invalid_filters() -> TestResult
     Ok(())
 }
 
-fn assert_link_cli_parity(server: &Server, reader: &str) -> TestResult {
+fn serve_for_links(ledger: &Ledger, state: &Path, bind: &str) -> TestResult<Server> {
+    let mut command = ledger.command();
+    command.env("BEANKEEPER_DESKTOP_STATE_DIR", state);
+    command.args(["serve", "--read-only", "--bind", bind]);
+    Server::launch(command)
+}
+
+fn cli_accounts(books: &Path, state: &Path, bind: Option<&str>) -> TestResult<Value> {
+    let mut command = clean_command();
+    command.env("BEANKEEPER_DESKTOP_STATE_DIR", state);
+    command.arg("--db").arg(books);
+    command.args(["--json", "ui", "link", "--view-id", "accounts"]);
+    if let Some(bind) = bind {
+        command.args(["--bind", bind]);
+    }
+    let output = command.output()?;
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        output.status.success(),
+        result["url"].is_string(),
+        "{result}"
+    );
+    Ok(result)
+}
+
+#[test]
+fn cli_and_mcp_choose_the_books_listener_and_reject_a_reused_port() -> TestResult {
+    let state = tempfile::tempdir()?;
+    let first = Ledger::new()?;
+    let second = Ledger::new()?;
+    let mut first_server = serve_for_links(&first, state.path(), "127.0.0.1:0")?;
+    let mut second_server = serve_for_links(&second, state.path(), "127.0.0.1:0")?;
+    let first_bind = first_server
+        .base
+        .strip_prefix("http://")
+        .ok_or("first bind")?
+        .to_owned();
+    let first_link = cli_accounts(&first.path, state.path(), None)?;
+    let second_alias = second
+        .path
+        .parent()
+        .ok_or("ledger directory")?
+        .join("./books.db");
+    let second_link = cli_accounts(&second_alias, state.path(), None)?;
+    assert_eq!(first_link["url"], format!("{}/accounts", first_server.base));
+    assert_eq!(
+        second_link["url"],
+        format!("{}/accounts", second_server.base)
+    );
+    let second_reader = token(&second.reader)?;
+    second_server.initialize(Some(second_reader))?;
+    assert_eq!(
+        second_link,
+        link(&second_server, second_reader, "accounts", json!({}))?
+    );
+    assert_eq!(
+        cli_accounts(&second.path, state.path(), Some(&first_bind))?["code"],
+        "DESKTOP_BOOKS_NOT_SERVED"
+    );
+    let first_cookie = first_server.pair()?;
+    let second_cookie = second_server.pair()?;
+    let cookies = format!("{first_cookie}; {second_cookie}");
+    let browser = reqwest::blocking::Client::builder().no_proxy().build()?;
+    for result in [&first_link, &second_link, &first_link] {
+        assert_eq!(
+            browser
+                .get(result["url"].as_str().ok_or("URL")?)
+                .header("Cookie", &cookies)
+                .send()?
+                .status(),
+            200
+        );
+    }
+    drop(first_server);
+    let replacement = serve_for_links(&second, state.path(), &first_bind)?;
+    assert_eq!(
+        cli_accounts(&first.path, state.path(), None)?["code"],
+        "DESKTOP_BOOKS_NOT_SERVED"
+    );
+    assert_eq!(
+        cli_accounts(&second.path, state.path(), None)?["code"],
+        "DESKTOP_MULTIPLE_INSTANCES"
+    );
+    assert_eq!(
+        cli_accounts(&second.path, state.path(), Some(&first_bind))?["url"],
+        format!("{}/accounts", replacement.base)
+    );
+    Ok(())
+}
+
+fn assert_link_cli_parity(server: &Server, reader: &str, books: &Path, state: &Path) -> TestResult {
     let bind = server.base.strip_prefix("http://").ok_or("bind")?;
     let output = clean_command()
+        .env("BEANKEEPER_DESKTOP_STATE_DIR", state)
+        .arg("--db")
+        .arg(books)
         .args([
             "--json",
             "ui",
@@ -465,6 +558,51 @@ fn assert_link_cli_parity(server: &Server, reader: &str) -> TestResult {
         let cli: Value = serde_json::from_slice(&cli.stdout)?;
         assert_eq!(cli["code"], "VALIDATION");
         assert_eq!(cli, mcp["result"]["structuredContent"]);
+    }
+    Ok(())
+}
+
+fn assert_inherited_company_parity(
+    server: &Server,
+    reader: &str,
+    books: &Path,
+    state: &Path,
+) -> TestResult {
+    let bind = server.base.strip_prefix("http://").ok_or("bind")?;
+    for (view, flags, expected_state) in [
+        (
+            "reports",
+            vec!["--report-kind", "trend", "--period", "quarter"],
+            json!({"company":"acme","report_kind":"trend","period":"quarter"}),
+        ),
+        ("settings", vec![], json!({})),
+    ] {
+        let output = clean_command()
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", state)
+            .arg("--db")
+            .arg(books)
+            .args([
+                "--company",
+                "acme",
+                "--json",
+                "ui",
+                "link",
+                "--view-id",
+                view,
+                "--bind",
+                bind,
+            ])
+            .args(flags)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout)?,
+            link(server, reader, view, expected_state)?
+        );
     }
     Ok(())
 }

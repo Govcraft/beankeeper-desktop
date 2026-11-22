@@ -301,9 +301,13 @@ same `view_id` and `state` used by `ui_show_view`. This tool succeeds without a
 paired browser, UI credential or live tab, works under `--read-only`, and never
 navigates. Put its `url` in your answer as an optional detail link. Do not call
 `ui_show_view` merely to obtain a URL. The CLI equivalent is
-`bk --json ui link --view-id VIEW --company SLUG ...`; it does not need a running
-server or ledger. Success returns the same `url`, `path`, `view_id` and `state`.
-Invalid selectors return a named `VALIDATION` error.
+`bk --json ui link --view-id VIEW --company SLUG ...`. It finds the running
+instance for the managed books or for the file selected by `--db` or
+`BEANKEEPER_DB`. Success returns the same `url`, `path`, `view_id` and `state`.
+Invalid selectors return `VALIDATION`. If `DESKTOP_BOOKS_NOT_SERVED` is returned,
+answer in words and say that Desktop is unavailable for those books. If
+`DESKTOP_MULTIPLE_INSTANCES` is returned, select the intended listener with
+`--bind` when its address is known.
 
 Always carry the answer's exact company slug, currency, account code and date
 bounds into the link. Spending categories identified by expense accounts map to
@@ -325,7 +329,10 @@ Example after answering an October spending question:
 {"name":"ui_get_link","arguments":{"view_id":"transactions","state":{"company":"acme","account":"5000","currency":"USD","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30"}}}
 ```
 
-If the browser is unpaired, the human opens the terminal's one-time pairing URL
+Each running Desktop listener serves one books file. Use the ledger connection
+for the books being discussed. A browser paired with that listener can open its
+detail links for the life of the session. A separate listener needs an initial
+pairing. If the browser is unpaired, the human opens the terminal's one-time pairing URL
 in that same browser and confirms pairing. Desktop then restores the requested
 view. Keep pairing and bearer credentials out of shared detail URLs. A saved
 view URL conveys no authority. Use `ui_show_view` only when the owner wants you

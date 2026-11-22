@@ -272,7 +272,7 @@ impl Server {
     ///
     /// # Panics
     /// Panics if the server omits the expected pairing response.
-    pub fn pair(&mut self) -> TestResult {
+    pub fn pair(&mut self) -> TestResult<String> {
         let response = self
             .client
             .get(self.pairing_url.as_deref().ok_or("missing pairing URL")?)
@@ -313,7 +313,7 @@ impl Server {
             .timeout(Duration::from_secs(5))
             .default_headers(headers)
             .build()?;
-        Ok(())
+        Ok(cookie)
     }
 
     /// Send one JSON-RPC request to the fixture server.

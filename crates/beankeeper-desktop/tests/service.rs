@@ -264,6 +264,7 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     assert_eq!(status["running"], true);
     assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(status["mcp_endpoint"], format!("{}/mcp", server.base));
+    assert_fallback_link(&configured, &state, &server.base)?;
     let agent_command = || {
         let mut command = configured();
         command
@@ -286,6 +287,30 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         serde_json::from_slice::<Value>(&output.stdout)?["running"],
         false
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_fallback_link(
+    configured: &impl Fn() -> std::process::Command,
+    state: &std::path::Path,
+    base: &str,
+) -> TestResult {
+    let persisted: Value = serde_json::from_slice(&std::fs::read(state.join("service.json"))?)?;
+    assert_eq!(
+        persisted["port"],
+        reqwest::Url::parse(base)?.port().ok_or("fallback port")?
+    );
+    let output = configured()
+        .args(["--json", "ui", "link", "--view-id", "accounts"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let link: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(link["url"], format!("{base}/accounts"));
     Ok(())
 }
 

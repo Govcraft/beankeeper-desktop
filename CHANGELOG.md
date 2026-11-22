@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.17] - 2026-11-22
+
+### Fixed
+
+- Resolve CLI detail links against the live Desktop instance serving the
+  requested books, including managed services on fallback ports.
+- Remember the fallback port for future service starts and report a competing
+  Desktop listener in service status and agent doctor.
+- Serve the original bound socket so Windows can verify the managed listener
+  during installation and startup.
+
 ## [0.1.0-rc.16] - 2026-11-22
 
 ### Changed
