@@ -542,6 +542,9 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
         ServiceCommand::Stop => {
             if previous.is_some() {
                 manager::stop(&paths, &Session::discover()?)?;
+                // A native manager can terminate the host before it removes
+                // its descriptor, notably when Windows stops the task.
+                remove_if_exists(&paths.runtime())?;
             }
             println!("Beankeeper stopped; login startup is disabled until bk service start.");
         }
