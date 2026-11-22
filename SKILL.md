@@ -40,11 +40,13 @@ processor using the commands below.
 
 Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
 if `cosign` is missing. Install it through the owner's trusted package channel
-or stop and explain what is missing. Guided setup selects the latest published
-release with signature bundles for this machine and checks that it provides
-managed service and agent registration commands. On Linux and macOS, install
-`jq` through the owner's trusted package channel for automatic selection. To
-select a specific signed release, set `BK_VERSION` without the tag prefix.
+or stop and explain what is missing. Guided setup selects the highest published
+version with signature bundles for this machine and checks that it provides
+managed service and agent registration commands. Regular installs prefer a
+signed stable release and fall back to the highest signed release candidate
+for this machine. On Linux and macOS, install `jq` through the owner's trusted
+package channel for automatic selection. To select a specific signed release,
+set `BK_VERSION` without the tag prefix.
 
 ### Linux and macOS
 

@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh | sh
 #
 # Options (environment variables):
-#   BK_VERSION   - version to install (default: latest stable, or signed release for guided setup)
+#   BK_VERSION   - version to install (default: signed release, with stable preferred for regular installs)
 #   BK_INSTALL   - install directory (default: ~/.local/bin)
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
@@ -31,8 +31,6 @@ main() {
     done
     detect_platform
     resolve_version
-    case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
-    printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || fatal "invalid version: $VERSION"
     download_and_install
     verify
     if [ "$NO_SERVICE" != 1 ]; then
@@ -65,29 +63,21 @@ detect_platform() {
 resolve_version() {
     if [ -n "${BK_VERSION:-}" ]; then
         VERSION="$BK_VERSION"
+        case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
+        printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || fatal "invalid version: $VERSION"
         return
     fi
+    prefer_stable=true
     if [ "$REQUIRE_AGENT_SETUP" = 1 ]; then
-        resolve_guided_version
-        return
+        prefer_stable=false
     fi
 
-    info "fetching latest version..."
-    latest="$(curl -fsSI -o /dev/null -w '%{redirect_url}' \
-        "https://github.com/${REPO}/releases/latest")" || fatal "could not determine latest stable release"
-    case "$latest" in
-        "https://github.com/${REPO}/releases/tag/beankeeper-desktop-v"*) VERSION="${latest##*/beankeeper-desktop-v}" ;;
-        *) fatal "no stable release found; set BK_VERSION to a published release version" ;;
-    esac
-}
-
-resolve_guided_version() {
     command -v jq >/dev/null 2>&1 || fatal "jq is required to find a signed release; install jq or set BK_VERSION"
     info "finding the latest published release with signature bundles for ${TARGET}..."
     releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100")" \
         || fatal "could not list published releases; retry or set BK_VERSION to a signed release"
     # GitHub metadata selects a tag. Only cosign authenticates the artifacts.
-    VERSION="$(printf '%s\n' "$releases" | jq -r --arg target "$TARGET" '
+    VERSION="$(printf '%s\n' "$releases" | jq -r --arg target "$TARGET" --argjson prefer_stable "$prefer_stable" '
         [ .[] | select(.draft == false)
           | (.tag_name | capture("\\Abeankeeper-desktop-v(?<version>[0-9]+\\.[0-9]+\\.[0-9]+(?:-rc\\.[0-9]+)?)\\z").version) as $version
           | select(.prerelease == ($version | contains("-rc.")))
@@ -96,7 +86,12 @@ resolve_guided_version() {
           | select(all($archive, "\($archive).sigstore", "checksums-sha256.txt", "checksums-sha256.txt.sigstore";
               . as $required | $assets | index($required) != null))
           | $version ]
-        | max_by(split("-rc.") | [ (.[0] | split(".") | map(tonumber)), (length == 1), (.[1] | tonumber? // 0) ])
+        | max_by(split("-rc.") | [
+            ($prefer_stable and (length == 1)),
+            (.[0] | split(".") | map(tonumber)),
+            (length == 1),
+            (.[1] | tonumber? // 0)
+          ])
         // empty
     ')" || fatal "could not read published release metadata"
     [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"

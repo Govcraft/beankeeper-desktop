@@ -18,6 +18,8 @@ files for both architectures, and an x64 Windows ZIP and EXE installer. Paid OS
 signing is disabled while the Apple and Azure accounts are pending. Tag releases
 include SHA-256 checksums, Sigstore bundles and build provenance. The shell and
 PowerShell installers verify checksums and use Sigstore when cosign is available.
+By default, a regular install picks the newest signed stable release for your
+platform. If none qualifies, it picks the newest signed release candidate.
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 

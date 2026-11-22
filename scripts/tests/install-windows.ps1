@@ -1,4 +1,6 @@
 # Offline integration tests against the Windows binary built by this job.
+param([switch]$DiscoveryOnly)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 # Validate the PowerShell example embedded in the agent skill on this runner.
@@ -18,6 +20,46 @@ foreach ($required in @(
 )) {
     if ($guideCommands.Extent.Text -notcontains $required) { throw "Missing install command in SKILL.md: $required" }
 }
+
+function New-ReleaseFixture([string]$FixtureVersion, [switch]$Unsigned) {
+    $archive = "bk-$FixtureVersion-x86_64-pc-windows-msvc.zip"
+    $names = @($archive, "$archive.sigstore", 'checksums-sha256.txt')
+    if (-not $Unsigned) { $names += 'checksums-sha256.txt.sigstore' }
+    [pscustomobject]@{
+        tag_name = "beankeeper-desktop-v$FixtureVersion"
+        draft = $false
+        prerelease = $FixtureVersion.Contains('-rc.')
+        assets = @($names | ForEach-Object { @{ name = $_ } })
+    }
+}
+
+function Test-ReleaseDiscovery {
+    . "$root/install.ps1" -Version '' -InstallDir ([IO.Path]::GetTempPath()) -RequireAgentSetup:$false
+    function Invoke-RestMethod([string]$Uri) {
+        if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100') {
+            throw "Unexpected discovery request: $Uri"
+        }
+        $releases
+    }
+
+    $releases = @(
+        (New-ReleaseFixture '0.2.0-rc.11' -Unsigned)
+        (New-ReleaseFixture '0.2.0-rc.9')
+        (New-ReleaseFixture '0.2.0-rc.10')
+    )
+    if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10') { throw 'Regular setup did not select the newest signed RC' }
+
+    $releases += (New-ReleaseFixture '0.0.9'), (New-ReleaseFixture '0.1.0')
+    if ((Resolve-ReleaseVersion) -cne '0.1.0') { throw 'Regular setup did not prefer the newest signed stable release' }
+
+    $RequireAgentSetup = $true
+    if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10') { throw 'Guided setup did not select the highest signed version' }
+}
+
+Test-ReleaseDiscovery
+Write-Host 'Windows installer release discovery tests passed'
+if ($DiscoveryOnly) { return }
+
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
 $fixture = Join-Path $temporary 'fixtures'
 $destination = Join-Path $temporary 'installed'

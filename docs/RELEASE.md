@@ -186,10 +186,20 @@ inspect it, then use:
 ./install.ps1 -RequireSignatures -RequireAgentSetup -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
 ```
 
-Both scripts accept `BK_VERSION` (default: latest stable release) and `BK_INSTALL`.
-They always require a matching SHA-256 checksum before extracting or installing.
-If `cosign` is on PATH, they also verify the archive and manifest bundles with
-this exact certificate identity:
+With `BK_VERSION` unset, both installers scan up to 100 recent GitHub releases.
+A release qualifies when it is published, its prerelease flag agrees with its
+stable or `-rc.N` tag, and it lists the platform archive,
+`checksums-sha256.txt`, and a Sigstore bundle for each. Regular installs choose
+the highest qualifying stable version, or the highest qualifying release
+candidate if no stable release qualifies. Guided setup chooses the highest
+qualifying version across both. Automatic selection on Linux and macOS
+requires `jq`.
+
+Set `BK_VERSION` without the tag prefix to select a specific published release.
+Both scripts also accept `BK_INSTALL`. They always require a matching SHA-256
+checksum before extracting or installing. If `cosign` is on PATH, they also
+verify the bundles for the archive and checksum list with this exact certificate
+identity:
 
 ```text
 https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION
@@ -204,13 +214,9 @@ release publisher. These scripts never change the user's execution policy or
 PATH, and do not start `bk serve`.
 
 The [agent-led guide](../SKILL.md) requires both signatures and checks that the
-verified binary provides managed service and agent registration commands. When
-`BK_VERSION` is unset, it chooses the highest stable or `-rc.N` version among
-the 100 most recent published GitHub releases that list the platform archive,
-the checksum list and both signature bundles. Linux and macOS use `jq` to read
-this list. Set `BK_VERSION` to select a specific published release. A missing
-or invalid signature, or a binary without the setup commands, stops guided
-installation before replacement.
+verified binary provides managed service and agent registration commands. A
+missing or invalid signature, or a binary without the setup commands, stops
+guided installation before replacement.
 
 ## Signed update feed and self-update
 

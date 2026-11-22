@@ -23,12 +23,7 @@ class ShellInstallerTests(unittest.TestCase):
         self.bin.mkdir()
         self.destination = self.root / "installed"
         self.destination.mkdir()
-        self.stem = "bk-0.1.0-x86_64-unknown-linux-gnu"
-        binary = self.root / "bk"
-        binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then printf "bk 0.1.0\\n"; else printf "%s\\n" "$*" >> "$BK_TEST_LOG"; fi\n')
-        directory = release.stage(binary, "0.1.0", "x86_64-unknown-linux-gnu", self.root / "work")
-        release.compress(directory, "0.1.0", "x86_64-unknown-linux-gnu", self.fixtures)
-        release.checksums(self.fixtures)
+        self.stage_shell_fixture("0.1.0")
         for command in ("sh", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep", "jq"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
@@ -52,6 +47,18 @@ if "-w" in args: print("200", end="")
         self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0", "FIXTURE_VERSION": "0.1.0",
                     "BK_INSTALL": str(self.destination), "FIXTURES": str(self.fixtures),
                     "TMPDIR": str(self.root), "BK_TEST_LOG": str(self.root / "service-actions")}
+
+    def stage_shell_fixture(self, version):
+        target = "x86_64-unknown-linux-gnu"
+        self.stem = f"bk-{version}-{target}"
+        binary = self.root / "bk"
+        binary.write_text(
+            f'#!/bin/sh\nif [ "$1" = --version ]; then printf "bk {version}\\n"; '
+            'else printf "%s\\n" "$*" >> "$BK_TEST_LOG"; fi\n'
+        )
+        directory = release.stage(binary, version, target, self.root / "work")
+        release.compress(directory, version, target, self.fixtures)
+        release.checksums(self.fixtures)
 
     def script(self, name, code):
         path = self.bin / name
@@ -216,6 +223,37 @@ sys.exit({1 if fail else 0})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no published release with signature bundles found", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
+
+    def assert_regular_release_selection(self, version, releases):
+        self.stage_shell_fixture(version)
+        self.cosign()
+        self.bundles()
+        self.env.pop("BK_VERSION")
+        self.env.update(BK_REQUIRE_AGENT_SETUP="0", FIXTURE_VERSION=version,
+                        FIXTURE_RELEASES=json.dumps(releases))
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"installed bk v{version}", result.stdout)
+        self.assertEqual((self.fixtures / "verified").read_text().splitlines(),
+                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
+
+    def test_regular_discovery_uses_newest_signed_rc_when_no_stable_exists(self):
+        target = "x86_64-unknown-linux-gnu"
+        self.assert_regular_release_selection("0.2.0-rc.10", [
+            self.release_entry("0.2.0-rc.11", target, missing="checksums-sha256.txt.sigstore"),
+            self.release_entry("0.2.0-rc.9", target),
+            self.release_entry("0.2.0-rc.10", target),
+        ])
+
+    def test_regular_discovery_prefers_signed_stable_over_newer_rc(self):
+        target = "x86_64-unknown-linux-gnu"
+        self.assert_regular_release_selection("0.1.0", [
+            self.release_entry("0.2.0-rc.10", target),
+            self.release_entry("0.0.9", target),
+            self.release_entry("0.1.0", target),
+        ])
 
     def test_install_documentation_has_no_hard_coded_desktop_release(self):
         for path, heading in (
