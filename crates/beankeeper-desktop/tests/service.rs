@@ -442,7 +442,7 @@ fn write_stub_registration(config: &std::path::Path, bin: &std::path::Path) -> T
 fn unusable_session_is_reported_before_managing_services_and_after_agent_registration() -> TestResult
 {
     use beankeeper_desktop::setup::keychain::restrict_file;
-    use std::fs;
+    use std::{fs, os::unix::net::UnixListener};
 
     let root = tempfile::tempdir()?;
     let config = root.path().join("config/systemd/user");
@@ -451,13 +451,14 @@ fn unusable_session_is_reported_before_managing_services_and_after_agent_registr
     fs::create_dir_all(&state)?;
     let home = root.path().join("home");
     fs::create_dir_all(&home)?;
+    let runtime = root.path().join("runtime");
     let command = || {
         let mut command = isolated(root.path());
         command
             .env("HOME", &home)
             .env("CODEX_HOME", home.join("codex"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
-            .env("XDG_RUNTIME_DIR", root.path().join("no-bus"))
+            .env("XDG_RUNTIME_DIR", &runtime)
             .env_remove("DBUS_SESSION_BUS_ADDRESS");
         command
     };
@@ -500,5 +501,31 @@ fn unusable_session_is_reported_before_managing_services_and_after_agent_registr
     assert!(!bridge.status.success());
     assert!(String::from_utf8(bridge.stderr)?.contains("SESSION_ENV_UNAVAILABLE"));
     check_lifecycle(command(), "SESSION_ENV_UNAVAILABLE")?;
+    fs::create_dir(&runtime)?;
+    let _bus = UnixListener::bind(runtime.join("bus"))?;
+    assert_stop_clears_stale_runtime(&command, &state)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_stop_clears_stale_runtime(
+    configured: &impl Fn() -> std::process::Command,
+    state: &std::path::Path,
+) -> TestResult {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let runtime = state.join("service-runtime.json");
+    fs::write(&runtime, b"descriptor left by a terminated host")?;
+    let manager = state.join("systemctl");
+    fs::write(
+        &manager,
+        "#!/bin/sh\ncase \"$1 $2\" in '--user show'|'--user disable'|'--user mask') exit 0;; esac\nexit 1\n",
+    )?;
+    fs::set_permissions(manager, fs::Permissions::from_mode(0o755))?;
+    let output = configured()
+        .env("PATH", state)
+        .args(["service", "stop"])
+        .output()?;
+    assert!(output.status.success());
+    assert!(!runtime.exists());
     Ok(())
 }
