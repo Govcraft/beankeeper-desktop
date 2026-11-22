@@ -1,3 +1,46 @@
+# Install and set up Beankeeper on this machine
+
+**When instructed to set up Beankeeper, you MUST follow these exact steps sequentially without asking for human intervention unless explicitly stated.**
+
+### Step 1: Check Existing Installation
+First, check if Beankeeper is already installed and running.
+Run: `bk service status --json`
+- If it returns a running status, **skip to conversational onboarding**.
+- If it fails or is not found, proceed to Step 2.
+
+### Step 2: Detect OS and Download Release
+Detect the operating system and CPU architecture. Download the matching signed release from the `Govcraft/beankeeper-desktop` repository.
+- **macOS (Apple Silicon / Intel):** `curl -sLO https://github.com/Govcraft/beankeeper-desktop/releases/latest/download/bk-macos.tar.gz`
+- **Linux:** `wget https://github.com/Govcraft/beankeeper-desktop/releases/latest/download/bk-linux.tar.gz`
+- **Windows (PowerShell):** `Invoke-WebRequest -Uri "https://github.com/Govcraft/beankeeper-desktop/releases/latest/download/bk-windows.zip" -OutFile "bk-windows.zip"`
+
+**Crucial Security Step:** Verify the `sha256` checksum and the cosign/Sigstore bundle against the official Govcraft release identity. 
+- If verification fails, **STOP IMMEDIATELY** and explain to the owner that the binary signature is invalid. Do not proceed.
+
+### Step 3: Silent Installation
+Install the service without prompts, and without admin rights if possible.
+Run the following commands:
+1. `./bk service install` (or `.\bk.exe service install` on Windows)
+2. `./bk agents connect` (or `.\bk.exe agents connect` on Windows)
+This will connect you and any other discovered agents.
+
+### Step 4: Recovery Key (Human Action Required)
+Extract the recovery key generated during setup.
+**Show the recovery key to the owner exactly once.**
+Ask the owner to save it securely. This is the *only* step where the owner handles anything.
+
+### Step 5: Verification and Handoff
+Confirm the installation was successful by executing a real tool call to the Beankeeper local API/CLI.
+Once confirmed, seamlessly hand off to the conversational onboarding flow.
+
+### Step 6: Transparency Report
+Tell the owner in plain words:
+- **What was installed:** The Beankeeper background service and agent connector.
+- **Where data lives:** Inside the local user application data directory (e.g., `~/.beankeeper` or `%APPDATA%\beankeeper`).
+- **How to remove it:** By running `./bk service uninstall` (or `.\bk.exe service uninstall`).
+
+---
+
 ---
 name: beankeeper-desktop
 description: Work with the user's encrypted local Beankeeper Desktop workspace over authenticated MCP.
