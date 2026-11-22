@@ -180,8 +180,9 @@ recorded facts to skip questions the owner has already answered.
    settings and import history unconfirmed.
 
 Summarize what is already recorded, what the owner has confirmed, and what
-still needs an answer or a statement. Only begin a setup session when the
-installed ledger exposes a scoped write tool for the next confirmed step.
+still needs an answer or a statement. Begin a setup session when the installed
+version supports the next confirmed step. On a local shell, `bk setup --help`
+lists the available setup commands without opening a session.
 
 The owner can authorize a session through `ledger_setup_begin` or `bk setup
 begin`, using their own `ledger/admin` access on the selected encrypted ledger.
@@ -208,6 +209,20 @@ already has accounts, review those accounts before proposing any additions.
 Use `ledger_setup_account_add` for each confirmed real account with its own
 available account code. Read the book again to confirm the changes.
 
+Before previewing opening balances, confirm which amounts are still missing,
+the opening date, and the currency. Call `ledger_setup_opening_preview` with
+the book, active setup generation, and balanced debit and credit lines using
+the confirmed account codes. Send amounts as decimal strings in the currency's
+major units. Show the owner the preview's date, account names and amounts. A
+preview leaves the ledger unchanged.
+
+After the owner confirms the preview, reserve it with
+`ledger_setup_opening_reserve`. Send the unchanged preview inputs under
+`opening`, the returned `fingerprint`, and a stable `reference`. Share the
+pending proposal for review by the owner with approval authority, then check
+whether it posted. If the inputs change, preview them again and confirm the
+changes with the owner before reserving.
+
 For each write, send the company, setup generation and a stable request
 reference. Reuse the same reference and inputs when retrying. Stop and explain
 what needs to be resolved if a tool reports a conflict.
@@ -215,7 +230,7 @@ what needs to be resolved if a tool reports a conflict.
 After summarizing the outcome, have the owner finish the session or revoke it
 if they want to cancel access. Both actions deactivate the setup grant. Posted
 entries are corrected through normal ledger reversals. See the
-[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/af0cc6d6e02cd777b2a731b2cf779cc8e67fcf52/docs/beankeeper/references/commands.md#setup-sessions)
+[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/4247a01a0c4f276a4af436968f9353cf03b9ba08/docs/beankeeper/references/commands.md#setup-sessions)
 for the CLI flags and MCP arguments.
 
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from

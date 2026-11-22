@@ -12,6 +12,7 @@ mod markup;
 mod money;
 mod navigation;
 pub mod onboarding;
+mod output;
 pub mod pairing;
 mod private_file;
 pub mod product;

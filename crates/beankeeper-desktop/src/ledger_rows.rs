@@ -3,8 +3,7 @@
 use std::{collections::HashSet, error::Error, fmt, num::ParseIntError};
 
 use beankeeper::types::{
-    AccountType, AccountTypeError, Amount, ClearanceStatus, Currency, CurrencyError, DebitOrCredit,
-    Money,
+    AccountType, Amount, ClearanceStatus, Currency, CurrencyError, DebitOrCredit, Money,
 };
 use beankeeper_cli::db::{
     AccountRow, AuditLogRow, EntryRow,
@@ -13,7 +12,6 @@ use beankeeper_cli::db::{
 
 #[derive(Debug)]
 pub(crate) enum RowError {
-    AccountType(AccountTypeError),
     Currency(CurrencyError),
     AuditId(ParseIntError),
 }
@@ -21,7 +19,6 @@ pub(crate) enum RowError {
 impl fmt::Display for RowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AccountType(error) => write!(f, "invalid ledger account type: {error}"),
             Self::Currency(error) => write!(f, "invalid transaction currency: {error}"),
             Self::AuditId(error) => write!(f, "invalid ledger audit record ID: {error}"),
         }
@@ -31,7 +28,6 @@ impl fmt::Display for RowError {
 impl Error for RowError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(match self {
-            Self::AccountType(error) => error,
             Self::Currency(error) => error,
             Self::AuditId(error) => error,
         })
@@ -54,10 +50,10 @@ pub(crate) struct AccountGroup<'a> {
     pub(crate) rows: Vec<&'a AccountRow>,
 }
 
-pub(crate) fn accounts_by_kind(rows: &[AccountRow]) -> Result<Vec<AccountGroup<'_>>, RowError> {
+pub(crate) fn accounts_by_kind(rows: &[AccountRow]) -> Vec<AccountGroup<'_>> {
     let mut groups = Vec::<AccountGroup<'_>>::new();
     for row in rows {
-        let kind = row.account_type.parse().map_err(RowError::AccountType)?;
+        let kind = row.account_type;
         if let Some(group) = groups.iter_mut().find(|group| group.kind == kind) {
             group.rows.push(row);
         } else {
@@ -68,7 +64,7 @@ pub(crate) fn accounts_by_kind(rows: &[AccountRow]) -> Result<Vec<AccountGroup<'
         }
     }
     groups.sort_by_key(|group| account_kind_order(group.kind));
-    Ok(groups)
+    groups
 }
 
 pub(crate) fn currency(code: &str) -> Result<Currency, RowError> {

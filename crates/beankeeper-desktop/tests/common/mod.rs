@@ -8,10 +8,12 @@ use std::{
 };
 
 use beankeeper_cli::{
+    capability::Capability,
     db::{self, Actor, Db},
-    identity::{self, IssueRequest},
+    identity::{self, Admin, Granted, IssueRequest},
 };
 use reqwest::blocking::{Client, Response};
+use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -32,6 +34,14 @@ impl Ledger {
     /// # Errors
     /// Returns an error when fixture data or credentials cannot be created.
     pub fn new() -> TestResult<Self> {
+        Self::new_with_policy_admin().map(|(ledger, _)| ledger)
+    }
+
+    /// Create the fixture ledger and retain its policy administrator.
+    ///
+    /// # Errors
+    /// Returns an error when fixture data or credentials cannot be created.
+    pub fn new_with_policy_admin() -> TestResult<(Self, Actor)> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("books.db");
         let secret = dir.path().join("passphrase");
@@ -58,14 +68,32 @@ impl Ledger {
             "desktop_writer",
             &["ledger/read".into(), "ledger/post".into()],
         )?;
-        db::audit::set_policy(db.conn(), &owner, true)?;
-        Ok(Self {
-            _dir: dir,
-            path,
-            secret,
-            reader,
-            writer,
-        })
+        let admin = identity::issue_credential(
+            db.conn(),
+            &owner,
+            &IssueRequest {
+                name: "desktop_policy_admin",
+                capabilities: &[Capability::Admin.path().into()],
+                ttl: Duration::from_secs(3600),
+                public_key: None,
+                generate_key: true,
+            },
+        )?;
+        let owner =
+            owner.with_identity(identity::verify(db.conn(), admin.token().expose_secret())?);
+        Granted::<Admin>::with(db.conn(), &owner, |grant| {
+            db::audit::set_policy(grant, true)
+        })?;
+        Ok((
+            Self {
+                _dir: dir,
+                path,
+                secret,
+                reader,
+                writer,
+            },
+            owner,
+        ))
     }
 
     /// Open the fixture ledger.

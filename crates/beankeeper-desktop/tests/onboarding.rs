@@ -5,6 +5,7 @@ use std::{io::Write, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use beankeeper_cli::{
     capability::Capability,
+    commands::setup::ProfileRevision,
     db::{self, Actor, Db, audit::setup::Generation},
     identity::{self, IssueRequest},
 };
@@ -17,6 +18,8 @@ const LEDGER_SETUP_STATUS: &str = "ledger_setup_status";
 const LEDGER_SETUP_BEGIN: &str = "ledger_setup_begin";
 const LEDGER_SETUP_FINISH: &str = "ledger_setup_finish";
 const LEDGER_SETUP_REVOKE: &str = "ledger_setup_revoke";
+const OPENING_PREVIEW: &str = "ledger_setup_opening_preview";
+const OPENING_RESERVE: &str = "ledger_setup_opening_reserve";
 
 #[test]
 fn setup_status_distinguishes_a_missing_ledger_from_empty_books() -> TestResult {
@@ -58,6 +61,25 @@ fn setup_status_distinguishes_a_missing_ledger_from_empty_books() -> TestResult 
     assert_eq!(status["data"]["state"], "installed");
     assert_eq!(status["data"]["books"], json!([]));
     assert_eq!(status["data"]["next_step"], "choose_books");
+    Ok(())
+}
+
+#[test]
+fn setup_status_reports_json_errors_under_its_existing_command_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = clean_command()
+        .arg("--db")
+        .arg(directory.path())
+        .args(["setup", "status", "--json"])
+        .output()?;
+    assert!(!output.status.success());
+    assert_eq!(output.stdout.as_slice(), b"");
+    let response: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["meta"]["command"], "setup.status");
+    assert!(response["meta"]["timestamp"].is_string());
+    assert!(response["error"]["code"].is_string());
+    assert!(response.get("data").is_none());
     Ok(())
 }
 
@@ -221,6 +243,8 @@ fn desktop_dispatches_owner_setup_lifecycle_across_cli_and_mcp() -> TestResult {
             "ledger_setup_book_show",
             "ledger_setup_book_update",
             "ledger_setup_chart_apply",
+            OPENING_PREVIEW,
+            OPENING_RESERVE,
             LEDGER_SETUP_STATUS,
         ]
     );
@@ -463,7 +487,7 @@ fn desktop_guides_a_book_through_profile_chart_and_named_account() -> TestResult
     )?;
     assert_eq!(finished["state"], "finished");
     assert_inactive(&server, scoped.expose_secret())?;
-    db::audit::verify_hash_chain(ledger.db()?.conn())?;
+    db::audit::verify_hash_chain(ledger.db()?.read())?;
     Ok(())
 }
 
@@ -526,7 +550,295 @@ fn desktop_initializes_an_existing_book_without_replacing_its_account() -> TestR
         desktop_status["books"][0]["accounts"],
         json!([{"code":"CASH","name":"Existing Checking"}])
     );
-    db::audit::verify_hash_chain(ledger.db()?.conn())?;
+    db::audit::verify_hash_chain(ledger.db()?.read())?;
+    Ok(())
+}
+
+struct OpeningFixture {
+    ledger: Ledger,
+    server: Server,
+    generation: Generation,
+    scoped: SecretString,
+    profile_revision: ProfileRevision,
+}
+
+impl OpeningFixture {
+    fn new() -> TestResult<Self> {
+        let ledger = Ledger::new()?;
+        let db = ledger.db()?;
+        create_fixture_account(&db, "1010", "Checking", "asset")?;
+        create_fixture_account(&db, "3000", "Opening Balance Equity", "equity")?;
+        let owner = setup_owner(&ledger)?;
+        let owner = owner.expose_secret();
+        let mut server = Server::start(&ledger, &["serve"], None)?;
+        server.initialize(Some(owner))?;
+        let started = setup_result(
+            &server,
+            owner,
+            LEDGER_SETUP_BEGIN,
+            json!({"name":"opening_fixture","public_key":setup_public_key()}),
+        )?;
+        let (generation, scoped) = setup_grant(&started)?;
+        let mut profile = setup_result(
+            &server,
+            scoped.expose_secret(),
+            "ledger_setup_book_initialize",
+            json!({
+                "target":{"company":"acme","generation":generation,"reference":"opening-fixture-profile"},
+                "settings":{"purpose":"business","base_currency":"BHD","fiscal_year_start":"01-01"},
+            }),
+        )?;
+        Ok(Self {
+            ledger,
+            server,
+            generation,
+            scoped,
+            profile_revision: serde_json::from_value(profile["profile"]["revision"].take())?,
+        })
+    }
+
+    fn input(&self) -> Value {
+        json!({
+            "company":"acme","generation":self.generation,"date":"2026-01-01","currency":"BHD",
+            "debits":[{"account":"1010","amount":"12.345"}],
+            "credits":[{"account":"3000","amount":"12.345"}],
+        })
+    }
+}
+
+#[test]
+fn desktop_previews_opening_balances_without_reserving_or_posting_them() -> TestResult {
+    let fixture = OpeningFixture::new()?;
+    let server = &fixture.server;
+    let ledger = &fixture.ledger;
+    let generation = fixture.generation;
+    let scoped = fixture.scoped.expose_secret();
+    let db = ledger.db()?;
+    let ledger_state = || -> TestResult<(i64, i64, i64, i64)> {
+        Ok(db.conn().query_row(
+            "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM txn_proposals),
+                (SELECT COUNT(*) FROM setup_requests), (SELECT COUNT(*) FROM audit_log)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?)
+    };
+    let before = ledger_state()?;
+    let input = fixture.input();
+    let preview = setup_result(server, scoped, OPENING_PREVIEW, input.clone())?;
+    assert_eq!(preview["profile_revision"], json!(fixture.profile_revision));
+    assert_eq!(preview["entries"][0]["account_name"], "Checking");
+    assert_eq!(
+        preview["entries"][1]["account_name"],
+        "Opening Balance Equity"
+    );
+    assert_eq!(
+        preview["totals"]["debits"],
+        json!({"amount_minor":"12345","amount_display":"12.345"})
+    );
+    assert_eq!(preview["totals"]["debits"], preview["totals"]["credits"]);
+    assert_eq!(
+        setup_result(server, scoped, OPENING_PREVIEW, input.clone())?,
+        preview
+    );
+
+    let generation_arg = generation.get().to_string();
+    let cli = setup_cli(
+        ledger,
+        scoped,
+        &[
+            "opening-preview",
+            "acme",
+            "--generation",
+            &generation_arg,
+            "--date",
+            "2026-01-01",
+            "--currency",
+            "BHD",
+            "--debit",
+            "1010:12.345",
+            "--credit",
+            "3000:12.345",
+        ],
+    )?;
+    assert_eq!(cli, preview);
+
+    let reader = token(&ledger.reader)?;
+    let denied = setup_call(server, reader, OPENING_PREVIEW, input)?;
+    assert_eq!(denied["result"]["structuredContent"]["code"], "FORBIDDEN");
+    assert_eq!(ledger_state()?, before);
+    Ok(())
+}
+
+#[test]
+fn desktop_reserves_replays_approves_and_reverses_opening_balances() -> TestResult {
+    let fixture = OpeningFixture::new()?;
+    let server = &fixture.server;
+    let scoped = fixture.scoped.expose_secret();
+    let approver = opening_approver(&fixture.ledger)?;
+    let approver = approver.expose_secret();
+    let input = fixture.input();
+    let preview = setup_result(server, scoped, OPENING_PREVIEW, input.clone())?;
+    let fingerprint = preview["fingerprint"]
+        .as_str()
+        .ok_or("missing fingerprint")?;
+    let reference = "opening-acme-2026";
+    let request = json!({"opening":input, "fingerprint":fingerprint, "reference":reference});
+    let reservation = setup_result(server, scoped, OPENING_RESERVE, request.clone())?;
+    assert_eq!(reservation["generation"], json!(fixture.generation));
+    assert_eq!(reservation["reference"], reference);
+    assert_eq!(reservation["preview"], preview);
+    let id = reservation["proposal_id"]
+        .as_str()
+        .ok_or("missing proposal ID")?;
+    let pending = setup_result(server, approver, "txn_proposals", json!({"company":"acme"}))?;
+    assert_eq!(pending.as_array().map(Vec::len), Some(1));
+    assert_eq!(pending[0]["id"], id);
+    assert_eq!(pending[0]["status"], "pending");
+
+    let audit = || setup_result(server, approver, "audit_log", json!({"company":"acme"}));
+    let after_reservation = audit()?;
+    assert!(
+        after_reservation
+            .as_array()
+            .ok_or("missing audit rows")?
+            .iter()
+            .any(|row| row["entity_id"] == "setup.request.opening-acme-2026")
+    );
+    let replay = setup_cli(
+        &fixture.ledger,
+        scoped,
+        &[
+            "opening-reserve",
+            "acme",
+            "--generation",
+            &fixture.generation.get().to_string(),
+            "--date",
+            "2026-01-01",
+            "--currency",
+            "BHD",
+            "--debit",
+            "1010:12.345",
+            "--credit",
+            "3000:12.345",
+            "--reference",
+            reference,
+            "--fingerprint",
+            fingerprint,
+        ],
+    )?;
+    assert_eq!(replay, reservation);
+
+    let mut changed = input;
+    changed["description"] = json!("A different opening balance");
+    let changed_preview = setup_result(server, scoped, OPENING_PREVIEW, changed.clone())?;
+    assert_ne!(changed_preview["fingerprint"], preview["fingerprint"]);
+    let conflicting_request = json!({
+        "opening":changed,"fingerprint":changed_preview["fingerprint"],"reference":reference,
+    });
+    let conflict = setup_call(server, scoped, OPENING_RESERVE, conflicting_request)?;
+    assert_eq!(
+        conflict["result"]["structuredContent"]["code"],
+        "VALIDATION"
+    );
+
+    let approve = json!({"company":"acme","id":id});
+    let denied = setup_call(server, scoped, "txn_approve", approve.clone())?;
+    assert_eq!(denied["result"]["structuredContent"]["code"], "FORBIDDEN");
+    assert_eq!(audit()?, after_reservation);
+    let status = || setup_result(server, scoped, LEDGER_SETUP_STATUS, json!({}));
+    assert_eq!(status()?["transactions"], 0);
+
+    let posted = setup_result(server, approver, "txn_approve", approve)?;
+    assert_eq!(posted["status"], "approved");
+    assert!(posted["resolved_by_uri"].is_string());
+    assert_ne!(posted["resolved_by_uri"], pending[0]["proposer_uri"]);
+    let transaction = posted["transaction_id"]
+        .as_i64()
+        .ok_or("missing approved transaction ID")?;
+    assert_eq!(status()?["transactions"], 1);
+    let after_approval = audit()?;
+    assert_eq!(
+        setup_result(server, scoped, OPENING_RESERVE, request)?,
+        reservation
+    );
+    assert_eq!(audit()?, after_approval);
+    assert_eq!(status()?["transactions"], 1);
+
+    assert_opening_reversal(server, approver, transaction, reference)?;
+    assert_eq!(status()?["transactions"], 2);
+    assert_eq!(
+        setup_result(server, approver, "verify", json!({}))?["status"],
+        "healthy"
+    );
+    Ok(())
+}
+
+fn opening_approver(ledger: &Ledger) -> TestResult<SecretString> {
+    let db = ledger.db()?;
+    let capabilities = [Capability::Read, Capability::Approve, Capability::Reverse]
+        .map(|capability| capability.path().to_owned());
+    let credential = identity::issue_credential(
+        db.conn(),
+        &Actor::new("fixture-owner"),
+        &IssueRequest {
+            name: "opening_approver",
+            capabilities: &capabilities,
+            ttl: Duration::from_secs(600),
+            public_key: None,
+            generate_key: true,
+        },
+    )?;
+    Ok(credential.token().clone())
+}
+
+fn assert_opening_reversal(
+    server: &Server,
+    approver: &str,
+    transaction: i64,
+    reference: &str,
+) -> TestResult {
+    let reversal = setup_result(
+        server,
+        approver,
+        "txn_reverse",
+        json!({"company":"acme","id":transaction,"date":"2026-01-02","reference":"reverse-opening-2026"}),
+    )?;
+    assert_eq!(reversal["created"], true);
+    let reversal_id = reversal["id"].as_i64().ok_or("missing reversal ID")?;
+    let read = |id| {
+        setup_result(
+            server,
+            approver,
+            "txn_show",
+            json!({"company":"acme","id":id}),
+        )
+    };
+    let original = read(transaction)?;
+    let reversed = read(reversal_id)?;
+    assert_eq!(original[0]["reference"], reference);
+    assert_eq!(original[0]["currency"], "BHD");
+    assert_eq!(reversed[0]["currency"], "BHD");
+    let metadata = |row: &Value| -> TestResult<Value> {
+        Ok(serde_json::from_str(
+            row["metadata"].as_str().ok_or("missing metadata")?,
+        )?)
+    };
+    assert_eq!(metadata(&original[0])?["reversed_by"], reversal_id);
+    assert_eq!(metadata(&reversed[0])?["reverses"], transaction);
+    let original_entries = original[0]["entries"]
+        .as_array()
+        .ok_or("missing original entries")?;
+    let reversed_entries = reversed[0]["entries"]
+        .as_array()
+        .ok_or("missing reversed entries")?;
+    assert_eq!(original_entries.len(), 2);
+    assert_eq!(reversed_entries.len(), 2);
+    for (original, reversed) in original_entries.iter().zip(reversed_entries) {
+        assert_eq!(reversed["account_code"], original["account_code"]);
+        assert_eq!(original["amount"], 12345);
+        assert_eq!(reversed["amount"], original["amount"]);
+        assert_ne!(reversed["direction"], original["direction"]);
+    }
     Ok(())
 }
 
@@ -534,7 +846,13 @@ fn setup_result(server: &Server, token: &str, name: &str, arguments: Value) -> T
     let mut response = setup_call(server, token, name, arguments)?;
     let result = &mut response["result"];
     assert_eq!(result["isError"], false, "{name} failed: {result}");
-    Ok(result["structuredContent"].take())
+    if let Some(content) = result.get_mut("structuredContent") {
+        return Ok(content.take());
+    }
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or("missing tool data")?;
+    Ok(serde_json::from_str(text)?)
 }
 
 fn verify_scoped_stdio(server: &Server, scoped: &str) -> TestResult {

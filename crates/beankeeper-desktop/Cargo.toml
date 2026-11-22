@@ -17,8 +17,8 @@ workspace = true
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
 base64 = "0.23.1"
-beankeeper = { git = "https://github.com/Govcraft/beankeeper", version = "0.8.0", rev = "af0cc6d6e02cd777b2a731b2cf779cc8e67fcf52" }
-beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", version = "0.28.0", rev = "af0cc6d6e02cd777b2a731b2cf779cc8e67fcf52" }
+beankeeper = { git = "https://github.com/Govcraft/beankeeper", version = "0.8.0", rev = "4247a01a0c4f276a4af436968f9353cf03b9ba08" }
+beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", version = "0.28.0", rev = "4247a01a0c4f276a4af436968f9353cf03b9ba08" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 ed25519-dalek = "3.0.0"

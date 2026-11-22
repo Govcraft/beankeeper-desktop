@@ -414,7 +414,7 @@ enum SnapshotView {
 impl SnapshotView {
     fn request(self, query: &Filters, currency: beankeeper::types::Currency) -> SummaryArgs {
         let mut args = SummaryArgs {
-            currency: Some(currency.code().to_owned()),
+            currency: Some(currency.into()),
             ..SummaryArgs::default()
         };
         if let Self::Detail = self {
@@ -542,7 +542,7 @@ fn accounts(db: &Db, company: &str, query: &Filters, html: &mut Markup) -> Resul
         company,
         rows.len()
     );
-    for AccountGroup { kind, rows } in ledger_rows::accounts_by_kind(&rows)? {
+    for AccountGroup { kind, rows } in ledger_rows::accounts_by_kind(&rows) {
         write_markup!(html, "<li><strong>{}</strong><ul>", kind.code());
         for account in rows {
             let mut account_filters = query.clone();
