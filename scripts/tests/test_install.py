@@ -217,6 +217,17 @@ sys.exit({1 if fail else 0})
         self.assertIn("no published release with signature bundles found", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
 
+    def test_install_documentation_has_no_hard_coded_desktop_release(self):
+        for path, heading in (
+            ("SKILL.md", "Install and set up Beankeeper on this machine"),
+            ("README.md", "Release packages"),
+            ("docs/RELEASE.md", "Checksum-verifying command-line installers"),
+        ):
+            with self.subTest(path=path):
+                _, separator, rest = (ROOT / path).read_text().partition(f"\n## {heading}\n")
+                self.assertTrue(separator, f"missing installation section: {heading}")
+                self.assertNotRegex(rest.split("\n## ", 1)[0], r"\b(?:v)?[0-9]+\.[0-9]+\.[0-9]+\b")
+
     def test_skill_commands_install_verified_binary_and_connect(self):
         match = re.search(r"```sh\n(.*?)```", (ROOT / "SKILL.md").read_text(), re.DOTALL)
         self.assertIsNotNone(match, "missing Linux/macOS command block")

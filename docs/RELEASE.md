@@ -174,7 +174,7 @@ repository. `install.ps1` follows the same contract on x64 Windows (PowerShell
 ```sh
 # Download and inspect the script before running it.
 curl -fsSLO https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh
-BK_VERSION=0.1.0 BK_INSTALL="$HOME/.local/bin" sh install.sh
+BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$HOME/.local/bin" sh install.sh
 ```
 
 The shell installer creates its destination directory, defaulting to
@@ -183,7 +183,7 @@ service setup still runs as the invoking desktop user. On Windows, download `ins
 inspect it, then use:
 
 ```powershell
-./install.ps1 -Version 0.1.0 -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
+./install.ps1 -RequireSignatures -RequireAgentSetup -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
 ```
 
 Both scripts accept `BK_VERSION` (default: latest stable release) and `BK_INSTALL`.
