@@ -523,12 +523,13 @@ fn skill_change(path: &Path, change: Change) -> Result<Option<FileChange>, Agent
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::adapters::{Agent, Locations};
+    use crate::agents::adapters::{Agent, ClaudeProfile, Locations};
 
     fn locations(home: &Path) -> Locations {
         Locations {
             home: home.into(),
             gui: home.join("profile"),
+            claude_desktop: ClaudeProfile::Selected(home.join("profile/Claude")),
             claude: home.join(".claude"),
             codex: home.join(".codex"),
             copilot: home.join(".copilot"),
@@ -616,7 +617,7 @@ mod tests {
         let binary = binary.to_str().ok_or("invalid binary path")?;
         let home = locations(temp.path());
         for agent in Agent::ALL {
-            if let Some(adapter) = agent.adapter(&home) {
+            if let Some(adapter) = agent.adapter(&home)? {
                 roundtrip(&adapter, binary)?;
             } else {
                 assert!(matches!(agent, Agent::ChatGpt | Agent::Grok));
@@ -628,7 +629,7 @@ mod tests {
         fs::create_dir_all(&profile_dir)?;
         fs::write(profile_dir.join("mcp.json"), sample(&ConfigFormat::VsCode))?;
         let adapter = Agent::VsCode
-            .adapter(&legacy)
+            .adapter(&legacy)?
             .ok_or("missing profile adapter")?;
         assert!(matches!(adapter.format, ConfigFormat::VsCode));
         roundtrip(&adapter, binary)
@@ -639,7 +640,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let home = locations(temp.path());
-        let adapter = Agent::Gemini.adapter(&home).ok_or("missing adapter")?;
+        let adapter = Agent::Gemini.adapter(&home)?.ok_or("missing adapter")?;
         let binary = temp.path().join("bin/bk");
         let binary = binary.to_str().ok_or("invalid binary path")?;
         for original in [

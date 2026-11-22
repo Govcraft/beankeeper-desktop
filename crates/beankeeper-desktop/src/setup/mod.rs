@@ -182,11 +182,14 @@ impl From<crate::DesktopError> for SetupError {
 /// # Errors
 /// Fails closed on existing ledgers, conflicting client configs and secret storage errors.
 pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
-    let store: Box<dyn SecretStore> = match &options.secret_store_file {
-        Some(path) => Box::new(FileSecretStore::new(path.clone())),
-        None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
-    };
-    run_with_store(cli, options, store.as_ref(), ClientRegistration::Standalone)
+    let store = configured_store(&cli.db, options)?;
+    run_with_store(
+        cli,
+        options,
+        store.as_deref().unwrap_or(&OsKeychain),
+        ClientRegistration::Standalone,
+        None,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -194,6 +197,14 @@ pub(crate) enum ClientRegistration<'a> {
     Standalone,
     Managed { previous_executable: &'a Path },
     Skip,
+}
+
+/// Passphrase storage for fresh service ledgers. Existing ledgers keep their store.
+#[derive(Clone, Copy)]
+pub(crate) enum ServiceSecretStorage {
+    PrivateFile,
+    NativeWithFileFallback,
+    NativeRequired,
 }
 
 /// Provision service books without prompting, printing secrets or opening a browser.
@@ -206,17 +217,41 @@ pub(crate) fn run_service(
     home: &Path,
     bind: SocketAddr,
     registration: ClientRegistration<'_>,
-    file_store: bool,
+    storage: ServiceSecretStorage,
+) -> Result<(), SetupError> {
+    run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)
+}
+
+fn run_service_with_native_store(
+    cli: &mut Cli,
+    home: &Path,
+    bind: SocketAddr,
+    registration: ClientRegistration<'_>,
+    storage: ServiceSecretStorage,
+    native_store: &dyn SecretStore,
 ) -> Result<(), SetupError> {
     let mut options = SetupOptions::from_service(home, bind);
-    if file_store && !cli.db.exists() {
+    if matches!(storage, ServiceSecretStorage::PrivateFile) && !cli.db.try_exists()? {
         options.secret_store_file = Some(cli.db.with_extension("passphrase"));
     }
-    let store: Box<dyn SecretStore> = match &options.secret_store_file {
-        Some(path) => Box::new(FileSecretStore::new(path.clone())),
-        None => registered_store(&cli.db)?.unwrap_or_else(|| Box::new(OsKeychain)),
-    };
-    run_with_store(cli, &options, store.as_ref(), registration)
+    let store = configured_store(&cli.db, &options)?;
+    run_with_store(
+        cli,
+        &options,
+        store.as_deref().unwrap_or(native_store),
+        registration,
+        Some(storage),
+    )
+}
+
+fn configured_store(
+    ledger: &Path,
+    options: &SetupOptions,
+) -> Result<Option<Box<dyn SecretStore>>, SetupError> {
+    match &options.secret_store_file {
+        Some(path) => Ok(Some(Box::new(FileSecretStore::new(path.clone())))),
+        None => registered_store(ledger),
+    }
 }
 
 impl SetupOptions {
@@ -263,6 +298,7 @@ fn run_with_store(
     options: &SetupOptions,
     store: &dyn SecretStore,
     registration: ClientRegistration<'_>,
+    storage: Option<ServiceSecretStorage>,
 ) -> Result<(), SetupError> {
     crate::server::validate_bind(options.bind, false)?;
     if options.bind.port() == 0 {
@@ -288,6 +324,12 @@ fn run_with_store(
             .unwrap_or(Path::new(".")),
     )?;
     cli.db = keychain::canonical_ledger(&cli.db)?;
+    if matches!(
+        (storage, mode),
+        (Some(ServiceSecretStorage::NativeRequired), SetupMode::Fresh)
+    ) {
+        require_unused_store_marker(&cli.db)?;
+    }
     let token_file = cli.db.with_extension("agent-token");
     let owner_file = cli.db.with_extension("owner-token");
     let kit = options
@@ -323,7 +365,7 @@ fn run_with_store(
     if kit.exists() {
         PrivateFile::open(&kit)?;
     }
-    let (secret, automatic_file) = store_ledger_secret(cli, store, registration, mode)?;
+    let (secret, automatic_file) = store_ledger_secret(cli, store, storage, mode)?;
     if !kit.exists() {
         private_create(
             &kit,
@@ -357,6 +399,16 @@ fn run_with_store(
     finish_setup(cli, options, &paths, configs, &secret, &temporary, mode)
 }
 
+fn require_unused_store_marker(ledger: &Path) -> Result<(), SetupError> {
+    match ledger.with_extension("desktop.json").symlink_metadata() {
+        Ok(_) => Err(SetupError::Invalid(
+            "Desktop setup metadata exists without its ledger; restore the original ledger before retrying extension setup",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn prepare_client_configs(
     registration: ClientRegistration<'_>,
     home: &Path,
@@ -384,7 +436,7 @@ fn prepare_client_configs(
 fn store_ledger_secret(
     cli: &Cli,
     store: &dyn SecretStore,
-    registration: ClientRegistration<'_>,
+    storage: Option<ServiceSecretStorage>,
     mode: SetupMode,
 ) -> Result<(SecretString, Option<PathBuf>), SetupError> {
     let supplied = passphrase::resolve_passphrase(
@@ -404,18 +456,28 @@ fn store_ledger_secret(
         Db::open_existing(&cli.db, Some(&secret))?;
     }
     // Establish a recoverable credential before initialization.
-    let fallback = cli.db.with_extension("passphrase");
-    let automatic_file = match store.store(&cli.db, &secret) {
-        Ok(()) => None,
-        Err(keychain::KeychainError::Unavailable)
-            if !matches!(registration, ClientRegistration::Standalone)
-                && matches!(mode, SetupMode::Fresh) =>
-        {
+    let automatic_file = match (store.store(&cli.db, &secret), storage, mode) {
+        (Ok(()), _, _) => None,
+        (
+            Err(keychain::KeychainError::Unavailable),
+            Some(ServiceSecretStorage::NativeWithFileFallback),
+            SetupMode::Fresh,
+        ) => {
+            let fallback = cli.db.with_extension("passphrase");
             FileSecretStore::new(fallback.clone()).store(&cli.db, &secret)?;
             eprintln!("OS secret store unavailable; using a private credential file.");
             Some(fallback)
         }
-        Err(error) => return Err(error.into()),
+        (
+            Err(keychain::KeychainError::Unavailable),
+            Some(ServiceSecretStorage::NativeRequired),
+            SetupMode::Fresh,
+        ) => {
+            return Err(SetupError::Invalid(
+                "extension setup requires the OS keychain; unlock your login keychain or Secret Service and retry",
+            ));
+        }
+        (Err(error), _, _) => return Err(error.into()),
     };
     Ok((secret, automatic_file))
 }
@@ -968,6 +1030,61 @@ mod tests {
     }
 
     #[test]
+    fn extension_setup_with_unavailable_keychain_creates_no_ledger_or_credential()
+    -> Result<(), Box<dyn Error>> {
+        use clap::Parser;
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let books = root.path().join("books.db");
+        let mut cli =
+            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+        let result = run_service_with_native_store(
+            &mut cli,
+            root.path(),
+            "127.0.0.1:8750".parse()?,
+            ClientRegistration::Skip,
+            ServiceSecretStorage::NativeRequired,
+            &UnavailableStore,
+        );
+        assert!(matches!(
+            result,
+            Err(SetupError::Invalid(message)) if message.contains("unlock your login keychain or Secret Service")
+        ));
+        assert!(fs::read_dir(root.path())?.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn extension_setup_preserves_orphaned_store_metadata() -> Result<(), Box<dyn Error>> {
+        use clap::Parser;
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let books = root.path().join("books.db");
+        let marker = books.with_extension("desktop.json");
+        let credential = books.with_extension("passphrase");
+        let metadata = serde_json::json!({"secret_store_file": credential});
+        private_create(&marker, metadata.to_string().as_bytes())?;
+        let mut cli =
+            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+        let result = run_service_with_native_store(
+            &mut cli,
+            root.path(),
+            "127.0.0.1:8750".parse()?,
+            ClientRegistration::Skip,
+            ServiceSecretStorage::NativeRequired,
+            &UnavailableStore,
+        );
+        assert!(matches!(
+            result,
+            Err(SetupError::Invalid(message)) if message.contains("restore the original ledger")
+        ));
+        assert_eq!(fs::read_to_string(marker)?, metadata.to_string());
+        assert!(!books.try_exists()?);
+        assert!(!credential.try_exists()?);
+        Ok(())
+    }
+
+    #[test]
     fn service_fallback_provisions_encrypted_books_once_and_keeps_recovery_private()
     -> Result<(), Box<dyn Error>> {
         use clap::Parser;
@@ -977,14 +1094,15 @@ mod tests {
         let books = root.path().join("books.db");
         let mut cli =
             Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
-        let options = SetupOptions::from_service(&home, "127.0.0.1:8750".parse()?);
-        run_with_store(
+        run_service_with_native_store(
             &mut cli,
-            &options,
-            &UnavailableStore,
+            &home,
+            "127.0.0.1:8750".parse()?,
             ClientRegistration::Managed {
                 previous_executable: &std::env::current_exe()?,
             },
+            ServiceSecretStorage::NativeWithFileFallback,
+            &UnavailableStore,
         )?;
         let marker: serde_json::Value =
             serde_json::from_slice(&fs::read(books.with_extension("desktop.json"))?)?;
@@ -1010,8 +1128,24 @@ mod tests {
             ClientRegistration::Managed {
                 previous_executable: &std::env::current_exe()?,
             },
-            false,
+            ServiceSecretStorage::NativeWithFileFallback,
         )?;
+        let mut cli =
+            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+        run_service_with_native_store(
+            &mut cli,
+            &home,
+            "127.0.0.1:8750".parse()?,
+            ClientRegistration::Skip,
+            ServiceSecretStorage::NativeRequired,
+            &UnavailableStore,
+        )?;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(
+                books.with_extension("desktop.json")
+            )?)?,
+            marker
+        );
         assert_eq!(fs::read(books.with_extension("recovery.txt"))?, recovery);
         assert_eq!(fs::read(books.with_extension("agent-token"))?, token);
         Ok(())
