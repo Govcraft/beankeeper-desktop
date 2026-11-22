@@ -8,7 +8,8 @@
    opening the file does not launch Claude, use **Settings → Desktop app →
    Extensions → Install Extension** and select the file. Linux requires the
    Claude Desktop beta and a system compatible with the Beankeeper release
-   binary, including glibc 2.39 or newer. [Claude Desktop extension installation](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
+   binary. The release build targets glibc 2.35 or newer. The published
+   0.1.0-rc.11 bundle requires glibc 2.39. [Claude Desktop extension installation](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
 3. Enable the extension in a Claude Desktop chat and ask **Set up my books**.
    Beankeeper answers in the chat. Open a Desktop link when you want to see
    the detail behind an answer.

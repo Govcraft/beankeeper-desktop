@@ -37,9 +37,12 @@ bundles contain the final native binary, manifest, icon, license, and agent
 skill. They use the same SHA-256, Sigstore bundle and provenance as the other
 release assets. Verify and install using the [Claude Desktop guide](claude-desktop.md).
 
-Linux binaries are built natively on Ubuntu 24.04 (glibc 2.39 or newer). Debian
-packages use `amd64` / `arm64`, install `/usr/bin/bk`, and conflict with the
-upstream CLI packages that own that path. macOS packages are architecture
+Linux binaries are built natively in Ubuntu 22.04 containers on both Linux
+runner architectures. The release verifies a glibc 2.35 ceiling, then installs
+the resulting package on Ubuntu 22.04 and Debian 12. The published
+0.1.0-rc.11 Linux binaries require glibc 2.39. Debian packages use `amd64` /
+`arm64`, install `/usr/bin/bk`, and conflict with upstream CLI packages that
+own that path. macOS packages are architecture
 specific, install `/usr/local/bin/bk`, and replace an existing binary at that
 path. Windows uses Inno Setup 6 on the Windows runner to create an x64, per-user
 installer in `%LOCALAPPDATA%\Programs\Beankeeper Desktop`, with an uninstaller.

@@ -63,6 +63,37 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Version: 0.1.0~rc.1\n", metadata)
         self.assertNotIn("Version: 0.1.0-rc.1\n", metadata)
 
+    def test_linux_abi_gate_accepts_the_ceiling_and_ignores_exported_versions(self):
+        symbols = """Version definition section '.gnu.version_d':
+            Name: GLIBC_2.39
+            Version needs section '.gnu.version_r' contains 1 entry:
+            Name: GLIBC_2.9 Flags: none
+            Name: GLIBC_2.35 Flags: none
+        """
+        with patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess(
+            args=["readelf"], returncode=0, stdout=symbols
+        )) as readelf:
+            self.assertEqual(release.check_linux_abi(self.binary), "2.35")
+            self.assertEqual(
+                readelf.call_args.args[0],
+                ["readelf", "--version-info", "--wide", str(self.binary)],
+            )
+
+    def test_linux_abi_gate_rejects_incompatible_or_unmeasurable_requirements(self):
+        for version, error in (
+            ("GLIBC_2.39", "requires glibc 2.39"),
+            ("GLIBC_2.35.1", "requires glibc 2.35.1"),
+            ("GLIBC_ABI_DT_RELR", "Unexpected glibc version requirement"),
+            ("GLIBC_PRIVATE", "Unexpected glibc version requirement"),
+            ("GCC_3.0", "no measurable glibc version requirements"),
+        ):
+            with self.subTest(version=version):
+                symbols = f"Version needs section '.gnu.version_r':\n Name: {version} Flags: none"
+                with patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    args=["readelf"], returncode=0, stdout=symbols
+                )), self.assertRaisesRegex(ValueError, error):
+                    release.check_linux_abi(self.binary)
+
     def test_supported_archive_layouts_preserve_binary_and_license(self):
         for target in release.TARGETS:
             with self.subTest(target=target):
@@ -97,6 +128,7 @@ class PackagingTests(unittest.TestCase):
             with tarfile.open(fileobj=io.BytesIO(members["control.tar.gz"])) as control:
                 metadata = control.extractfile("control").read().decode()
                 self.assertIn(f"Architecture: {release.TARGETS[target]}\n", metadata)
+                self.assertIn("Depends: libc6 (>= 2.35), libgcc-s1\n", metadata)
                 self.assertIn("Conflicts: beankeeper-cli, bk, bk-bin\n", metadata)
                 self.assertEqual(control.getnames(), ["control", "postinst"])
                 self.assertEqual(control.getmember("postinst").mode, 0o755)
@@ -110,6 +142,11 @@ class PackagingTests(unittest.TestCase):
                 self.assertEqual(payload.extractfile("usr/bin/bk").read(), self.binary.read_bytes())
                 self.assertEqual(payload.getmember("usr/bin/bk").mode, 0o755)
                 self.assertEqual(payload.getmember("usr/bin/bk").uid, 0)
+                for member in ("usr/bin", "usr/share/doc/beankeeper-desktop"):
+                    directory = payload.getmember(member)
+                    self.assertTrue(directory.isdir())
+                    self.assertEqual(directory.mode, 0o755)
+                    self.assertEqual(directory.uid, 0)
             if shutil.which("dpkg-deb"):
                 subprocess.run(["dpkg-deb", "--info", str(package)], check=True, capture_output=True)
 
