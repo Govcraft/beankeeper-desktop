@@ -3,8 +3,8 @@
 use std::{collections::HashSet, error::Error, fmt, num::ParseIntError};
 
 use beankeeper::types::{
-    AccountType, AccountTypeError, Amount, ClearanceStatus, Currency, CurrencyError,
-    DebitCreditError, DebitOrCredit, Money,
+    AccountType, AccountTypeError, Amount, ClearanceStatus, Currency, CurrencyError, DebitOrCredit,
+    Money,
 };
 use beankeeper_cli::db::{
     AccountRow, AuditLogRow, EntryRow,
@@ -15,7 +15,6 @@ use beankeeper_cli::db::{
 pub(crate) enum RowError {
     AccountType(AccountTypeError),
     Currency(CurrencyError),
-    Direction(DebitCreditError),
     AuditId(ParseIntError),
 }
 
@@ -24,7 +23,6 @@ impl fmt::Display for RowError {
         match self {
             Self::AccountType(error) => write!(f, "invalid ledger account type: {error}"),
             Self::Currency(error) => write!(f, "invalid transaction currency: {error}"),
-            Self::Direction(error) => write!(f, "invalid ledger entry direction: {error}"),
             Self::AuditId(error) => write!(f, "invalid ledger audit record ID: {error}"),
         }
     }
@@ -35,7 +33,6 @@ impl Error for RowError {
         Some(match self {
             Self::AccountType(error) => error,
             Self::Currency(error) => error,
-            Self::Direction(error) => error,
             Self::AuditId(error) => error,
         })
     }
@@ -93,12 +90,12 @@ pub(crate) struct EntryValues {
 }
 
 impl EntryValues {
-    pub(crate) fn read(row: &EntryRow, currency: Currency) -> Result<Self, RowError> {
-        Ok(Self {
-            direction: row.direction.parse().map_err(RowError::Direction)?,
+    pub(crate) fn read(row: &EntryRow, currency: Currency) -> Self {
+        Self {
+            direction: row.direction,
             clearance: clearance(row.status),
             amount: Money::new(Amount::from(row.amount), currency),
-        })
+        }
     }
 
     pub(crate) const fn direction_label(&self) -> &'static str {

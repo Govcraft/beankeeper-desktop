@@ -90,7 +90,7 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
         json!({"companies":1,"accounts":0,"transactions":0,"owner_key_initialized":true})
     );
     let db = ledger.db()?;
-    db::create_account(db.conn(), "acme", "1000", "Checking", "asset", None)?;
+    create_fixture_account(&db, "1000", "Checking", "asset")?;
     let active = status("setup_status")?;
     assert_eq!(active["next_step"], "review_opening_balances");
     assert_eq!(
@@ -112,7 +112,7 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     let cli: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(cli["data"], active);
 
-    db::create_account(db.conn(), "acme", "5000", "Groceries", "expense", None)?;
+    create_fixture_account(&db, "5000", "Groceries", "expense")?;
     let posting = ledger
         .command()
         .args([
@@ -152,6 +152,21 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     );
 
     assert_navigation_cannot_read_setup_status(&db, &server)
+}
+
+fn create_fixture_account(db: &Db, code: &str, name: &str, account_type: &str) -> TestResult {
+    db::create_account(
+        db.conn(),
+        &Actor::new("owner"),
+        &db::CreateAccountParams {
+            company_slug: "acme",
+            code,
+            name,
+            account_type,
+            default_tax_category: None,
+        },
+    )?;
+    Ok(())
 }
 
 fn assert_navigation_cannot_read_setup_status(db: &Db, server: &Server) -> TestResult {
@@ -195,8 +210,20 @@ fn desktop_dispatches_owner_setup_lifecycle_across_cli_and_mcp() -> TestResult {
     let started = setup_call(&server, owner, LEDGER_SETUP_BEGIN, input)?;
     let (generation, scoped) = setup_grant(&started["result"]["structuredContent"])?;
     let scoped = scoped.expose_secret();
-    let tools = setup_tool_names(&server, scoped)?;
-    assert_eq!(tools, [LEDGER_SETUP_STATUS]);
+    let mut tools = setup_tool_names(&server, scoped)?;
+    tools.sort_unstable();
+    assert_eq!(
+        tools,
+        [
+            "ledger_setup_account_add",
+            "ledger_setup_book_create",
+            "ledger_setup_book_initialize",
+            "ledger_setup_book_show",
+            "ledger_setup_book_update",
+            "ledger_setup_chart_apply",
+            LEDGER_SETUP_STATUS,
+        ]
+    );
     let status = setup_call(&server, scoped, LEDGER_SETUP_STATUS, json!({}))?;
     assert_eq!(status["result"]["structuredContent"]["companies"], 1);
     let denied = setup_call(
@@ -336,6 +363,178 @@ fn assert_inactive(server: &Server, scoped: &str) -> TestResult {
     )?;
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     Ok(())
+}
+
+#[test]
+fn desktop_guides_a_book_through_profile_chart_and_named_account() -> TestResult {
+    let ledger = Ledger::new()?;
+    let owner = setup_owner(&ledger)?;
+    let owner = owner.expose_secret();
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(owner))?;
+    let started = setup_result(
+        &server,
+        owner,
+        LEDGER_SETUP_BEGIN,
+        json!({"name":"profile_fixture","public_key":setup_public_key()}),
+    )?;
+    let (generation, scoped) = setup_grant(&started)?;
+
+    let apply = |tool, arguments| setup_result(&server, scoped.expose_secret(), tool, arguments);
+    let target =
+        |reference| json!({"company":"studio","generation":generation,"reference":reference});
+    let create = json!({
+        "target": target("studio-profile"),
+        "name": "Studio",
+        "settings": {"purpose":"business","base_currency":"CAD","fiscal_year_start":"04-01"},
+    });
+    let book = apply("ledger_setup_book_create", create.clone())?;
+    assert_eq!(book["profile"]["company"], "studio");
+    assert_eq!(book["profile"]["base_currency"], "CAD");
+    assert_eq!(book["profile"]["fiscal_year_start"], "04-01");
+    assert_eq!(apply("ledger_setup_book_create", create.clone())?, book);
+
+    let mut conflict = create;
+    conflict["settings"]["base_currency"] = json!("USD");
+    let denied = setup_call(
+        &server,
+        scoped.expose_secret(),
+        "ledger_setup_book_create",
+        conflict,
+    )?;
+    assert_eq!(denied["result"]["structuredContent"]["code"], "VALIDATION");
+
+    let update = json!({
+        "target": target("studio-profile-correction"),
+        "supersedes": book["profile"]["revision"],
+        "settings": {"purpose":"business","base_currency":"CAD","fiscal_year_start":"07-01"},
+    });
+    let revised = apply("ledger_setup_book_update", update.clone())?;
+    assert_eq!(revised["supersedes"], book["profile"]["revision"]);
+    assert_eq!(revised["fiscal_year_start"], "07-01");
+    assert_eq!(apply("ledger_setup_book_update", update)?, revised);
+
+    let chart = json!({"target":target("studio-chart"),"template":"business-v1"});
+    let chart_result = apply("ledger_setup_chart_apply", chart.clone())?;
+    assert_eq!(
+        chart_result["accounts"]
+            .as_array()
+            .ok_or("expected chart accounts")?
+            .len(),
+        6
+    );
+    assert_eq!(apply("ledger_setup_chart_apply", chart)?, chart_result);
+
+    let account = json!({
+        "target":target("studio-bank"),"code":"1015","name":"Studio Checking","account_type":"asset",
+    });
+    let added = apply("ledger_setup_account_add", account.clone())?;
+    assert_eq!(added["name"], "Studio Checking");
+    assert_eq!(apply("ledger_setup_account_add", account)?, added);
+
+    let status = setup_result(&server, token(&ledger.reader)?, "setup_status", json!({}))?;
+    let studio = status["books"]
+        .as_array()
+        .ok_or("missing books")?
+        .iter()
+        .find(|book| book["id"] == "studio")
+        .ok_or("missing Studio book")?;
+    assert_eq!(studio["purpose"], "business");
+    assert_eq!(studio["base_currency"], "CAD");
+    assert_eq!(studio["fiscal_year_start"], "07-01");
+    assert_eq!(studio["profile_revision"], revised["revision"]);
+    let accounts = studio["accounts"].as_array().ok_or("missing accounts")?;
+    assert_eq!(
+        accounts
+            .iter()
+            .filter(|account| account["name"] == "Studio Checking")
+            .count(),
+        1
+    );
+    assert_eq!(
+        setup_cli(&ledger, token(&ledger.reader)?, &["status"])?,
+        status
+    );
+    let finished = setup_result(
+        &server,
+        owner,
+        LEDGER_SETUP_FINISH,
+        json!({"generation":generation}),
+    )?;
+    assert_eq!(finished["state"], "finished");
+    assert_inactive(&server, scoped.expose_secret())?;
+    db::audit::verify_hash_chain(ledger.db()?.conn())?;
+    Ok(())
+}
+
+#[test]
+fn desktop_initializes_an_existing_book_without_replacing_its_account() -> TestResult {
+    let ledger = Ledger::new()?;
+    // Earlier CLI versions accepted account codes that the current write API rejects.
+    ledger.db()?.conn().execute(
+        "INSERT INTO accounts (company_slug, code, name, type) VALUES (?1, ?2, ?3, ?4)",
+        ["acme", "CASH", "Existing Checking", "asset"],
+    )?;
+    let owner = setup_owner(&ledger)?;
+    let started = setup_cli(
+        &ledger,
+        owner.expose_secret(),
+        &[
+            "begin",
+            "existing_profile_fixture",
+            "--public-key",
+            &setup_public_key(),
+        ],
+    )?;
+    let (generation, scoped) = setup_grant(&started)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    let reader = token(&ledger.reader)?;
+    server.initialize(Some(reader))?;
+    let show = || {
+        setup_result(
+            &server,
+            reader,
+            "ledger_setup_book_show",
+            json!({"company":"acme"}),
+        )
+    };
+    let initial = show()?;
+    assert!(initial["profile"].is_null());
+    let initialize = json!({
+        "target":{"company":"acme","generation":generation,"reference":"existing-book-profile"},
+        "settings":{"purpose":"personal","base_currency":"MXN","fiscal_year_start":"01-01"},
+    });
+    let initialize_book = |arguments| {
+        setup_result(
+            &server,
+            scoped.expose_secret(),
+            "ledger_setup_book_initialize",
+            arguments,
+        )
+    };
+    let profile = initialize_book(initialize.clone())?;
+    assert_eq!(initialize_book(initialize)?, profile);
+    let configured = show()?;
+    assert_eq!(configured["name"], initial["name"]);
+    assert_eq!(configured["accounts"], initial["accounts"]);
+    assert_eq!(configured["accounts"][0]["code"], "CASH");
+    assert_eq!(configured["accounts"][0]["name"], "Existing Checking");
+    assert_eq!(configured["profile"]["base_currency"], "MXN");
+    assert_eq!(configured["profile"]["fiscal_year_start"], "01-01");
+    let desktop_status = setup_result(&server, reader, "setup_status", json!({}))?;
+    assert_eq!(
+        desktop_status["books"][0]["accounts"],
+        json!([{"code":"CASH","name":"Existing Checking"}])
+    );
+    db::audit::verify_hash_chain(ledger.db()?.conn())?;
+    Ok(())
+}
+
+fn setup_result(server: &Server, token: &str, name: &str, arguments: Value) -> TestResult<Value> {
+    let mut response = setup_call(server, token, name, arguments)?;
+    let result = &mut response["result"];
+    assert_eq!(result["isError"], false, "{name} failed: {result}");
+    Ok(result["structuredContent"].take())
 }
 
 fn verify_scoped_stdio(server: &Server, scoped: &str) -> TestResult {

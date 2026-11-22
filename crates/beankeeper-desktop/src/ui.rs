@@ -8,7 +8,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use beankeeper_cli::db::Db;
+use beankeeper_cli::db::{Db, companies::CompanySlug};
 
 use crate::{
     links::{
@@ -66,10 +66,10 @@ pub(crate) fn message(title: &str, content: &Markup) -> Html<String> {
 #[derive(Clone)]
 struct ViewState {
     db: Arc<Mutex<Db>>,
-    company: Option<String>,
+    company: Option<CompanySlug>,
 }
 
-pub(crate) fn router(db: Db, company: Option<String>, pairing: PairingState) -> Router {
+pub(crate) fn router(db: Db, company: Option<CompanySlug>, pairing: PairingState) -> Router {
     let data = Router::new()
         .route(HOME, get(view))
         .route(SUMMARY, get(view))
@@ -142,7 +142,7 @@ async fn report(
             .into_response();
     };
     if query.filters.company.is_none() {
-        query.filters.company = state.company;
+        query.filters.company = state.company.as_ref().map(ToString::to_string);
     }
     let result = tokio::task::spawn_blocking(move || {
         let query = match query.parse(uri.path()) {
@@ -229,7 +229,7 @@ async fn view(
             .into_response();
     };
     if query.company.is_none() {
-        query.company = state.company;
+        query.company = state.company.as_ref().map(ToString::to_string);
     }
     let db = state.db;
     let path = uri.path().to_owned();

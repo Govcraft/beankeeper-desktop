@@ -9,7 +9,10 @@ use beankeeper::types::Currency;
 use beankeeper_cli::{
     capability::Capability,
     cli::Cli,
-    db::{self, Db, accounts::ListAccountParams},
+    commands::setup::{
+        BookAccountCode, BookFacts, BookProfile, BookSettings, ProfileRevision, book_facts,
+    },
+    db::{self, Db},
     error::CliError,
     identity::{self, VerifiedAgent},
     mcp::{HostTool, HostToolEffect, HostToolHandler},
@@ -40,15 +43,52 @@ struct Book {
     name: String,
     accounts: Vec<Account>,
     observed_currencies: Vec<CurrencyCode>,
-    base_currency: SettingState,
-    fiscal_year_start: SettingState,
+    #[serde(flatten)]
+    profile: ProfileStatus,
     imported_history: ImportHistory,
 }
 
 #[derive(Serialize)]
 struct Account {
-    code: String,
+    #[serde(serialize_with = "serialize_account_code")]
+    code: BookAccountCode,
     name: String,
+}
+
+fn serialize_account_code<S: Serializer>(
+    code: &BookAccountCode,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(code.as_str())
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProfileStatus {
+    Unavailable {
+        base_currency: SettingState,
+        fiscal_year_start: SettingState,
+    },
+    Recorded {
+        profile_revision: ProfileRevision,
+        #[serde(flatten)]
+        settings: BookSettings,
+    },
+}
+
+impl From<Option<BookProfile<'_>>> for ProfileStatus {
+    fn from(profile: Option<BookProfile<'_>>) -> Self {
+        match profile {
+            Some(profile) => Self::Recorded {
+                profile_revision: profile.revision,
+                settings: profile.settings,
+            },
+            None => Self::Unavailable {
+                base_currency: SettingState::Unavailable,
+                fiscal_year_start: SettingState::Unavailable,
+            },
+        }
+    }
 }
 
 struct CurrencyCode(Currency);
@@ -167,20 +207,20 @@ impl LedgerSnapshot {
         let books = db::list_companies(conn)?
             .into_iter()
             .map(|company| {
-                let accounts = db::list_accounts(
-                    conn,
-                    &ListAccountParams {
-                        company_slug: &company.slug,
-                        type_filter: None,
-                        name_filter: None,
-                    },
-                )?
-                .into_iter()
-                .map(|row| Account {
-                    code: row.code,
-                    name: row.name,
-                })
-                .collect();
+                let company_slug = company.slug.parse()?;
+                let BookFacts {
+                    name,
+                    accounts,
+                    profile,
+                    ..
+                } = book_facts(db, &company_slug)?;
+                let accounts = accounts
+                    .into_iter()
+                    .map(|account| Account {
+                        code: account.code,
+                        name: account.name,
+                    })
+                    .collect();
                 let observed_currencies = currencies
                     .query_map([&company.slug], |row| row.get::<_, String>(0))?
                     .map(|code| {
@@ -196,12 +236,10 @@ impl LedgerSnapshot {
                 };
                 Ok(Book {
                     id: company.slug,
-                    name: company.name,
+                    name,
                     accounts,
                     observed_currencies,
-                    // The current ledger schema does not persist these settings.
-                    base_currency: SettingState::Unavailable,
-                    fiscal_year_start: SettingState::Unavailable,
+                    profile: profile.into(),
                     imported_history,
                 })
             })

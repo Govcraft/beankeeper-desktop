@@ -3,6 +3,7 @@
 mod filters;
 pub(crate) mod values;
 
+use beankeeper_cli::db::companies::CompanySlug;
 use filters::{
     Balance, BookFilter, Budget, CashFlowFilters, Dashboard, Empty, Period, Reconciliation,
     ReportSelector, ReviewDetail, Summary, Transaction, Transactions, Trend, Validated, Vendor,
@@ -476,9 +477,13 @@ pub struct LinkOptions {
 ///
 /// # Errors
 /// Returns VALIDATION for malformed selectors, values or unsupported filters.
-pub fn run(mut options: LinkOptions, company: Option<String>, json: bool) -> Result<(), LinkError> {
+pub fn run(
+    mut options: LinkOptions,
+    company: Option<&CompanySlug>,
+    json: bool,
+) -> Result<(), LinkError> {
     if options.state.company.is_none() && !matches!(options.view_id, View::Settings) {
-        options.state.company = company;
+        options.state.company = company.map(ToString::to_string);
     }
     let result = (|| {
         let address: ViewAddress = serde_json::from_value(serde_json::json!({

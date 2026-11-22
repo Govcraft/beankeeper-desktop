@@ -37,12 +37,13 @@ impl Ledger {
         let secret = dir.path().join("passphrase");
         std::fs::write(&secret, PASSPHRASE)?;
         let db = Db::open(&path, Some(&PASSPHRASE.into()))?;
-        db::create_company(db.conn(), "acme", "Acme", None)?;
-        identity::init_root(db.conn(), &Actor::new("owner"))?;
+        let owner = Actor::new("owner");
+        db::create_company(db.conn(), &owner, "acme", "Acme", None)?;
+        identity::init_root(db.conn(), &owner)?;
         let issue = |name, capabilities: &[String]| {
             identity::issue(
                 db.conn(),
-                &Actor::new("owner"),
+                &owner,
                 &IssueRequest {
                     name,
                     capabilities,
@@ -57,7 +58,7 @@ impl Ledger {
             "desktop_writer",
             &["ledger/read".into(), "ledger/post".into()],
         )?;
-        db::audit::set_policy(db.conn(), &Actor::new("owner"), true)?;
+        db::audit::set_policy(db.conn(), &owner, true)?;
         Ok(Self {
             _dir: dir,
             path,

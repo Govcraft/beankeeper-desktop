@@ -28,10 +28,36 @@ impl ReviewFixture {
     fn new() -> TestResult<Self> {
         let ledger = Ledger::new()?;
         let db = ledger.db()?;
-        db::create_company(db.conn(), "other", "Other Books", None)?;
+        db::create_company(
+            db.conn(),
+            &Actor::new("fixture-owner"),
+            "other",
+            "Other Books",
+            None,
+        )?;
         for company in ["acme", "other"] {
-            db::create_account(db.conn(), company, "1000", "Cash", "asset", None)?;
-            db::create_account(db.conn(), company, "5000", "Supplies", "expense", None)?;
+            db::create_account(
+                db.conn(),
+                &Actor::new("fixture-owner"),
+                &db::CreateAccountParams {
+                    company_slug: company,
+                    code: "1000",
+                    name: "Cash",
+                    account_type: "asset",
+                    default_tax_category: None,
+                },
+            )?;
+            db::create_account(
+                db.conn(),
+                &Actor::new("fixture-owner"),
+                &db::CreateAccountParams {
+                    company_slug: company,
+                    code: "5000",
+                    name: "Supplies",
+                    account_type: "expense",
+                    default_tax_category: None,
+                },
+            )?;
         }
         let issue = |name, capabilities: &[String]| {
             identity::issue(

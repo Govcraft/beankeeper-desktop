@@ -194,13 +194,28 @@ client, read `mcp_endpoint` from `bk service status --json` and run
 `bk mcp bridge --url ENDPOINT --token-file PRIVATE_FILE`. Point `PRIVATE_FILE`
 at the private setup-token file and keep the regular ledger connection.
 
-Keep the returned setup generation for the session's writes. Use the same
-request reference when retrying a step, and stop if the tool reports a conflict.
+Use `ledger_setup_book_show` to confirm the current profile and accounts for
+each existing book. Use `ledger_setup_book_initialize` to save the first
+profile for an existing book, including the default Personal book. Use
+`ledger_setup_book_create` for each new book the owner wants. Supply its
+purpose, base currency and the first day of its financial year as `MM-DD`.
+If a saved profile needs a correction, use `ledger_setup_book_update` with
+the current profile revision.
+
+For a new chart, confirm the matching template (`personal-v1` or
+`business-v1`) and apply it with `ledger_setup_chart_apply`. For a book that
+already has accounts, review those accounts before proposing any additions.
+Use `ledger_setup_account_add` for each confirmed real account with its own
+available account code. Read the book again to confirm the changes.
+
+For each write, send the company, setup generation and a stable request
+reference. Reuse the same reference and inputs when retrying. Stop and explain
+what needs to be resolved if a tool reports a conflict.
 
 After summarizing the outcome, have the owner finish the session or revoke it
 if they want to cancel access. Both actions deactivate the setup grant. Posted
 entries are corrected through normal ledger reversals. See the
-[ledger setup session commands](https://github.com/Govcraft/beankeeper/blob/2399d1566ce3730368ca53e044e47ba3cf72610f/docs/beankeeper/references/commands.md#setup-sessions)
+[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/af0cc6d6e02cd777b2a731b2cf779cc8e67fcf52/docs/beankeeper/references/commands.md#setup-sessions)
 for the CLI flags and MCP arguments.
 
 Setup opens the UI origin. Ask the human to open the one-time pairing URL from

@@ -358,20 +358,28 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     let ledger = Ledger::new()?;
     {
         let db = ledger.db()?;
-        // Undo migration 21 to represent a ledger from the previous release.
+        // Undo migration 22 to reproduce the prior ledger schema.
         db.conn().execute_batch(
             "BEGIN;
-             DROP TABLE setup_sessions;
-             DELETE FROM schema_version WHERE version = 21;
+             DROP TABLE setup_requests;
+             DROP TABLE setup_book_profiles;
+             DELETE FROM schema_version WHERE version = 22;
              COMMIT;",
         )?;
-        assert_eq!(get_schema_version(db.conn())?, 20);
+        assert_eq!(get_schema_version(db.conn())?, 21);
     }
 
     let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
     let passphrase = std::fs::read_to_string(&ledger.secret)?.into();
     let migrated = Db::open_snapshot(&ledger.path, Some(&passphrase))?;
-    assert!(get_schema_version(migrated.conn())? >= 21);
+    assert_eq!(get_schema_version(migrated.conn())?, 22);
+    let setup_tables: u32 = migrated.conn().query_row(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table' AND name IN ('setup_book_profiles', 'setup_requests')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(setup_tables, 2);
     server.initialize(Some(token(&ledger.reader)?))?;
     server.pair()?;
     assert_eq!(server.client.get(&server.base).send()?.status(), 200);
@@ -1085,14 +1093,33 @@ fn one_shot_passphrase_commands_are_consumed_once_for_both_transports() -> TestR
     Ok(())
 }
 
+fn seed_register_accounts(db: &Db) -> TestResult {
+    use beankeeper_cli::db::{self, CreateAccountParams};
+
+    let owner = Actor::new("owner");
+    db::create_company(db.conn(), &owner, "other", "Other Books", None)?;
+    for (code, name, account_type) in [("1000", "Cash", "asset"), ("4000", "Sales", "revenue")] {
+        db::create_account(
+            db.conn(),
+            &owner,
+            &CreateAccountParams {
+                company_slug: "acme",
+                code,
+                name,
+                account_type,
+                default_tax_category: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> TestResult {
     use beankeeper_cli::db::{self, ConflictStrategy, PostEntryParams, PostTransactionParams};
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    db::create_company(db.conn(), "other", "Other Books", None)?;
-    db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
-    db::create_account(db.conn(), "acme", "4000", "Sales", "revenue", None)?;
+    seed_register_accounts(&db)?;
     let actor =
         Actor::new("owner").with_identity(identity::verify(db.conn(), token(&ledger.writer)?)?);
     let entries = [
