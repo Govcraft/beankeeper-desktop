@@ -21,6 +21,9 @@ PowerShell installers verify checksums and use Sigstore when cosign is available
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
+For agent-led setup, use [the Desktop skill](SKILL.md). It finds the highest
+published stable or release-candidate version with signature bundles for your
+platform and requires both signatures before running the downloaded binary.
 
 ## Claude Desktop extension
 

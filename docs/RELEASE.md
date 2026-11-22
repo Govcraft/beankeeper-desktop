@@ -186,7 +186,7 @@ inspect it, then use:
 ./install.ps1 -Version 0.1.0 -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
 ```
 
-Both scripts accept `BK_VERSION` (default: latest release) and `BK_INSTALL`.
+Both scripts accept `BK_VERSION` (default: latest stable release) and `BK_INSTALL`.
 They always require a matching SHA-256 checksum before extracting or installing.
 If `cosign` is on PATH, they also verify the archive and manifest bundles with
 this exact certificate identity:
@@ -202,6 +202,15 @@ bundle, verification failure, or any other bundle download error stops installat
 Checksum-only installation detects corruption but does not authenticate the
 release publisher. These scripts never change the user's execution policy or
 PATH, and do not start `bk serve`.
+
+The [agent-led guide](../SKILL.md) requires both signatures and checks that the
+verified binary provides managed service and agent registration commands. When
+`BK_VERSION` is unset, it chooses the highest stable or `-rc.N` version among
+the 100 most recent published GitHub releases that list the platform archive,
+the checksum list and both signature bundles. Linux and macOS use `jq` to read
+this list. Set `BK_VERSION` to select a specific published release. A missing
+or invalid signature, or a binary without the setup commands, stops guided
+installation before replacement.
 
 ## Signed update feed and self-update
 

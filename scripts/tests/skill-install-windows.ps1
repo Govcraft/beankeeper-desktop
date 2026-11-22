@@ -34,7 +34,7 @@ $codexDirectory = Join-Path $userDirectory '.codex'
 $books = Join-Path $sandbox 'data\books.db'
 $binary = Join-Path $localDirectory 'Programs\Beankeeper Desktop\bk.exe'
 $environment = @{
-    BK_VERSION = $version
+    BK_VERSION = $null
     BEANKEEPER_DB = $null
     BEANKEEPER_PASSPHRASE_CMD = $null
     BK_AGENT_TOKEN = $null
@@ -78,7 +78,21 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath (Join-Path $fixtures $name) -Destination $OutFile
 }
 
-function Invoke-RestMethod { throw 'The test must use its pinned release version.' }
+function Invoke-RestMethod([string]$Uri) {
+    if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100') {
+        throw "Unexpected discovery request: $Uri"
+    }
+    @(
+        [pscustomobject]@{ tag_name = 'beankeeper-desktop-v99.0.0'; draft = $true; prerelease = $false },
+        [pscustomobject]@{ tag_name = 'beankeeper-desktop-v98.0.0'; draft = $false; prerelease = $false; assets = @() },
+        [pscustomobject]@{
+            tag_name = "beankeeper-desktop-v$version"
+            draft = $false
+            prerelease = $version.Contains('-rc.')
+            assets = @($fixtureFiles | ForEach-Object { @{ name = $_ } })
+        }
+    )
+}
 
 function cosign {
     if ($args[0] -ne 'verify-blob' -or $args -notcontains '--certificate-identity' -or
