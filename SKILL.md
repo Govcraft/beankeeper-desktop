@@ -40,10 +40,13 @@ processor using the commands below.
 
 Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
 if `cosign` is missing. Install it through the owner's trusted package channel
-or stop and explain what is missing. Guided setup requires Desktop `0.1.0-rc.12`
-or a newer signed release. The commands select `0.1.0-rc.12` by default. If that
-release is still pending, report it and stop. To select a newer release, set
-`BK_VERSION` to its version without the tag prefix.
+or stop and explain what is missing. Guided setup selects the highest published
+version with signature bundles for this machine and checks that it provides
+managed service and agent registration commands. Regular installs prefer a
+signed stable release and fall back to the highest signed release candidate
+for this machine. On Linux and macOS, install `jq` through the owner's trusted
+package channel for automatic selection. To select a specific signed release,
+set `BK_VERSION` without the tag prefix.
 
 ### Linux and macOS
 
@@ -53,7 +56,6 @@ detects Linux versus macOS and x86-64 versus Arm64.
 ```sh
 (
     set -eu
-    export BK_VERSION="${BK_VERSION:-0.1.0-rc.12}"
     bk_bin="$HOME/.local/bin"
     bk_download="$(mktemp -d)"
     trap 'rm -rf "$bk_download"' EXIT
@@ -75,12 +77,11 @@ for x64 Windows before downloading the release.
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'
-    $bkVersion = if ($env:BK_VERSION) { $env:BK_VERSION } else { '0.1.0-rc.12' }
     $bkDir = Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
     $bkSetup = Join-Path ([IO.Path]::GetTempPath()) ("bk-install-" + [guid]::NewGuid() + ".ps1")
     try {
         Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1' -OutFile $bkSetup
-        & $bkSetup -Version $bkVersion -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir
+        & $bkSetup -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir
         $bk = Join-Path $bkDir 'bk.exe'
         & $bk service install --no-agents
         if ($LASTEXITCODE -ne 0) { throw 'Beankeeper service installation failed' }

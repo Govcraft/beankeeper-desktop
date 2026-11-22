@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh | sh
 #
 # Options (environment variables):
-#   BK_VERSION   - version to install (default: latest)
+#   BK_VERSION   - version to install (default: signed release, with stable preferred for regular installs)
 #   BK_INSTALL   - install directory (default: ~/.local/bin)
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
@@ -18,6 +18,7 @@ REPO="Govcraft/beankeeper-desktop"
 INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
 NO_SERVICE="${BK_NO_SERVICE:-0}"
 NO_AGENTS="${BK_NO_AGENTS:-0}"
+REQUIRE_AGENT_SETUP="${BK_REQUIRE_AGENT_SETUP:-0}"
 
 main() {
     while [ "$#" -gt 0 ]; do
@@ -30,9 +31,6 @@ main() {
     done
     detect_platform
     resolve_version
-    if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
-        fatal "invalid version: $VERSION"
-    fi
     download_and_install
     verify
     if [ "$NO_SERVICE" != 1 ]; then
@@ -65,19 +63,38 @@ detect_platform() {
 resolve_version() {
     if [ -n "${BK_VERSION:-}" ]; then
         VERSION="$BK_VERSION"
+        case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
+        printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || fatal "invalid version: $VERSION"
         return
     fi
-
-    info "fetching latest version..."
-    TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' \
-        "https://github.com/${REPO}/releases/latest" 2>/dev/null \
-        | grep -oE '[^/]+$')"
-
-    if [ -z "$TAG" ]; then
-        fatal "could not determine latest release"
+    prefer_stable=true
+    if [ "$REQUIRE_AGENT_SETUP" = 1 ]; then
+        prefer_stable=false
     fi
 
-    VERSION="${TAG#beankeeper-desktop-v}"
+    command -v jq >/dev/null 2>&1 || fatal "jq is required to find a signed release; install jq or set BK_VERSION"
+    info "finding the latest published release with signature bundles for ${TARGET}..."
+    releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100")" \
+        || fatal "could not list published releases; retry or set BK_VERSION to a signed release"
+    # GitHub metadata selects a tag. Only cosign authenticates the artifacts.
+    VERSION="$(printf '%s\n' "$releases" | jq -r --arg target "$TARGET" --argjson prefer_stable "$prefer_stable" '
+        [ .[] | select(.draft == false)
+          | (.tag_name | capture("\\Abeankeeper-desktop-v(?<version>[0-9]+\\.[0-9]+\\.[0-9]+(?:-rc\\.[0-9]+)?)\\z").version) as $version
+          | select(.prerelease == ($version | contains("-rc.")))
+          | ("bk-\($version)-\($target).tar.gz") as $archive
+          | [.assets[].name] as $assets
+          | select(all($archive, "\($archive).sigstore", "checksums-sha256.txt", "checksums-sha256.txt.sigstore";
+              . as $required | $assets | index($required) != null))
+          | $version ]
+        | max_by(split("-rc.") | [
+            ($prefer_stable and (length == 1)),
+            (.[0] | split(".") | map(tonumber)),
+            (length == 1),
+            (.[1] | tonumber? // 0)
+          ])
+        // empty
+    ')" || fatal "could not read published release metadata"
+    [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"
 }
 
 download_and_install() {
@@ -108,7 +125,7 @@ download_and_install() {
 
     tar xzf "${BK_TEMP_DIR}/${ARCHIVE}" -C "$BK_TEMP_DIR"
     candidate="${BK_TEMP_DIR}/bk-${VERSION}-${TARGET}/bk"
-    if [ "${BK_REQUIRE_AGENT_SETUP:-0}" = 1 ]; then
+    if [ "$REQUIRE_AGENT_SETUP" = 1 ]; then
         if ! "$candidate" service install --help >/dev/null 2>&1 ||
             ! "$candidate" agents connect --help >/dev/null 2>&1; then
             fatal "bk v${VERSION} lacks managed service or agent registration commands; select a compatible signed release"

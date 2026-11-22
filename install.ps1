@@ -17,6 +17,39 @@ function Get-ReleaseFile([string]$Url, [string]$Destination) {
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
 }
 
+function Find-SignedReleaseVersion([switch]$PreferStable) {
+    $releases = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases?per_page=100"
+    $candidates = foreach ($release in $releases) {
+        if ($release.draft -ne $false -or $release.tag_name -cnotmatch '\Abeankeeper-desktop-v(?<core>[0-9]+\.[0-9]+\.[0-9]+)(?:-rc\.(?<rc>[0-9]+))?\z') { continue }
+        $number = [version]::new()
+        $rc = [uint64]0
+        $stable = -not $Matches.ContainsKey('rc')
+        if ($release.prerelease -ne (-not $stable) -or
+            -not [version]::TryParse($Matches.core, [ref]$number) -or
+            (-not $stable -and -not [uint64]::TryParse($Matches.rc, [ref]$rc))) { continue }
+
+        $version = $release.tag_name.Substring('beankeeper-desktop-v'.Length)
+        $archive = "bk-$version-x86_64-pc-windows-msvc.zip"
+        $names = $release.assets.name
+        if ($names -cnotcontains $archive -or $names -cnotcontains "$archive.sigstore" -or
+            $names -cnotcontains 'checksums-sha256.txt' -or $names -cnotcontains 'checksums-sha256.txt.sigstore') { continue }
+
+        [pscustomobject]@{ Version = $version; Number = $number; Stable = $stable; Candidate = $rc }
+    }
+    $latest = $candidates | Sort-Object { $PreferStable -and $_.Stable }, Number, Stable, Candidate -Descending |
+        Select-Object -First 1
+    if (-not $latest) { throw 'No published release with signature bundles found for x64 Windows' }
+    $latest.Version
+}
+
+function Resolve-ReleaseVersion {
+    if ($Version) {
+        if ($Version -notmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?\z') { throw "Invalid release version: $Version" }
+        return $Version
+    }
+    Find-SignedReleaseVersion -PreferStable:(-not $RequireAgentSetup)
+}
+
 function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Directory, [string]$ReleaseVersion) {
     if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
         if ($RequireSignatures) { throw 'cosign is required to verify this release' }
@@ -46,12 +79,7 @@ function Install-Beankeeper {
         throw 'This installer requires x64 Windows; ARM64 Windows binaries are not yet provided'
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $releaseVersion = $Version
-    if (-not $releaseVersion) {
-        $release = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest"
-        $releaseVersion = $release.tag_name -replace '^beankeeper-desktop-v', ''
-    }
-    if ($releaseVersion -notmatch '^\d+\.\d+\.\d+(-rc\.\d+)?$') { throw "Invalid release version: $releaseVersion" }
+    $releaseVersion = Resolve-ReleaseVersion
     $stem = "bk-$releaseVersion-x86_64-pc-windows-msvc"
     $artifact = "$stem.zip"
     $url = "https://github.com/$Repository/releases/download/beankeeper-desktop-v$releaseVersion"

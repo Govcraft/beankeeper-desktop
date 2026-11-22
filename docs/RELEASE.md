@@ -174,7 +174,7 @@ repository. `install.ps1` follows the same contract on x64 Windows (PowerShell
 ```sh
 # Download and inspect the script before running it.
 curl -fsSLO https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh
-BK_VERSION=0.1.0 BK_INSTALL="$HOME/.local/bin" sh install.sh
+BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$HOME/.local/bin" sh install.sh
 ```
 
 The shell installer creates its destination directory, defaulting to
@@ -183,13 +183,23 @@ service setup still runs as the invoking desktop user. On Windows, download `ins
 inspect it, then use:
 
 ```powershell
-./install.ps1 -Version 0.1.0 -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
+./install.ps1 -RequireSignatures -RequireAgentSetup -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
 ```
 
-Both scripts accept `BK_VERSION` (default: latest release) and `BK_INSTALL`.
-They always require a matching SHA-256 checksum before extracting or installing.
-If `cosign` is on PATH, they also verify the archive and manifest bundles with
-this exact certificate identity:
+With `BK_VERSION` unset, both installers scan up to 100 recent GitHub releases.
+A release qualifies when it is published, its prerelease flag agrees with its
+stable or `-rc.N` tag, and it lists the platform archive,
+`checksums-sha256.txt`, and a Sigstore bundle for each. Regular installs choose
+the highest qualifying stable version, or the highest qualifying release
+candidate if no stable release qualifies. Guided setup chooses the highest
+qualifying version across both. Automatic selection on Linux and macOS
+requires `jq`.
+
+Set `BK_VERSION` without the tag prefix to select a specific published release.
+Both scripts also accept `BK_INSTALL`. They always require a matching SHA-256
+checksum before extracting or installing. If `cosign` is on PATH, they also
+verify the bundles for the archive and checksum list with this exact certificate
+identity:
 
 ```text
 https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION
@@ -202,6 +212,11 @@ bundle, verification failure, or any other bundle download error stops installat
 Checksum-only installation detects corruption but does not authenticate the
 release publisher. These scripts never change the user's execution policy or
 PATH, and do not start `bk serve`.
+
+The [agent-led guide](../SKILL.md) requires both signatures and checks that the
+verified binary provides managed service and agent registration commands. A
+missing or invalid signature, or a binary without the setup commands, stops
+guided installation before replacement.
 
 ## Signed update feed and self-update
 

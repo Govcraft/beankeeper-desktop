@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -22,13 +23,8 @@ class ShellInstallerTests(unittest.TestCase):
         self.bin.mkdir()
         self.destination = self.root / "installed"
         self.destination.mkdir()
-        self.stem = "bk-0.1.0-x86_64-unknown-linux-gnu"
-        binary = self.root / "bk"
-        binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then printf "bk 0.1.0\\n"; else printf "%s\\n" "$*" >> "$BK_TEST_LOG"; fi\n')
-        directory = release.stage(binary, "0.1.0", "x86_64-unknown-linux-gnu", self.root / "work")
-        release.compress(directory, "0.1.0", "x86_64-unknown-linux-gnu", self.fixtures)
-        release.checksums(self.fixtures)
-        for command in ("sh", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep"):
+        self.stage_shell_fixture("0.1.0")
+        for command in ("sh", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep", "jq"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
         self.script("uname", 'print("Linux" if "-s" in sys.argv else "x86_64")')
@@ -37,7 +33,10 @@ import shutil
 from urllib.parse import urlparse
 args = sys.argv[1:]
 url = next(arg for arg in args if arg.startswith("https://"))
-assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v0.1.0/"), url
+if url == "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100":
+    print(os.environ["FIXTURE_RELEASES"])
+    sys.exit(0)
+assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"] + "/"), url
 path = Path(os.environ["FIXTURES"]) / Path(urlparse(url).path).name
 if not path.exists():
     if "-w" in args: print(os.environ.get("BUNDLE_STATUS", "404"), end="")
@@ -45,9 +44,21 @@ if not path.exists():
 shutil.copyfile(path, args[args.index("-o") + 1])
 if "-w" in args: print("200", end="")
 ''')
-        self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0",
+        self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0", "FIXTURE_VERSION": "0.1.0",
                     "BK_INSTALL": str(self.destination), "FIXTURES": str(self.fixtures),
                     "TMPDIR": str(self.root), "BK_TEST_LOG": str(self.root / "service-actions")}
+
+    def stage_shell_fixture(self, version):
+        target = "x86_64-unknown-linux-gnu"
+        self.stem = f"bk-{version}-{target}"
+        binary = self.root / "bk"
+        binary.write_text(
+            f'#!/bin/sh\nif [ "$1" = --version ]; then printf "bk {version}\\n"; '
+            'else printf "%s\\n" "$*" >> "$BK_TEST_LOG"; fi\n'
+        )
+        directory = release.stage(binary, version, target, self.root / "work")
+        release.compress(directory, version, target, self.fixtures)
+        release.checksums(self.fixtures)
 
     def script(self, name, code):
         path = self.bin / name
@@ -62,7 +73,7 @@ if "-w" in args: print("200", end="")
         self.script("cosign", f'''
 args = sys.argv[1:]
 assert args[0] == "verify-blob"
-assert args[args.index("--certificate-identity") + 1] == "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0"
+assert args[args.index("--certificate-identity") + 1] == "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"]
 assert args[args.index("--certificate-oidc-issuer") + 1] == "https://token.actions.githubusercontent.com"
 with open(os.environ["FIXTURES"] + "/verified", "a") as log: log.write(Path(args[-1]).name + "\\n")
 sys.exit({1 if fail else 0})
@@ -71,6 +82,14 @@ sys.exit({1 if fail else 0})
     def bundles(self):
         for name in (f"{self.stem}.tar.gz", "checksums-sha256.txt"):
             (self.fixtures / f"{name}.sigstore").write_text("fixture bundle")
+
+    @staticmethod
+    def release_entry(version, target, *, missing=None, **overrides):
+        archive = f"bk-{version}-{target}.tar.gz"
+        names = (archive, f"{archive}.sigstore", "checksums-sha256.txt", "checksums-sha256.txt.sigstore")
+        return {"tag_name": f"beankeeper-desktop-v{version}", "draft": False,
+                "prerelease": "-rc." in version,
+                "assets": [{"name": name} for name in names if name != missing], **overrides}
 
     def test_no_cosign_checks_checksum_and_installs(self):
         result = self.run_installer()
@@ -124,7 +143,7 @@ sys.exit({1 if fail else 0})
         self.assertEqual((self.destination / "bk").read_text(), "previous version")
 
     def test_invalid_version_is_rejected_before_downloading(self):
-        for value in ("../main", "0.1", "0.1.0.1", "0.1.0-beta", "0.1.0-rc", "v0.1.0-rc.1"):
+        for value in ("../main", "0.1", "0.1.0.1", "0.1.0-beta", "0.1.0-rc", "v0.1.0-rc.1", "0.1.0\n../main"):
             with self.subTest(value=value):
                 self.env["BK_VERSION"] = value
                 result = self.run_installer()
@@ -180,7 +199,9 @@ sys.exit({1 if fail else 0})
         release.checksums(self.fixtures)
         self.cosign()
         self.bundles()
-        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1")
+        self.env.pop("BK_VERSION")
+        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1",
+                        FIXTURE_RELEASES=json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]))
         installed = self.destination / "bk"
         installed.write_text("previous executable")
 
@@ -190,6 +211,61 @@ sys.exit({1 if fail else 0})
         self.assertIn("lacks managed service or agent registration commands", result.stderr)
         self.assertEqual(installed.read_text(), "previous executable")
 
+    def test_guided_discovery_refuses_when_no_release_includes_both_signature_bundles(self):
+        self.env.pop("BK_VERSION")
+        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1",
+                        FIXTURE_RELEASES=json.dumps([self.release_entry(
+                            "0.2.0-rc.1", "x86_64-unknown-linux-gnu", missing="checksums-sha256.txt.sigstore",
+                        )]))
+
+        result = self.run_installer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no published release with signature bundles found", result.stderr)
+        self.assertFalse((self.destination / "bk").exists())
+
+    def assert_regular_release_selection(self, version, releases):
+        self.stage_shell_fixture(version)
+        self.cosign()
+        self.bundles()
+        self.env.pop("BK_VERSION")
+        self.env.update(BK_REQUIRE_AGENT_SETUP="0", FIXTURE_VERSION=version,
+                        FIXTURE_RELEASES=json.dumps(releases))
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"installed bk v{version}", result.stdout)
+        self.assertEqual((self.fixtures / "verified").read_text().splitlines(),
+                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
+
+    def test_regular_discovery_uses_newest_signed_rc_when_no_stable_exists(self):
+        target = "x86_64-unknown-linux-gnu"
+        self.assert_regular_release_selection("0.2.0-rc.10", [
+            self.release_entry("0.2.0-rc.11", target, missing="checksums-sha256.txt.sigstore"),
+            self.release_entry("0.2.0-rc.9", target),
+            self.release_entry("0.2.0-rc.10", target),
+        ])
+
+    def test_regular_discovery_prefers_signed_stable_over_newer_rc(self):
+        target = "x86_64-unknown-linux-gnu"
+        self.assert_regular_release_selection("0.1.0", [
+            self.release_entry("0.2.0-rc.10", target),
+            self.release_entry("0.0.9", target),
+            self.release_entry("0.1.0", target),
+        ])
+
+    def test_install_documentation_has_no_hard_coded_desktop_release(self):
+        for path, heading in (
+            ("SKILL.md", "Install and set up Beankeeper on this machine"),
+            ("README.md", "Release packages"),
+            ("docs/RELEASE.md", "Checksum-verifying command-line installers"),
+        ):
+            with self.subTest(path=path):
+                _, separator, rest = (ROOT / path).read_text().partition(f"\n## {heading}\n")
+                self.assertTrue(separator, f"missing installation section: {heading}")
+                self.assertNotRegex(rest.split("\n## ", 1)[0], r"\b(?:v)?[0-9]+\.[0-9]+\.[0-9]+\b")
+
     def test_skill_commands_install_verified_binary_and_connect(self):
         match = re.search(r"```sh\n(.*?)```", (ROOT / "SKILL.md").read_text(), re.DOTALL)
         self.assertIsNotNone(match, "missing Linux/macOS command block")
@@ -198,12 +274,7 @@ sys.exit({1 if fail else 0})
 
         expected = self.root / "calls"
         binary = self.root / "bk"
-        binary.write_text(
-            '#!/bin/sh\n'
-            'if [ "$*" = "--version" ]; then printf "bk 0.1.0\\n"; exit 0; fi\n'
-            'if [ "${3:-}" = --help ]; then exit 0; fi\n'
-            'printf "%s\\n" "$*" >> "$BK_TEST_CALLS"\n'
-        )
+        self.env.pop("BK_VERSION")
         fixture_curl = self.bin / "curl-fixture"
         (self.bin / "curl").rename(fixture_curl)
         self.script("curl", """
@@ -214,26 +285,43 @@ if "https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.s
 else:
     os.execv(os.environ["BK_TEST_FIXTURE_CURL"], [os.environ["BK_TEST_FIXTURE_CURL"], *args])
 """)
-        for platform, target in [
-            ("Linux", "x86_64-unknown-linux-gnu"),
-            ("Darwin", "aarch64-apple-darwin"),
+        for platform, target, version in [
+            ("Linux", "x86_64-unknown-linux-gnu", "0.2.0-rc.10"),
+            ("Darwin", "aarch64-apple-darwin", "0.2.0"),
         ]:
             with self.subTest(platform=platform):
                 fake_home = self.root / platform
                 fake_home.mkdir()
-                self.stem = f"bk-0.1.0-{target}"
+                self.stem = f"bk-{version}-{target}"
+                binary.write_text(
+                    '#!/bin/sh\n'
+                    f'if [ "$*" = "--version" ]; then printf "bk {version}\\n"; exit 0; fi\n'
+                    'if [ "${3:-}" = --help ]; then exit 0; fi\n'
+                    'printf "%s\\n" "$*" >> "$BK_TEST_CALLS"\n'
+                )
                 for path in self.fixtures.iterdir():
                     path.unlink()
-                directory = release.stage(binary, "0.1.0", target, self.root / "guide-work")
-                release.compress(directory, "0.1.0", target, self.fixtures)
+                directory = release.stage(binary, version, target, self.root / "guide-work")
+                release.compress(directory, version, target, self.fixtures)
                 release.checksums(self.fixtures)
                 self.bundles()
                 self.cosign()
                 arch = "aarch64" if platform == "Darwin" else "x86_64"
                 self.script("uname", f'print({platform!r} if "-s" in sys.argv else {arch!r})')
+                candidates = [
+                    self.release_entry("0.3.0-rc.1", target, draft=True),
+                    self.release_entry("0.3.0", target, missing=f"bk-0.3.0-{target}.tar.gz"),
+                    self.release_entry("0.4.0-rc.1", target, prerelease=False),
+                    self.release_entry(version, target),
+                    self.release_entry("0.2.0-rc.9", target),
+                    self.release_entry("0.1.0", target),
+                ]
+                if platform == "Darwin":
+                    candidates.append(self.release_entry("0.2.0-rc.10", target))
                 result = subprocess.run(
                     ["/bin/sh", str(script)],
                     env={**self.env, "HOME": str(fake_home), "BK_TEST_CALLS": str(expected),
+                         "FIXTURE_VERSION": version, "FIXTURE_RELEASES": json.dumps(candidates),
                          "BK_TEST_INSTALLER": str(ROOT / "install.sh"), "BK_TEST_FIXTURE_CURL": str(fixture_curl)},
                     capture_output=True, text=True,
                 )

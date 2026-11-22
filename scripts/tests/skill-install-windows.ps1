@@ -11,10 +11,10 @@ $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $ArtifactDirectory) { $ArtifactDirectory = Join-Path $root 'dist' }
 $versionText = & python "$root/scripts/release.py" version
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the built release version.' }
-$version = $versionText.Trim()
-$archive = "bk-$version-x86_64-pc-windows-msvc.zip"
-$releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$version"
-$skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$version"
+$fixtureVersion = $versionText.Trim()
+$archive = "bk-$fixtureVersion-x86_64-pc-windows-msvc.zip"
+$releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$fixtureVersion"
+$skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$fixtureVersion"
 $installerUrl = 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1'
 $guide = [regex]::Match((Get-Content -LiteralPath "$root/SKILL.md" -Raw), '(?s)```powershell\r?\n(.*?)```')
 if (-not $guide.Success) { throw 'Missing the Windows installation block in SKILL.md.' }
@@ -34,7 +34,7 @@ $codexDirectory = Join-Path $userDirectory '.codex'
 $books = Join-Path $sandbox 'data\books.db'
 $binary = Join-Path $localDirectory 'Programs\Beankeeper Desktop\bk.exe'
 $environment = @{
-    BK_VERSION = $version
+    BK_VERSION = $null
     BEANKEEPER_DB = $null
     BEANKEEPER_PASSPHRASE_CMD = $null
     BK_AGENT_TOKEN = $null
@@ -78,7 +78,21 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath (Join-Path $fixtures $name) -Destination $OutFile
 }
 
-function Invoke-RestMethod { throw 'The test must use its pinned release version.' }
+function Invoke-RestMethod([string]$Uri) {
+    if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100') {
+        throw "Unexpected discovery request: $Uri"
+    }
+    @(
+        [pscustomobject]@{ tag_name = 'beankeeper-desktop-v99.0.0'; draft = $true; prerelease = $false },
+        [pscustomobject]@{ tag_name = 'beankeeper-desktop-v98.0.0'; draft = $false; prerelease = $false; assets = @() },
+        [pscustomobject]@{
+            tag_name = "beankeeper-desktop-v$fixtureVersion"
+            draft = $false
+            prerelease = $fixtureVersion.Contains('-rc.')
+            assets = @($fixtureFiles | ForEach-Object { @{ name = $_ } })
+        }
+    )
+}
 
 function cosign {
     if ($args[0] -ne 'verify-blob' -or $args -notcontains '--certificate-identity' -or
@@ -121,7 +135,7 @@ try {
     $reportedBooks = [string]$status.books
     if ($reportedBooks.StartsWith('\\?\')) { $reportedBooks = $reportedBooks.Substring(4) }
     if (-not $status.installed -or -not $status.running -or
-        $status.version -ne $version -or $reportedBooks -ne $books) {
+        $status.version -ne $fixtureVersion -or $reportedBooks -ne $books) {
         throw 'The skill block did not install and start its isolated service.'
     }
     if (-not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($books, 'recovery.txt')))) {

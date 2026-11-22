@@ -17,6 +17,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = "Govcraft/beankeeper-desktop"
 INSTALLER_URL = f"https://raw.githubusercontent.com/{PROJECT}/main/install.sh"
+RELEASES_URL = f"https://api.github.com/repos/{PROJECT}/releases?per_page=100"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 UNIT = "beankeeper-desktop.service"
 LAUNCH_AGENT = "ai.govcraft.beankeeper-desktop"
@@ -24,10 +25,11 @@ LAUNCH_AGENT = "ai.govcraft.beankeeper-desktop"
 
 def fixture_tool(mode, arguments):
     """Answer only the exact artifact and signature requests expected from the guide."""
-    version = os.environ["BK_VERSION"]
+    version = os.environ["BK_SKILL_TEST_VERSION"]
     archive = os.environ["BK_SKILL_TEST_ARCHIVE"]
     fixtures = Path(os.environ["BK_SKILL_TEST_FIXTURES"])
     allowed = {archive, "checksums-sha256.txt"}
+    release_files = allowed | {f"{file}.sigstore" for file in allowed}
     if mode == "fixture-curl":
         urls = [argument for argument in arguments if argument.startswith("https://")]
         if len(urls) != 1:
@@ -35,12 +37,18 @@ def fixture_tool(mode, arguments):
         url = urls[0]
         if url == INSTALLER_URL:
             source = ROOT / "install.sh"
+        elif url == RELEASES_URL:
+            print(json.dumps([{
+                "tag_name": f"beankeeper-desktop-v{version}", "draft": False,
+                "prerelease": "-rc." in version, "assets": [{"name": name} for name in release_files],
+            }]))
+            return
         else:
             base = f"https://github.com/{PROJECT}/releases/download/beankeeper-desktop-v{version}/"
             if not url.startswith(base):
                 raise ValueError(f"unexpected fixture URL {url}")
             name = url.removeprefix(base)
-            if name not in (allowed | {f"{file}.sigstore" for file in allowed}):
+            if name not in release_files:
                 raise ValueError(f"unexpected fixture file {name}")
             source = fixtures / name
         shutil.copyfile(source, arguments[arguments.index("-o") + 1])
@@ -64,14 +72,33 @@ def fixture_tool(mode, arguments):
         print(artifact, file=output)
 
 
-def command(arguments, env, *, check=True):
+def command(arguments, env, *, check=True, stdin=None):
     result = subprocess.run(
         [str(arg) for arg in arguments], env=env, capture_output=True,
-        text=True, encoding="utf-8", timeout=120,
+        text=True, encoding="utf-8", timeout=120, input=stdin,
     )
     if check and result.returncode:
         raise RuntimeError(f"{' '.join(map(str, arguments))} failed:\n{result.stderr}")
     return result
+
+
+def check_claude_code_connection(home, binary, env):
+    config = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    server = config["mcpServers"]["beankeeper"]
+    assert Path(server["command"]).resolve() == binary.resolve()
+    requests = [
+        {"id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "skill-install-ci", "version": "1"},
+        }},
+        {"method": "notifications/initialized"},
+        {"id": 2, "method": "tools/call", "params": {"name": "company_list", "arguments": {}}},
+    ]
+    messages = "".join(json.dumps({"jsonrpc": "2.0", **request}) + "\n" for request in requests)
+    result = command([server["command"], *server["args"]], env, stdin=messages)
+    replies = {reply["id"]: reply["result"] for reply in map(json.loads, result.stdout.splitlines())}
+    assert replies[1]["serverInfo"]["name"] == "beankeeper"
+    assert not replies[2].get("isError", False), replies[2]
 
 
 def native_config(env, sandbox):
@@ -103,7 +130,7 @@ def native_config(env, sandbox):
 def fixture_path(sandbox, original_path):
     directory = sandbox / "commands"
     directory.mkdir()
-    required = ("sh", "uname", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id")
+    required = ("sh", "uname", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
     manager = "launchctl" if sys.platform == "darwin" else "systemctl"
     for name in (*required, manager):
         path = shutil.which(name, path=original_path)
@@ -137,6 +164,7 @@ def exercise(target, artifacts):
         home = sandbox / "profile"
         codex = home / ".codex"
         codex.mkdir(parents=True)
+        (home / ".claude").mkdir()
         fixtures = sandbox / "fixtures"
         fixtures.mkdir()
         staged_archive = fixtures / archive
@@ -149,7 +177,7 @@ def exercise(target, artifacts):
 
         env = dict(os.environ)
         config = native_config(env, sandbox)
-        for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN"):
+        for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN", "BK_VERSION"):
             env.pop(name, None)
         env.update(
             HOME=str(home), XDG_CONFIG_HOME=str(config), XDG_DATA_HOME=str(sandbox / "xdg-data"),
@@ -159,7 +187,7 @@ def exercise(target, artifacts):
             BEANKEEPER_SERVICE_DATA_DIR=str(sandbox / "data"),
             BEANKEEPER_DESKTOP_STATE_DIR=str(sandbox / "state"),
             BEANKEEPER_SERVICE_LOG_DIR=str(sandbox / "logs"), BEANKEEPER_NO_UPDATE_CHECK="1",
-            BK_VERSION=version, BK_SKILL_TEST_ARCHIVE=archive, BK_SKILL_TEST_FIXTURES=str(fixtures),
+            BK_SKILL_TEST_VERSION=version, BK_SKILL_TEST_ARCHIVE=archive, BK_SKILL_TEST_FIXTURES=str(fixtures),
             BK_SKILL_TEST_PYTHON=sys.executable, BK_SKILL_TEST_DRIVER=str(Path(__file__).resolve()),
         )
         script = sandbox / "guide.sh"
@@ -182,6 +210,7 @@ def exercise(target, artifacts):
             doctor = json.loads(command([binary, "agents", "doctor", "codex", "--json"], env).stdout)
             if doctor["data"]["agents"][0]["state"] != "configured" or doctor["data"]["service"]["state"] != "ready":
                 raise RuntimeError("the guide did not configure a usable agent connection")
+            check_claude_code_connection(home, binary, env)
             print("Skill guide installed its fixture release and passed the native MCP check")
         finally:
             if binary.is_file():
