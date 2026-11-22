@@ -29,6 +29,34 @@ def safe_log_tail(path):
     return content[-8000:]
 
 
+def assert_minimal_linux_status(binary, root, first):
+    import pwd
+
+    # Keep the live, systemd-managed fixture isolated while allowing the client
+    # to discover it through default paths under a home of its own.
+    home = root / "minimal launcher home"
+    definition = Path(first["service_definition"])
+    unit = home / ".config/systemd/user" / definition.name
+    unit.parent.mkdir(parents=True)
+    unit.symlink_to(definition)
+    state = home / ".local/state/beankeeper-desktop"
+    state.parent.mkdir(parents=True)
+    state.symlink_to(root / "state", target_is_directory=True)
+    account = pwd.getpwuid(os.getuid())
+    result = subprocess.run(
+        ["env", "-i", f"HOME={home}", f"LOGNAME={account.pw_name}",
+         f"USER={account.pw_name}", f"SHELL={account.pw_shell}", f"PATH={os.environ['PATH']}",
+         str(binary), "service", "status", "--json"],
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    assert result.returncode == 0, "minimal-environment service status failed"
+    status = json.loads(result.stdout)
+    assert status["installed"] and status["running"], "minimal environment lost the live service"
+    assert status["pid"] == first["pid"]
+    assert status["mcp_endpoint"] == first["mcp_endpoint"]
+    print("Linux status found the live service with only HOME, LOGNAME, USER, SHELL and PATH")
+
+
 def extension_launcher(binary, cache, bundle):
     if bundle is None:
         launcher = cache / binary.name
@@ -334,6 +362,8 @@ def main():
             installed = True  # Also clean up partially successful installations.
             command("service", "install", "--file-store")
             first = wait(lambda s: s["running"])
+            if sys.platform.startswith("linux"):
+                assert_minimal_linux_status(binary, root, first)
             assert first["mcp_endpoint"].startswith("http://127.0.0.1:")
             assert ":8750/" not in first["mcp_endpoint"], "occupied port was not avoided"
             version = command("--version").strip().removeprefix("bk ")

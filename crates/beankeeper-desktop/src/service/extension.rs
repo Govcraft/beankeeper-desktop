@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Config, Endpoint, Paths, ServiceError, Session, keychain, lock};
+use super::{Config, Endpoint, Paths, ServiceError, UserSessionEnv, keychain, lock};
 
 pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
     let paths = Paths::discover()?;
@@ -14,7 +14,7 @@ pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
         paths.prepare()?;
         let _lock = lock(&paths.state.join("extension-install.lock"))?;
         if Config::load(&paths)?.is_none() {
-            let session = Session::discover()?;
+            let session = UserSessionEnv::discover()?;
             let executable = install_executable(&std::env::current_exe()?, &paths)?;
             let mut installer = Command::new(executable);
             session.apply(&mut installer);

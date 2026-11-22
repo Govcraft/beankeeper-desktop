@@ -12,7 +12,7 @@ use rmcp::{
 };
 use serde_json::{Value, json};
 
-use super::{Config, Paths, ServiceError, Session};
+use super::{Config, Paths, ServiceError, UserSessionEnv};
 
 struct Lifecycle;
 
@@ -130,7 +130,7 @@ fn execute(operation: Option<Operation>) -> Result<Value, ServiceError> {
         // Preflight here so the session error reaches the agent as a named MCP
         // result. The subprocess still isolates CLI output from the stdio wire.
         if matches!(operation, Operation::Install) || Config::load(&Paths::discover()?)?.is_some() {
-            Session::discover()?.apply(&mut command);
+            UserSessionEnv::discover()?.apply(&mut command);
         }
         let status = command
             .args(["service", operation.cli_argument()])
