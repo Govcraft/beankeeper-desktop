@@ -40,16 +40,25 @@ bk --json ui link --view-id transactions --company acme --account 5000 \
   --currency USD --from 2026-10-01 --to 2026-10-31
 bk ui link --view-id transaction --company acme --transaction-id 42
 bk ui link --view-id review_detail --company acme --proposal-id PROPOSAL_TYPE_ID
-bk ui link --view-id settings --bind '[::1]:8751'
+bk --db /path/to/demo.db ui link --view-id accounts --bind '[::1]:8751'
 ```
 
-CLI flag names use hyphens, MCP state keys use underscores. Link generation
-needs no ledger, passphrase, license activation, network request or running
-Desktop process. The caller supplies the listener with `--bind` (default
-`127.0.0.1:8750`). Only canonical IPv4/IPv6 loopback addresses with a nonzero
-port are accepted. If state omits a company, the CLI uses upstream's root
-`--company`/`BEANKEEPER_COMPANY` default for ledger views. JSON validation errors
-contain `code` and `message`, exit nonzero, and also print a diagnostic to stderr.
+CLI flag names use hyphens, and MCP state keys use underscores. The CLI selects
+the configured managed books by default when available. Supply `--db` or
+`BEANKEEPER_DB` for other books. The CLI canonicalizes that path and confirms
+the process serving it through a local health check against an owner-private
+record. Link generation needs no passphrase, agent token or license activation.
+The CLI makes no ledger reads. If a managed instance for the requested books is
+live, it takes priority. `--bind` selects a specific listener and still checks
+that it serves the requested books. It accepts canonical IPv4 and IPv6 loopback
+addresses with a nonzero port.
+
+`DESKTOP_BOOKS_NOT_SERVED` means no live instance matches the request.
+`DESKTOP_MULTIPLE_INSTANCES` means that multiple foreground instances serve the
+books and the caller can use `--bind` to select one. Answer in words if a detail
+link is unavailable. If state omits a company, the CLI uses upstream's
+`--company` or `BEANKEEPER_COMPANY` default for ledger views. JSON errors contain
+`code` and `message`, exit nonzero, and also print a diagnostic to stderr.
 
 ## Stable views
 
@@ -188,7 +197,12 @@ comparison bounds; use JSON for both periods.
 
 ## Opening a saved link
 
-A paired browser opens the requested view directly. An unpaired browser sees
+A paired browser opens views on that listener directly. Each listener hosts one
+books file and has its own browser session. A different listener needs an initial
+pairing. Visiting it leaves the original session available. Regenerate a saved
+link if the associated listener address changes.
+
+An unpaired browser sees
 the pairing explanation. It remembers the local destination for five minutes
 while the human opens the terminal's one-time pairing URL in that same browser
 and confirms **Pair this browser**. Confirmation returns to that destination,

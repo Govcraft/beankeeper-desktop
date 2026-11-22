@@ -31,6 +31,9 @@ absolute lifetime. The cookie name includes the actual bound port; the server
 also checks the session's original Host and port. Credentials are independent
 256-bit secrets, separate from public browser routing IDs and CSRF tokens.
 Cookies, links and associations are held in memory and invalidated by restart.
+Each Desktop listener serves one books file. A separately hosted books file
+needs an initial pairing with its listener. A paired browser can keep sessions
+for multiple listeners at the same time and reuse each one until it expires.
 Unpairing revokes the server-side session, even if a client keeps the cookie.
 Expired entries are pruned on access. There are at most 64 pending links and
 64 active browser sessions per launch.

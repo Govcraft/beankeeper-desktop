@@ -202,7 +202,8 @@ view/filter identifiers without opening or changing a browser. No pairing,
 association or live tab is needed to generate a link. Browser access still
 requires human pairing.
 
-The CLI uses the same contract without starting or contacting Desktop:
+The CLI uses the same contract and checks which running Desktop instance
+serves the requested books. It can do this without opening the books:
 
 ```sh
 bk ui link --view-id transactions --company acme --account 5000 \
@@ -212,7 +213,12 @@ bk --json ui link --view-id income-statement --company acme \
   --compare-from 2026-09-01 --compare-to 2026-09-30
 ```
 
-Use `--bind 127.0.0.1:PORT` for a nondefault listener. All current views, including
+Without `--db` or `BEANKEEPER_DB`, the CLI selects the configured managed books
+when available. Use `bk --db /path/to/demo.db ui link ...` for other books. The
+listener is discovered automatically, including when it uses a fallback port.
+If several instances serve the same books, use `--bind 127.0.0.1:PORT` to select
+one. `DESKTOP_BOOKS_NOT_SERVED` means the CLI found no matching live instance.
+All current views, including
 `settings` and record details, have stable IDs. `ui_get_link` and `ui_show_view`
 share validation; unsupported filters return `VALIDATION` rather than being
 silently omitted. Include the company, currency and explicit dates from the
@@ -222,7 +228,9 @@ An unpaired browser remembers the requested view while the human opens the
 terminal's one-time pairing URL in that same browser. Confirming **Pair this
 browser** then opens the original destination with its filters. An already
 paired browser arriving from an external site can use **continue to your
-requested view** if its Strict cookie was withheld. See the
+requested view** if its Strict cookie was withheld. Each listener serves one
+books file and has its own browser session. A separate listener needs an initial
+pairing and keeps it for the life of that session. See the
 [deep-link contract](docs/deep-links.md) for filter mappings, comparisons,
 pairing lifetime and examples.
 
