@@ -371,7 +371,7 @@ impl HostToolHandler for DesktopTools {
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
-                "Read the current books, account inventory, and recommended next setup step. Never creates or changes the books.",
+                "Call this first when the owner asks to set up their books. Read the current books, account inventory, and recommended next setup step. Never creates or changes the books.",
                 schemars::schema_for!(StatusInput).to_value().as_object().cloned().unwrap_or_default(),
             ),
             capability: Capability::Read,

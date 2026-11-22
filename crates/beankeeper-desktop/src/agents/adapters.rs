@@ -114,10 +114,8 @@ impl Adapter {
             {
                 continue;
             }
-            if !valid_extension_id(&key) {
-                return Err(AgentError::Invalid(path.clone()));
-            }
-            let current = extension_settings(&self.app_dir, &key);
+            let id = ExtensionId::parse(&key).ok_or_else(|| AgentError::Invalid(path.clone()))?;
+            let current = extension_settings(&self.app_dir, id);
             if current == ExtensionRegistration::Enabled {
                 return Ok(Some(current));
             }
@@ -129,26 +127,33 @@ impl Adapter {
     }
 }
 
-fn valid_extension_id(id: &str) -> bool {
-    // The native ID uses these ASCII characters. Keep the complete settings
-    // filename within one component and avoid Windows device aliases.
-    if id.len() > 250
-        || id.split('.').any(str::is_empty)
-        || !id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-    {
-        return false;
+struct ExtensionId<'a>(&'a str);
+
+impl<'a> ExtensionId<'a> {
+    fn parse(id: &'a str) -> Option<Self> {
+        // Keep the native ID plus the .json suffix in one path component, and
+        // reject Windows device names even when followed by an extension.
+        if id.len() > 250
+            || matches!(id, "" | "." | "..")
+            || !id.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            })
+        {
+            return None;
+        }
+        let stem = id.split('.').next()?;
+        let reserved = matches!(stem, "con" | "prn" | "aux" | "nul")
+            || matches!(
+                stem.as_bytes(),
+                [b'c', b'o', b'm', b'0'..=b'9'] | [b'l', b'p', b't', b'0'..=b'9']
+            );
+        (!reserved).then_some(Self(id))
     }
-    let stem = id.split('.').next().unwrap_or_default();
-    !matches!(stem, "con" | "prn" | "aux" | "nul")
-        && !matches!(
-            stem.as_bytes(),
-            [b'c', b'o', b'm', b'0'..=b'9'] | [b'l', b'p', b't', b'0'..=b'9']
-        )
 }
 
-fn extension_settings(profile: &Path, id: &str) -> ExtensionRegistration {
+fn extension_settings(profile: &Path, id: ExtensionId<'_>) -> ExtensionRegistration {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Settings {
@@ -161,7 +166,7 @@ fn extension_settings(profile: &Path, id: &str) -> ExtensionRegistration {
     if !fs::symlink_metadata(&dir).is_ok_and(|metadata| metadata.is_dir()) {
         return ExtensionRegistration::Disabled;
     }
-    let path = dir.join(format!("{id}.json"));
+    let path = dir.join(format!("{}.json", id.0));
     let settings = read_config_text(&path)
         .ok()
         .flatten()
@@ -616,7 +621,7 @@ mod tests {
             "c:account",
             "nul.device",
             "com1",
-            "end.",
+            "..",
         ] {
             write_registry(&profile, id, LAUNCHER)?;
             assert!(matches!(
