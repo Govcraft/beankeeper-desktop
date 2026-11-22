@@ -84,7 +84,7 @@ jobs:
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
       - name: Sign Windows binary (disabled by default)
         if: runner.os == 'Windows' && steps.azure.outputs.enabled == 'true'
-        uses: Azure/artifact-signing-action@v1
+        uses: Azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
         with:
           azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
           azure-client-id: ${{ env.AZURE_CLIENT_ID }}
@@ -128,7 +128,7 @@ jobs:
         run: scripts/sign-macos.sh "staging/bk-$VERSION-$TARGET" "$VERSION" "dist/bk-$VERSION-$TARGET.pkg"
       - name: Sign Windows installer (disabled by default)
         if: runner.os == 'Windows' && steps.azure.outputs.enabled == 'true'
-        uses: Azure/artifact-signing-action@v1
+        uses: Azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
         with:
           azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
           azure-client-id: ${{ env.AZURE_CLIENT_ID }}
