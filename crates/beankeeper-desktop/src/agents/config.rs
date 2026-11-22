@@ -6,17 +6,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use jsonc_parser::{
-    ParseOptions,
-    cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode},
-};
-use serde::Deserialize;
+use jsonc_parser::cst::{CstObject, CstObjectProp, CstRootNode};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use super::{
     AgentError,
     adapters::{Adapter, ConfigFormat},
 };
+
+mod env_overrides;
+mod json;
+
+pub(super) use json::ServerConflict;
+use json::{JsonClient, ManagedServer, ParsedServer};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const SKILL: &str = include_str!("../../../../SKILL.md");
@@ -27,7 +29,11 @@ pub(super) enum Registration {
     Missing,
     Partial,
     Owned,
-    Conflict,
+}
+
+enum OwnedEntry {
+    Canonical,
+    NeedsRewrite,
 }
 
 #[derive(Clone, Copy)]
@@ -174,98 +180,6 @@ enum Document {
     Toml(DocumentMut),
 }
 
-#[derive(Clone, Copy)]
-enum JsonClient {
-    Standard,
-    Copilot,
-    VsCode,
-}
-
-impl JsonClient {
-    const fn key(self) -> &'static str {
-        match self {
-            Self::Standard | Self::Copilot => "mcpServers",
-            Self::VsCode => "servers",
-        }
-    }
-
-    fn entry(self, server: Server, command: &str) -> ConfiguredServer {
-        let (transport, tools) = match self {
-            Self::Standard => (None, None),
-            Self::Copilot => (Some(TransportKind::Local), Some(vec!["*".into()])),
-            Self::VsCode => (Some(TransportKind::Stdio), None),
-        };
-        ConfiguredServer {
-            command: command.into(),
-            args: server.arguments().iter().map(|arg| (*arg).into()).collect(),
-            transport,
-            tools,
-        }
-    }
-}
-
-#[derive(Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct ConfiguredServer {
-    command: String,
-    args: Vec<String>,
-    #[serde(rename = "type", default, deserialize_with = "present")]
-    transport: Option<TransportKind>,
-    #[serde(default, deserialize_with = "present")]
-    tools: Option<Vec<String>>,
-}
-
-fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
-    deserializer: D,
-) -> Result<Option<T>, D::Error> {
-    T::deserialize(deserializer).map(Some)
-}
-
-#[derive(Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum TransportKind {
-    Local,
-    Stdio,
-}
-
-impl From<ConfiguredServer> for CstInputValue {
-    fn from(spec: ConfiguredServer) -> Self {
-        let mut fields = vec![
-            ("command".into(), spec.command.into()),
-            ("args".into(), spec.args.into()),
-        ];
-        if let Some(transport) = spec.transport {
-            let name = match transport {
-                TransportKind::Local => "local",
-                TransportKind::Stdio => "stdio",
-            };
-            fields.push(("type".into(), name.into()));
-        }
-        if let Some(tools) = spec.tools {
-            fields.push(("tools".into(), tools.into()));
-        }
-        fields.into()
-    }
-}
-
-impl JsonClient {
-    fn options(self) -> ParseOptions {
-        let comments = !matches!(self, Self::Standard);
-        ParseOptions {
-            allow_comments: comments,
-            allow_trailing_commas: comments,
-            allow_loose_object_property_names: false,
-            allow_missing_commas: false,
-            allow_single_quoted_strings: false,
-            allow_hexadecimal_numbers: false,
-            allow_unary_plus_numbers: false,
-            allow_bare_decimal_point_numbers: false,
-            allow_non_finite_numbers: false,
-            allow_extended_string_escapes: false,
-        }
-    }
-}
-
 fn property(
     object: &CstObject,
     name: &str,
@@ -305,59 +219,64 @@ impl Document {
         Ok(Self::Json { root, kind })
     }
 
-    fn state(
+    fn owned_entry(
         &self,
         command: &str,
         server: Server,
         path: &Path,
-    ) -> Result<Registration, AgentError> {
+    ) -> Result<Option<OwnedEntry>, AgentError> {
         let invalid = || AgentError::Invalid(path.into());
-        let owned = match self {
+        match self {
             Self::Json { root, kind } => {
                 let Some(object) = root.object_value() else {
-                    return Ok(Registration::Missing);
+                    return Ok(None);
                 };
                 let Some(servers) = property(&object, kind.key(), path)? else {
-                    return Ok(Registration::Missing);
+                    return Ok(None);
                 };
                 let servers = servers.object_value().ok_or_else(invalid)?;
-                property(&servers, server.name(), path)?.map(|entry| {
-                    entry.value().is_some_and(|node| {
-                        jsonc_parser::parse_to_serde_value::<ConfiguredServer>(
-                            &node.to_string(),
-                            &kind.options(),
-                        )
-                        .is_ok_and(|actual| actual == kind.entry(server, command))
+                let Some(entry) = property(&servers, server.name(), path)? else {
+                    return Ok(None);
+                };
+                let expected = ManagedServer::from((*kind, server, command));
+                ParsedServer::try_from((*kind, &entry))
+                    .and_then(|parsed| parsed.check(&expected))
+                    .map(Some)
+                    .map_err(|reason| AgentError::RegistrationConflict {
+                        path: path.into(),
+                        server: server.name(),
+                        reason,
                     })
-                })
             }
             Self::Toml(toml) => {
                 let Some(servers) = toml.get("mcp_servers") else {
-                    return Ok(Registration::Missing);
+                    return Ok(None);
                 };
                 let servers = servers.as_table_like().ok_or_else(invalid)?;
-                servers.get(server.name()).map(|entry| {
-                    entry.as_table_like().is_some_and(|fields| {
-                        fields.len() == 2
-                            && fields.get("command").and_then(Item::as_str) == Some(command)
-                            && fields
-                                .get("args")
-                                .and_then(Item::as_array)
-                                .is_some_and(|items| {
-                                    items.len() == server.arguments().len()
-                                        && items.iter().zip(server.arguments()).all(
-                                            |(item, argument)| item.as_str() == Some(*argument),
-                                        )
-                                })
-                    })
-                })
+                let Some(entry) = servers.get(server.name()) else {
+                    return Ok(None);
+                };
+                let owned = entry.as_table_like().is_some_and(|fields| {
+                    fields.len() == 2
+                        && fields.get("command").and_then(Item::as_str) == Some(command)
+                        && fields
+                            .get("args")
+                            .and_then(Item::as_array)
+                            .is_some_and(|items| {
+                                items.len() == server.arguments().len()
+                                    && items
+                                        .iter()
+                                        .zip(server.arguments())
+                                        .all(|(item, argument)| item.as_str() == Some(*argument))
+                            })
+                });
+                if owned {
+                    Ok(Some(OwnedEntry::Canonical))
+                } else {
+                    Err(AgentError::Conflict(path.into()))
+                }
             }
-        };
-        Ok(match owned {
-            None => Registration::Missing,
-            Some(true) => Registration::Owned,
-            Some(false) => Registration::Conflict,
-        })
+        }
     }
 
     fn edited(
@@ -368,10 +287,9 @@ impl Document {
     ) -> Result<Option<String>, AgentError> {
         let mut changed = false;
         for server in Server::ALL {
-            match (change, self.state(command, server, path)?) {
-                (_, Registration::Conflict) => return Err(AgentError::Conflict(path.into())),
-                (Change::Connect, Registration::Missing)
-                | (Change::Disconnect, Registration::Owned) => {
+            match (change, self.owned_entry(command, server, path)?) {
+                (Change::Connect, None | Some(OwnedEntry::NeedsRewrite))
+                | (Change::Disconnect, Some(_)) => {
                     self.edit(command, server, change, path)?;
                     changed = true;
                 }
@@ -403,7 +321,12 @@ impl Document {
                 let servers = root.object_value_or_set().object_value_or_set(kind.key());
                 match change {
                     Change::Connect => {
-                        servers.append(server.name(), kind.entry(server, command).into());
+                        let canonical = ManagedServer::from((*kind, server, command)).into();
+                        if let Some(entry) = servers.get(server.name()) {
+                            entry.set_value(canonical);
+                        } else {
+                            servers.append(server.name(), canonical);
+                        }
                     }
                     Change::Disconnect => {
                         if let Some(entry) = servers.get(server.name()) {
@@ -446,12 +369,11 @@ impl Adapter {
     pub(super) fn registration(&self, binary: &str) -> Result<Registration, AgentError> {
         let snapshot = FileSnapshot::read(&self.config)?;
         let document = Document::parse(&snapshot, &self.format)?;
-        let ledger = document.state(binary, Server::Ledger, &self.config)?;
-        let lifecycle = document.state(binary, Server::Lifecycle, &self.config)?;
+        let ledger = document.owned_entry(binary, Server::Ledger, &self.config)?;
+        let lifecycle = document.owned_entry(binary, Server::Lifecycle, &self.config)?;
         Ok(match (ledger, lifecycle) {
-            (Registration::Conflict, _) | (_, Registration::Conflict) => Registration::Conflict,
-            (Registration::Owned, Registration::Owned) => Registration::Owned,
-            (Registration::Missing, Registration::Missing) => Registration::Missing,
+            (Some(_), Some(_)) => Registration::Owned,
+            (None, None) => Registration::Missing,
             _ => Registration::Partial,
         })
     }
@@ -633,6 +555,105 @@ mod tests {
             .ok_or("missing profile adapter")?;
         assert!(matches!(adapter.format, ConfigFormat::VsCode));
         roundtrip(&adapter, binary)
+    }
+
+    #[test]
+    fn claude_code_owns_only_equivalent_stdio_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let adapter = Agent::ClaudeCode
+            .adapter(&locations(temp.path()))?
+            .ok_or("missing adapter")?;
+        let binary = "/bin/bk";
+        let ledger = r#""command":"/bin/bk","args":["mcp","bridge","--service"]"#;
+        let lifecycle = r#""command":"/bin/bk","args":["service","mcp"]"#;
+        for fields in [
+            "",
+            r#","type":"stdio""#,
+            r#","env":{}"#,
+            r#","type":"stdio","env":{}"#,
+        ] {
+            let original = format!(
+                r#"{{"mcpServers":{{"beankeeper":{{{ledger}{fields}}},"beankeeper-service":{{{lifecycle}{fields}}}}}}}"#
+            );
+            fixture(&adapter, &original)?;
+            assert!(matches!(adapter.registration(binary)?, Registration::Owned));
+            assert_eq!(fs::read_to_string(&adapter.config)?, original);
+            adapter.change(binary, Change::Disconnect)?;
+            assert!(matches!(
+                adapter.registration(binary)?,
+                Registration::Missing
+            ));
+        }
+
+        for (entry, field) in [
+            (
+                format!(r#"{{{ledger},"env":{{"BEANKEEPER_DB":"custom"}}}}"#),
+                "`env`",
+            ),
+            (format!(r#"{{{ledger},"env":null}}"#), "`env`"),
+            (format!(r#"{{{ledger},"env":[]}}"#), "`env`"),
+            (format!(r#"{{{ledger},"env":{{}},"env":{{}}}}"#), "`env`"),
+            (format!(r#"{{{ledger},"type":"local"}}"#), "`type`"),
+            (format!(r#"{{{ledger},"type":null}}"#), "`type`"),
+            (format!(r#"{{{ledger},"cwd":"/work"}}"#), "\"cwd\""),
+            (
+                r#"{"command":"other","args":["mcp","bridge","--service"]}"#.into(),
+                "`command`",
+            ),
+            (
+                r#"{"command":"/bin/bk","args":["mcp","serve"]}"#.into(),
+                "`args`",
+            ),
+        ] {
+            let original = format!(
+                r#"{{"mcpServers":{{"beankeeper-service":{{{lifecycle}}},"beankeeper":{entry}}}}}"#
+            );
+            fixture(&adapter, &original)?;
+            for result in [
+                adapter.registration(binary).map(drop),
+                adapter.change(binary, Change::Connect),
+                adapter.change(binary, Change::Disconnect),
+            ] {
+                let Err(error) = result else {
+                    panic!("expected a registration conflict for {entry}");
+                };
+                assert_eq!(error.code(), "AGENT_CONFIG_CONFLICT");
+                assert!(error.to_string().contains(field), "{error}");
+            }
+            assert_eq!(fs::read_to_string(&adapter.config)?, original);
+            assert!(!adapter.skill_available()?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn copilot_and_vscode_still_require_explicit_type_and_no_env() -> Result<(), AgentError> {
+        for (client, tools, transport) in [
+            (JsonClient::Copilot, r#","tools":["*"]"#, "local"),
+            (JsonClient::VsCode, "", "stdio"),
+        ] {
+            for (fields, expected) in [
+                (String::new(), "`type`"),
+                (format!(r#","type":"{transport}","env":{{}}"#), "`env`"),
+            ] {
+                let snapshot = FileSnapshot {
+                    path: "mcp.json".into(),
+                    before: Some(format!(
+                        r#"{{"{}":{{"beankeeper":{{"command":"/bin/bk","args":["mcp","bridge","--service"]{tools}{fields}}}}}}}"#,
+                        client.key()
+                    )),
+                };
+                let format = match client {
+                    JsonClient::Copilot => ConfigFormat::Copilot,
+                    JsonClient::VsCode => ConfigFormat::VsCode,
+                    JsonClient::Standard => ConfigFormat::Json,
+                };
+                let document = Document::parse(&snapshot, &format)?;
+                let result = document.owned_entry("/bin/bk", Server::Ledger, &snapshot.path);
+                assert!(matches!(result, Err(error) if error.to_string().contains(expected)));
+            }
+        }
+        Ok(())
     }
 
     #[test]

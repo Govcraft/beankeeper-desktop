@@ -51,6 +51,14 @@ Installation merges two entries into Claude Desktop, Claude Code and Codex:
 - `beankeeper` runs `bk mcp bridge --service` with the private agent credential.
 - `beankeeper-service` runs `bk service mcp` with the local OS user's authority.
 
+`bk agents connect claude-code` recognizes existing entries with the managed
+command and arguments, including entries written by `claude mcp add` with
+`"type": "stdio"` or an empty `env`. Connect writes the managed entries in their
+standard form and installs or updates the skill. If an entry has a non-empty
+`env`, `connect`, `disconnect`, `detect`, and `doctor` report that field as a
+conflict and preserve the entry. Remove `env` if the overrides are no longer
+needed, or rename the entry to keep them, then retry.
+
 The lifecycle tools are `service_install`, `service_uninstall`, `service_start`,
 `service_stop` and `service_status`. They accept no arguments and return a
 plain-language answer plus structured status or a named error. This separate

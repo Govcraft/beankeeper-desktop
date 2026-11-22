@@ -72,6 +72,11 @@ enum AgentError {
     ClaudeProfileAmbiguous,
     Invalid(PathBuf),
     Conflict(PathBuf),
+    RegistrationConflict {
+        path: PathBuf,
+        server: &'static str,
+        reason: config::ServerConflict,
+    },
     Io(PathBuf, io::Error),
 }
 
@@ -82,7 +87,7 @@ impl AgentError {
             Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
             Self::ClaudeProfileAmbiguous => "AGENT_CLAUDE_PROFILE_AMBIGUOUS",
             Self::Invalid(_) => "AGENT_INVALID_CONFIG",
-            Self::Conflict(_) => "AGENT_CONFIG_CONFLICT",
+            Self::Conflict(_) | Self::RegistrationConflict { .. } => "AGENT_CONFIG_CONFLICT",
             Self::Io(..) => "AGENT_CONFIG_IO",
         }
     }
@@ -113,6 +118,9 @@ impl fmt::Display for AgentError {
                 "a different Beankeeper entry or skill already exists in {}; inspect it before retrying",
                 path.display()
             ),
+            Self::RegistrationConflict { path, server, reason } => {
+                write!(f, "{}: the `{server}` entry {reason}", path.display())
+            }
             Self::Io(path, error) => write!(f, "cannot update or read {}: {error}", path.display()),
         }
     }
@@ -430,13 +438,13 @@ fn check_agent(
             )
         }),
         Operation::Detect | Operation::Doctor => adapter.registration(binary).and_then(|state| {
-            registration_status(
+            Ok(registration_status(
                 agent,
                 operation,
                 state,
                 adapter.skill_available()?,
                 &adapter,
-            )
+            ))
         }),
     };
     let mut status = match outcome {
@@ -486,7 +494,7 @@ fn registration_status(
     registration: Registration,
     skill_available: bool,
     adapter: &adapters::Adapter,
-) -> Result<ClientStatus, AgentError> {
+) -> ClientStatus {
     let (state, message) = match registration {
         Registration::Missing => (
             State::Available,
@@ -504,7 +512,6 @@ fn registration_status(
             State::Configured,
             "The managed MCP configuration is present.",
         ),
-        Registration::Conflict => return Err(AgentError::Conflict(adapter.config.clone())),
     };
     let incomplete = !matches!(state, State::Configured);
     let mut result = ClientStatus::new(agent, state, message);
@@ -512,5 +519,5 @@ fn registration_status(
     if incomplete && matches!(operation, Operation::Doctor) {
         result = result.failure(Failure::new("AGENT_NOT_CONFIGURED", message));
     }
-    Ok(result)
+    result
 }
