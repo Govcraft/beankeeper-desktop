@@ -5,7 +5,9 @@ use std::{convert::Infallible, fmt, str::FromStr};
 use beankeeper::types::{
     AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency, Money,
 };
-use beankeeper_cli::db::{BudgetMonths, companies::CompanySlug, ids::TransactionId as LedgerTransactionId};
+use beankeeper_cli::db::{
+    BudgetMonths, companies::CompanySlug, ids::TransactionId as LedgerTransactionId,
+};
 use chrono::{Datelike, Month, NaiveDate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
