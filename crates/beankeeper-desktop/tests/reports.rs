@@ -1,7 +1,10 @@
-mod common;
+pub mod common;
 
+use beankeeper::types::AccountType;
 use beankeeper::types::Currency;
+use beankeeper::types::DebitOrCredit;
 use beankeeper_cli::db::{self, Actor, Db};
+use beankeeper_cli::identity::{Admin, Budget, Granted, Post, Reconcile};
 use chrono::{Datelike, Local};
 use common::{Ledger, Server, TestResult, rpc, token};
 use serde_json::{Value, json};
@@ -73,26 +76,28 @@ const FIXTURE_POSTINGS: &[FixturePosting] = &[
     ),
 ];
 
-fn seed_report_accounts(db: &Db) -> TestResult {
-    let owner = Actor::new("owner");
-    db::create_company(db.conn(), &owner, "other", "Other company", None)?;
+fn seed_report_accounts(db: &Db, owner: &Actor) -> TestResult {
+    Granted::<Admin>::with_db(db, owner, |grant| {
+        db::create_company(grant, &"other".parse()?, &"Other company".parse()?, None)
+    })?;
     for company in ["acme", "other"] {
         for (code, name, kind) in [
-            ("1000", "Checking <bank>", "asset"),
-            ("4000", "Sales", "revenue"),
-            ("5000", "Office supplies", "expense"),
+            ("1000", "Checking <bank>", AccountType::Asset),
+            ("4000", "Sales", AccountType::Revenue),
+            ("5000", "Office supplies", AccountType::Expense),
         ] {
-            db::create_account(
-                db.conn(),
-                &owner,
-                &db::CreateAccountParams {
-                    company_slug: company,
-                    code,
-                    name,
-                    account_type: kind,
-                    default_tax_category: None,
-                },
-            )?;
+            Granted::<Admin>::with_db(db, owner, |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &company.parse()?,
+                        code,
+                        name,
+                        account_type: kind,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
         }
     }
     Ok(())
@@ -101,51 +106,56 @@ fn seed_report_accounts(db: &Db) -> TestResult {
 fn fixture() -> TestResult<Ledger> {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    seed_report_accounts(&db)?;
+    seed_report_accounts(&db, ledger.owner())?;
     for &(company, date, currency, debit, credit, amount, category) in FIXTURE_POSTINGS {
         let metadata = json!({"payee":"Vendor, \"quoted\"\n<script>", "tin":"000-00-0000", "payee_address":"A & B", "applies_to":"sale"}).to_string();
         let entries = [
             db::PostEntryParams {
                 account_code: debit.into(),
-                direction: "debit".into(),
-                amount,
+                direction: DebitOrCredit::Debit,
+                amount: amount.try_into()?,
                 memo: None,
                 tax_category: (debit == "5000" && !category.is_empty()).then(|| category.into()),
             },
             db::PostEntryParams {
                 account_code: credit.into(),
-                direction: "credit".into(),
-                amount,
+                direction: DebitOrCredit::Credit,
+                amount: amount.try_into()?,
                 memo: None,
                 tax_category: (credit == "4000").then(|| category.into()),
             },
         ];
-        let result = db::post_transaction(
-            db.conn(),
-            &db::PostTransactionParams {
-                company_slug: company,
-                date,
-                currency,
-                description: "Fixture <sale>",
-                metadata: Some(&metadata),
-                entries: &entries,
-                correlate: None,
-                reference: (debit == "1000" && date == "2026-01-10").then_some(
-                    if currency == "USD" {
-                        "sale"
-                    } else {
-                        "sale-mxn"
-                    },
-                ),
-                on_conflict: db::ConflictStrategy::Error,
-                actor: &Actor::new("owner"),
-            },
-        )?;
+        let transaction_currency = currency.parse()?;
+        let result = Granted::<Post>::with_db(&db, ledger.owner(), |grant| {
+            db::post_transaction(
+                grant,
+                &db::PostTransactionParams {
+                    company_slug: &company.parse()?,
+                    date: date.parse().map_err(|error: chrono::ParseError| {
+                        beankeeper_cli::error::CliError::Validation(error.to_string())
+                    })?,
+                    currency: transaction_currency,
+                    description: "Fixture <sale>",
+                    metadata: Some(&metadata),
+                    entries: &entries,
+                    correlate: None,
+                    reference: (debit == "1000" && date == "2026-01-10").then_some(
+                        if currency == "USD" {
+                            "sale"
+                        } else {
+                            "sale-mxn"
+                        },
+                    ),
+                    on_conflict: db::ConflictStrategy::Error,
+                    actor: ledger.owner(),
+                },
+            )
+        })?;
         if date == "2026-01-10" && company == "acme" && currency == "USD" {
             let db::PostResult::Created(id) = result else {
                 return Err("expected transaction".into());
             };
-            let book = db::companies::Company::bind(db.conn(), company.parse()?)?;
+            let book = db::companies::Company::bind(db.read(), company.parse()?)?;
             let entry = db::get_entries_for_transaction(&book, id)?
                 .into_iter()
                 .find(|e| e.account_code == "1000")
@@ -154,35 +164,39 @@ fn fixture() -> TestResult<Ledger> {
                 ("S1", 40_000, db::ClearingStatus::Reconciled, "2026-01-20"),
                 ("S2", 20_000, db::ClearingStatus::Cleared, "2026-02-20"),
             ] {
-                db::clear_entry(
-                    db.conn(),
-                    &Actor::new("owner"),
-                    &db::ClearRequest {
-                        company_slug: company,
-                        transaction_id: id.try_into()?,
-                        entry_id: entry.id.try_into()?,
-                        amount: Some(amount),
-                        date: date.parse()?,
-                        statement: Some(statement),
-                        status,
-                    },
-                )?;
+                Granted::<Reconcile>::with_db(&db, ledger.owner(), |grant| {
+                    db::clear_entry(
+                        grant,
+                        &db::ClearRequest {
+                            company_slug: &company.parse()?,
+                            transaction_id: id,
+                            entry_id: entry.id,
+                            amount: Some(amount.try_into()?),
+                            date: date.parse().map_err(|error: chrono::ParseError| {
+                                beankeeper_cli::error::CliError::Validation(error.to_string())
+                            })?,
+                            statement: Some(statement),
+                            status,
+                        },
+                    )
+                })?;
             }
         }
     }
-    db::set_budget(
-        db.conn(),
-        &Actor::new("owner"),
-        &db::SetBudgetParams {
-            company_slug: "acme",
-            account_code: "5000",
-            currency: Currency::USD,
-            year: 2026,
-            month: 2,
-            amount: 70_000,
-            notes: None,
-        },
-    )?;
+    Granted::<Budget>::with_db(&db, ledger.owner(), |grant| {
+        db::set_budget(
+            grant,
+            &db::SetBudgetParams {
+                company_slug: &"acme".parse()?,
+                account_code: "5000",
+                currency: Currency::USD,
+                year: 2026,
+                month: chrono::Month::February,
+                amount: 70_000,
+                notes: None,
+            },
+        )
+    })?;
     Ok(ledger)
 }
 
@@ -250,42 +264,48 @@ fn rendered_scalars(value: &Value, html: &str) {
 
 fn post_income_activity(
     db: &Db,
+    owner: &Actor,
     company: &str,
     date: &str,
     currency: &str,
     debit: &str,
     credit: &str,
 ) -> TestResult {
-    db::post_transaction(
-        db.conn(),
-        &db::PostTransactionParams {
-            company_slug: company,
-            date,
-            currency,
-            description: "Income period fixture",
-            metadata: None,
-            entries: &[
-                db::PostEntryParams {
-                    account_code: debit.into(),
-                    direction: "debit".into(),
-                    amount: 10_000,
-                    memo: None,
-                    tax_category: None,
-                },
-                db::PostEntryParams {
-                    account_code: credit.into(),
-                    direction: "credit".into(),
-                    amount: 10_000,
-                    memo: None,
-                    tax_category: None,
-                },
-            ],
-            correlate: None,
-            reference: None,
-            on_conflict: db::ConflictStrategy::Error,
-            actor: &Actor::new("owner"),
-        },
-    )?;
+    let currency = currency.parse()?;
+    Granted::<Post>::with_db(db, owner, |grant| {
+        db::post_transaction(
+            grant,
+            &db::PostTransactionParams {
+                company_slug: &company.parse()?,
+                date: date.parse().map_err(|error: chrono::ParseError| {
+                    beankeeper_cli::error::CliError::Validation(error.to_string())
+                })?,
+                currency,
+                description: "Income period fixture",
+                metadata: None,
+                entries: &[
+                    db::PostEntryParams {
+                        account_code: debit.into(),
+                        direction: DebitOrCredit::Debit,
+                        amount: 10_000.try_into()?,
+                        memo: None,
+                        tax_category: None,
+                    },
+                    db::PostEntryParams {
+                        account_code: credit.into(),
+                        direction: DebitOrCredit::Credit,
+                        amount: 10_000.try_into()?,
+                        memo: None,
+                        tax_category: None,
+                    },
+                ],
+                correlate: None,
+                reference: None,
+                on_conflict: db::ConflictStrategy::Error,
+                actor: owner,
+            },
+        )
+    })?;
     Ok(())
 }
 
@@ -298,35 +318,63 @@ fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_resul
     let historical = format!("{previous_year}-01-10");
     for company in ["acme", "other", "empty"] {
         if company != "acme" {
-            db::create_company(db.conn(), &Actor::new("owner"), company, company, None)?;
+            Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+                db::create_company(grant, &company.parse()?, &company.parse()?, None)
+            })?;
         }
-        db::create_account(
-            db.conn(),
-            &Actor::new("owner"),
-            &db::CreateAccountParams {
-                company_slug: company,
-                code: "1000",
-                name: "Checking",
-                account_type: "asset",
-                default_tax_category: None,
-            },
-        )?;
-        db::create_account(
-            db.conn(),
-            &Actor::new("owner"),
-            &db::CreateAccountParams {
-                company_slug: company,
-                code: "4000",
-                name: "Sales",
-                account_type: "revenue",
-                default_tax_category: None,
-            },
-        )?;
+        Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+            db::create_account(
+                grant,
+                &db::CreateAccountParams {
+                    company_slug: &company.parse()?,
+                    code: "1000",
+                    name: "Checking",
+                    account_type: AccountType::Asset,
+                    default_tax_category: None,
+                },
+            )
+        })?;
+        Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+            db::create_account(
+                grant,
+                &db::CreateAccountParams {
+                    company_slug: &company.parse()?,
+                    code: "4000",
+                    name: "Sales",
+                    account_type: AccountType::Revenue,
+                    default_tax_category: None,
+                },
+            )
+        })?;
     }
-    post_income_activity(&db, "acme", &historical, "USD", "1000", "4000")?;
+    post_income_activity(
+        &db,
+        ledger.owner(),
+        "acme",
+        &historical,
+        "USD",
+        "1000",
+        "4000",
+    )?;
     // Activity in another company or currency must not hide the empty-range note.
-    post_income_activity(&db, "other", &today.to_string(), "USD", "1000", "4000")?;
-    post_income_activity(&db, "acme", &today.to_string(), "MXN", "1000", "4000")?;
+    post_income_activity(
+        &db,
+        ledger.owner(),
+        "other",
+        &today.to_string(),
+        "USD",
+        "1000",
+        "4000",
+    )?;
+    post_income_activity(
+        &db,
+        ledger.owner(),
+        "acme",
+        &today.to_string(),
+        "MXN",
+        "1000",
+        "4000",
+    )?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.pair()?;
     let before = fingerprint(&db)?;
@@ -361,17 +409,18 @@ fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_resul
 fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> TestResult {
     let ledger = fixture()?;
     let db = ledger.db()?;
-    db::create_account(
-        db.conn(),
-        &Actor::new("owner"),
-        &db::CreateAccountParams {
-            company_slug: "acme",
-            code: "4001",
-            name: "Refunds",
-            account_type: "revenue",
-            default_tax_category: None,
-        },
-    )?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        db::create_account(
+            grant,
+            &db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "4001",
+                name: "Refunds",
+                account_type: AccountType::Revenue,
+                default_tax_category: None,
+            },
+        )
+    })?;
     for (date, debit, credit) in [
         ("2024-01-10", "1000", "4000"),
         ("2024-01-10", "4000", "1000"),
@@ -382,7 +431,7 @@ fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> 
         ("2021-01-10", "1000", "4000"),
         ("2021-01-10", "4001", "1000"),
     ] {
-        post_income_activity(&db, "acme", date, "USD", debit, credit)?;
+        post_income_activity(&db, ledger.owner(), "acme", date, "USD", debit, credit)?;
     }
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.pair()?;
@@ -420,7 +469,7 @@ fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> 
 #[test]
 fn reconciliation_reads_historical_alphabetic_account_codes() -> TestResult {
     let ledger = fixture()?;
-    ledger.db()?.conn().execute(
+    ledger.fixture_sql()?.execute(
         "INSERT INTO accounts (company_slug, code, name, type) VALUES ('acme', 'cash-old', 'Legacy cash', 'asset')",
         [],
     )?;
@@ -531,9 +580,12 @@ fn every_report_matches_cli_json_and_url_filters_restore_the_rendered_results() 
 
 fn fingerprint(db: &Db) -> TestResult<(i64, i64, i64)> {
     Ok((
-        db::get_schema_version(db.conn())?,
-        db::count_transactions(db.conn(), &db::ListTransactionParams::for_company("acme"))?,
-        db.conn()
+        db::get_schema_version(db.read())?,
+        db::count_transactions(
+            &db::companies::Company::bind(db.read(), "acme".parse()?)?,
+            &db::ListTransactionParams::default(),
+        )?,
+        db.read()
             .query_row("SELECT count(*) FROM audit_log", [], |row| row.get(0))?,
     ))
 }
@@ -541,6 +593,7 @@ fn fingerprint(db: &Db) -> TestResult<(i64, i64, i64)> {
 #[test]
 fn reports_reconciliation_and_review_share_the_workspace_shell() -> TestResult {
     let ledger = Ledger::new()?;
+    ledger.enable_browser_review()?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.pair()?;
     let destinations = [

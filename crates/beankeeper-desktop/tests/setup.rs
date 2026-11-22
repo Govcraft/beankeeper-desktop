@@ -86,12 +86,12 @@ fn encrypted_setup_preserves_configs_keeps_secrets_private_and_reads_keychain_on
     );
     assert!(Db::open_existing(&setup.path("books.db"), None).is_err());
     let db = setup.db()?;
-    assert!(db::policy::get(db.conn())?.enforce);
+    assert!(db::policy::get(db.read())?.enforce);
     let token = fs::read_to_string(setup.path("books.agent-token"))?;
-    let agent = identity::verify(db.conn(), &token)?;
+    let agent = identity::verify(db.read(), &token)?;
     assert!(agent.allows(Capability::Read)?);
     assert!(!agent.allows(Capability::Post)?);
-    assert!(identity::authorize(db.conn(), Some(&token), Capability::Post).is_err());
+    assert!(identity::authorize(db.read(), Some(&token), Capability::Post).is_err());
     assert!(!agent.allows(Capability::Approve)?);
     assert!(!agent.allows(Capability::Admin)?);
     let kit = fs::read_to_string(setup.path("books.recovery.txt"))?;
@@ -172,22 +172,22 @@ fn bookkeeper_has_spend_caps_and_cannot_approve_or_administer() -> TestResult {
     );
     let db = setup.db()?;
     let raw = fs::read_to_string(setup.path("books.agent-token"))?;
-    let agent = identity::verify(db.conn(), &raw)?;
+    let agent = identity::verify(db.read(), &raw)?;
     for capability in [Capability::Read, Capability::Post, Capability::Propose] {
         assert!(agent.allows(capability)?);
     }
     for capability in [Capability::Approve, Capability::Admin] {
         assert!(!agent.allows(capability)?);
-        assert!(identity::authorize(db.conn(), Some(&raw), capability).is_err());
+        assert!(identity::authorize(db.read(), Some(&raw), capability).is_err());
     }
-    let limits = db::spend_limits::list(db.conn(), agent.uri(), None)?;
+    let limits = db::spend_limits::list(db.read(), agent.uri(), None)?;
     assert_eq!(limits.len(), 3);
     for limit in limits {
         let caps = limit.caps();
         assert_eq!(caps.max_post().map(Cap::minor_units), Some(1234));
         assert_eq!(caps.daily_limit().map(Cap::minor_units), Some(5678));
     }
-    assert_eq!(db::list_companies(db.conn())?.len(), 3);
+    assert_eq!(db::list_companies(db.read())?.len(), 3);
     Ok(())
 }
 
@@ -223,7 +223,7 @@ fn rerun_refuses_without_force_and_force_preserves_root_tokens_and_recovery() ->
 
 fn root(db: &Db) -> Result<String, Box<dyn Error>> {
     Ok(db
-        .conn()
+        .read()
         .query_row("SELECT trust_root FROM identity_root", [], |row| row.get(0))?)
 }
 

@@ -368,7 +368,7 @@ pub(crate) async fn mcp_guard(
             // Reuse the public upstream verifier only to derive D3 routing identity.
             // Authentication and grant decisions remain inside the MCP router.
             let identity = beankeeper_cli::identity::verify(
-                db.conn(),
+                db.read(),
                 secrecy::ExposeSecret::expose_secret(&token),
             )
             .ok()?;

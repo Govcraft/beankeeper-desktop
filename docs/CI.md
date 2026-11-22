@@ -7,7 +7,7 @@ CI runs only the checks a change can affect, restores compiler caches that only
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| `ci.yml` | pull requests, `main` pushes, manual | Plans, then runs the selected Rust, service and packaging checks behind `ci-gate` |
+| `ci.yml` | pull requests, `main` pushes, manual, daily | Runs selected Rust, service and packaging checks behind `ci-gate`, and checks the latest Beankeeper main on the daily schedule |
 | `packaging.yml` | called by `ci.yml` and `release.yml` | Builds, packages and exercises installers for a list of targets |
 | `release.yml` | tags, manual, nightly | Packages every target; tags also sign and publish |
 | `cache-maintenance.yml` | `main` pushes, nightly, manual | The only writer of compiler caches |
@@ -21,7 +21,7 @@ helper tests (`scripts/tests` and `scripts/ci/tests`). Examples:
 | Change | Checks |
 | --- | --- |
 | `docs/`, `README.md`, `CHANGELOG.md` | none beyond the Python helper tests |
-| `crates/`, `ui/`, `Cargo.lock` | stable, MSRV and native service checks |
+| `crates/`, `ui/`, `Cargo.lock` | stable, MSRV, latest Beankeeper main and native service checks |
 | `install.ps1`, `packaging/windows.iss` | Windows packaging only |
 | `scripts/tests/service-lifecycle.py` | service checks and one package per OS |
 | `scripts/release.py`, `build.rs` | every release target |

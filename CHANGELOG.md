@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.16] - 2026-11-22
+
+### Changed
+
+- Track Beankeeper main and use its typed company scopes and audited grants.
+- Issue browser approval credentials using the private owner credential on
+  enforced ledgers.
+
 ## [0.1.0-rc.15] - 2026-11-22
 
 ### Fixed

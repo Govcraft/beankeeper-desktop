@@ -19,6 +19,7 @@ def results(rust="true", service="true", packaging="false", **overrides):
         },
         "stable": {"result": "success" if rust == "true" else "skipped"},
         "msrv": {"result": "success" if rust == "true" else "skipped"},
+        "upstream-main": {"result": "success" if rust == "true" else "skipped"},
         "service": {"result": "success" if service == "true" else "skipped"},
         "packaging": {"result": "success" if packaging == "true" else "skipped"},
     }
@@ -36,9 +37,10 @@ class GateTests(unittest.TestCase):
         self.check(results(rust="false", service="false", packaging="true"))
 
     def test_failure_or_cancellation_fails(self):
-        for result in ("failure", "cancelled"):
-            with self.assertRaisesRegex(ValueError, "stable"):
-                self.check(results(stable=result))
+        for job in ("stable", "upstream-main"):
+            for result in ("failure", "cancelled"):
+                with self.subTest(job=job, result=result), self.assertRaisesRegex(ValueError, job):
+                    self.check(results(**{job: result}))
 
     def test_unplanned_skip_fails(self):
         outcome = results(service="true")

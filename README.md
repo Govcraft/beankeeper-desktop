@@ -319,13 +319,16 @@ withdraw them.
 
 Only a paired browser with the exact Origin and its CSRF token can decide.
 Bearer credentials fail these routes, even alongside a browser cookie or with
-`ledger/approve`. For enforced ledgers, each server launch uses the decrypted
-local trust root to issue a unique, 12-hour `ledger/read` + `ledger/approve`
-identity solely for the local human. Its token stays in server memory and is
-reverified for expiry and revocation on every review request. The audit names
-`desktop-local-human` and records this identity separately from the proposer.
-No owner-token file is read. Restart and pair again after this authority expires.
-Issuance adds an audited token record per launch; no schema changes are made.
+`ledger/approve`. For enforced ledgers, Desktop reads the private
+`<ledger-stem>.owner-token` file created by `bk setup`. A live `ledger/admin`
+credential in that file authorizes issuance of a unique, 12-hour
+`ledger/read` + `ledger/approve` credential for the local human. It stays in
+server memory and Desktop checks it for expiry and revocation on each review
+request. The audit names `desktop-local-human` and records this identity
+separately from the proposer. If the private owner credential is missing or
+rejected, Desktop still serves verification, ledger views and MCP. The review
+page explains how to restore browser approval. Restart Desktop and pair again
+after approval access expires.
 With policy enforcement off, upstream records the same actor name without a
 token identity. `--read-only` restricts agent MCP tools; human browser decisions
 remain available. Upstream CLI/MCP approval behavior is unchanged, but Desktop's
@@ -351,11 +354,10 @@ cargo test --workspace
 cargo +1.91.0 check --workspace --all-targets --locked
 ```
 
-CI runs fmt, clippy with warnings denied, tests (including the embedded UI build)
-on stable, and a separate Rust 1.91 check. `Cargo.lock` pins the library and CLI to the same upstream revision.
-This revision includes the shared financial summary behind `bk summary` and
-the `financial_summary` MCP tool. Advance both dependencies together when
-adopting a newer CLI release.
+CI runs fmt, clippy with warnings denied, tests including the embedded UI build,
+and a separate Rust 1.91 check. `Cargo.lock` records the same upstream revision
+for the library and CLI. The `upstream-main` job refreshes both crates and
+tests the latest upstream commit on each pull request, push to `main`, and daily.
 
 ## License and updates
 

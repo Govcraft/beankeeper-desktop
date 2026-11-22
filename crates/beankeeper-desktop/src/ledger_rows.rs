@@ -1,15 +1,16 @@
 //! Typed reads from the currently pinned Beankeeper row API.
 
-use std::{collections::HashSet, error::Error, fmt, num::ParseIntError};
+use std::{collections::HashSet, error::Error, fmt};
 
 use beankeeper::types::{AccountType, Amount, ClearanceStatus, Currency, DebitOrCredit, Money};
 use beankeeper_cli::db::{
     AccountRow, AuditLogRow, EntryRow,
     audit::{AuditEntity, EntryStatus},
+    ids::{EntryId, TransactionId},
 };
 
 #[derive(Debug)]
-pub(crate) struct RowError(ParseIntError);
+pub(crate) struct RowError(beankeeper_cli::error::CliError);
 
 impl fmt::Display for RowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -30,7 +31,6 @@ fn account_kind_order(kind: AccountType) -> u8 {
         AccountType::Equity => 2,
         AccountType::Revenue => 3,
         AccountType::Expense => 4,
-        _ => 5,
     }
 }
 
@@ -86,21 +86,30 @@ impl EntryValues {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AuditSubject {
-    Transaction(i64),
-    Entry(i64),
+    Transaction(TransactionId),
+    Entry(EntryId),
 }
 
 impl AuditSubject {
     pub(crate) fn read(row: &AuditLogRow) -> Result<Option<Self>, RowError> {
-        let parse_id = || row.entity_id.parse().map_err(RowError);
         match row.entity {
-            AuditEntity::Transaction => parse_id().map(Self::Transaction).map(Some),
-            AuditEntity::Entry => parse_id().map(Self::Entry).map(Some),
+            AuditEntity::Transaction => row
+                .entity_id
+                .parse()
+                .map(Self::Transaction)
+                .map(Some)
+                .map_err(RowError),
+            AuditEntity::Entry => row
+                .entity_id
+                .parse()
+                .map(Self::Entry)
+                .map(Some)
+                .map_err(RowError),
             _ => Ok(None),
         }
     }
 
-    pub(crate) fn matches(&self, transaction: i64, entries: &HashSet<i64>) -> bool {
+    pub(crate) fn matches(&self, transaction: TransactionId, entries: &HashSet<EntryId>) -> bool {
         match self {
             Self::Transaction(id) => *id == transaction,
             Self::Entry(id) => entries.contains(id),
@@ -113,11 +122,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audit_subjects_compare_the_id_in_the_correct_entity_namespace() {
-        let entries = HashSet::from([12, 13]);
-        assert!(AuditSubject::Transaction(10).matches(10, &entries));
-        assert!(!AuditSubject::Entry(10).matches(10, &entries));
-        assert!(AuditSubject::Entry(12).matches(10, &entries));
-        assert!(!AuditSubject::Transaction(12).matches(10, &entries));
+    fn audit_subjects_compare_the_id_in_the_correct_entity_namespace() -> Result<(), Box<dyn Error>>
+    {
+        let transaction = TransactionId::try_from(10)?;
+        let entries = HashSet::from([EntryId::try_from(12)?, EntryId::try_from(13)?]);
+        assert!(AuditSubject::Transaction(transaction).matches(transaction, &entries));
+        assert!(!AuditSubject::Entry(10.try_into()?).matches(transaction, &entries));
+        assert!(AuditSubject::Entry(12.try_into()?).matches(transaction, &entries));
+        assert!(!AuditSubject::Transaction(12.try_into()?).matches(transaction, &entries));
+        Ok(())
     }
 }

@@ -1,5 +1,6 @@
 pub mod common;
 
+use beankeeper::types::AccountType;
 use std::{io::Write, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -7,7 +8,7 @@ use beankeeper_cli::{
     capability::Capability,
     commands::setup::ProfileRevision,
     db::{self, Actor, Db, audit::setup::Generation},
-    identity::{self, IssueRequest},
+    identity::{self, Admin, Granted, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, clean_command, rpc, token};
 use ed25519_dalek::SigningKey;
@@ -112,7 +113,7 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
         json!({"companies":1,"accounts":0,"transactions":0,"owner_key_initialized":true})
     );
     let db = ledger.db()?;
-    create_fixture_account(&db, "1000", "Checking", "asset")?;
+    create_fixture_account(&db, ledger.owner(), "1000", "Checking", AccountType::Asset)?;
     let active = status("setup_status")?;
     assert_eq!(active["next_step"], "review_opening_balances");
     assert_eq!(
@@ -134,7 +135,13 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     let cli: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(cli["data"], active);
 
-    create_fixture_account(&db, "5000", "Groceries", "expense")?;
+    create_fixture_account(
+        &db,
+        ledger.owner(),
+        "5000",
+        "Groceries",
+        AccountType::Expense,
+    )?;
     let posting = ledger
         .command()
         .args([
@@ -173,37 +180,49 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
         json!({"companies":1,"accounts":2,"transactions":1,"owner_key_initialized":true})
     );
 
-    assert_navigation_cannot_read_setup_status(&db, &server)
+    assert_navigation_cannot_read_setup_status(&db, ledger.owner(), &server)
 }
 
-fn create_fixture_account(db: &Db, code: &str, name: &str, account_type: &str) -> TestResult {
-    db::create_account(
-        db.conn(),
-        &Actor::new("owner"),
-        &db::CreateAccountParams {
-            company_slug: "acme",
-            code,
-            name,
-            account_type,
-            default_tax_category: None,
-        },
-    )?;
+fn create_fixture_account(
+    db: &Db,
+    owner: &Actor,
+    code: &str,
+    name: &str,
+    account_type: AccountType,
+) -> TestResult {
+    Granted::<Admin>::with_db(db, owner, |grant| {
+        db::create_account(
+            grant,
+            &db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code,
+                name,
+                account_type,
+                default_tax_category: None,
+            },
+        )
+    })?;
     Ok(())
 }
 
-fn assert_navigation_cannot_read_setup_status(db: &Db, server: &Server) -> TestResult {
+fn assert_navigation_cannot_read_setup_status(
+    db: &Db,
+    owner: &Actor,
+    server: &Server,
+) -> TestResult {
     let credentials = [Capability::Navigate.path().to_owned()];
-    let other = identity::issue(
-        db.conn(),
-        &Actor::new("fixture-owner"),
-        &IssueRequest {
-            name: "onboarding_navigation",
-            capabilities: &credentials,
-            ttl: Duration::from_secs(3600),
-            public_key: None,
-            generate_key: true,
-        },
-    )?;
+    let other = Granted::<Admin>::with_db(db, owner, |grant| {
+        identity::issue(
+            grant,
+            &IssueRequest {
+                name: "onboarding_navigation",
+                capabilities: &credentials,
+                ttl: Duration::from_secs(3600),
+                public_key: None,
+                generate_key: true,
+            },
+        )
+    })?;
     for name in ["setup_status", LEDGER_SETUP_STATUS] {
         let denied = rpc(server.request(
             "tools/call",
@@ -318,17 +337,18 @@ fn setup_owner(ledger: &Ledger) -> TestResult<SecretString> {
     let db = ledger.db()?;
     let capabilities =
         [Capability::Read, Capability::Admin].map(|capability| capability.path().to_owned());
-    let owner = identity::issue_credential(
-        db.conn(),
-        &Actor::new("fixture-owner"),
-        &IssueRequest {
-            name: "setup_owner",
-            capabilities: &capabilities,
-            ttl: Duration::from_secs(600),
-            public_key: None,
-            generate_key: true,
-        },
-    )?;
+    let owner = Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        identity::issue_credential(
+            grant,
+            &IssueRequest {
+                name: "setup_owner",
+                capabilities: &capabilities,
+                ttl: Duration::from_secs(600),
+                public_key: None,
+                generate_key: true,
+            },
+        )
+    })?;
     Ok(owner.token().clone())
 }
 
@@ -496,7 +516,7 @@ fn desktop_guides_a_book_through_profile_chart_and_named_account() -> TestResult
 fn desktop_initializes_an_existing_book_without_replacing_its_account() -> TestResult {
     let ledger = Ledger::new()?;
     // Earlier CLI versions accepted account codes that the current write API rejects.
-    ledger.db()?.conn().execute(
+    ledger.fixture_sql()?.execute(
         "INSERT INTO accounts (company_slug, code, name, type) VALUES (?1, ?2, ?3, ?4)",
         ["acme", "CASH", "Existing Checking", "asset"],
     )?;
@@ -567,8 +587,14 @@ impl OpeningFixture {
     fn new() -> TestResult<Self> {
         let ledger = Ledger::new()?;
         let db = ledger.db()?;
-        create_fixture_account(&db, "1010", "Checking", "asset")?;
-        create_fixture_account(&db, "3000", "Opening Balance Equity", "equity")?;
+        create_fixture_account(&db, ledger.owner(), "1010", "Checking", AccountType::Asset)?;
+        create_fixture_account(
+            &db,
+            ledger.owner(),
+            "3000",
+            "Opening Balance Equity",
+            AccountType::Equity,
+        )?;
         let owner = setup_owner(&ledger)?;
         let owner = owner.expose_secret();
         let mut server = Server::start(&ledger, &["serve"], None)?;
@@ -616,7 +642,7 @@ fn desktop_previews_opening_balances_without_reserving_or_posting_them() -> Test
     let scoped = fixture.scoped.expose_secret();
     let db = ledger.db()?;
     let ledger_state = || -> TestResult<(i64, i64, i64, i64)> {
-        Ok(db.conn().query_row(
+        Ok(db.read().query_row(
             "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM txn_proposals),
                 (SELECT COUNT(*) FROM setup_requests), (SELECT COUNT(*) FROM audit_log)",
             [],
@@ -778,17 +804,18 @@ fn opening_approver(ledger: &Ledger) -> TestResult<SecretString> {
     let db = ledger.db()?;
     let capabilities = [Capability::Read, Capability::Approve, Capability::Reverse]
         .map(|capability| capability.path().to_owned());
-    let credential = identity::issue_credential(
-        db.conn(),
-        &Actor::new("fixture-owner"),
-        &IssueRequest {
-            name: "opening_approver",
-            capabilities: &capabilities,
-            ttl: Duration::from_secs(600),
-            public_key: None,
-            generate_key: true,
-        },
-    )?;
+    let credential = Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        identity::issue_credential(
+            grant,
+            &IssueRequest {
+                name: "opening_approver",
+                capabilities: &capabilities,
+                ttl: Duration::from_secs(600),
+                public_key: None,
+                generate_key: true,
+            },
+        )
+    })?;
     Ok(credential.token().clone())
 }
 

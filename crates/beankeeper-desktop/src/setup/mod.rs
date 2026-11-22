@@ -9,6 +9,7 @@ use std::{
     io::{self, IsTerminal, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::LazyLock,
     time::Duration,
 };
 
@@ -18,6 +19,7 @@ use beankeeper_cli::{
     cli::Cli,
     db::{
         self, Actor, Db, audit,
+        audit::{ActorLabel, BlankActorLabel},
         spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
@@ -613,14 +615,41 @@ fn write_store_marker(
     Ok(())
 }
 
+pub(crate) struct OwnerCredential(VerifiedAgent);
+
+impl TryFrom<VerifiedAgent> for OwnerCredential {
+    type Error = CliError;
+
+    fn try_from(identity: VerifiedAgent) -> Result<Self, Self::Error> {
+        if !identity.allows(Capability::Admin)? {
+            return Err(CliError::Forbidden(
+                "owner credential lacks ledger/admin".into(),
+            ));
+        }
+        Ok(Self(identity))
+    }
+}
+
+impl TryFrom<OwnerCredential> for Actor {
+    type Error = BlankActorLabel;
+
+    fn try_from(owner: OwnerCredential) -> Result<Self, Self::Error> {
+        static OWNER_LABEL: LazyLock<Result<ActorLabel, BlankActorLabel>> =
+            LazyLock::new(|| "desktop-owner".parse());
+
+        let label = LazyLock::force(&OWNER_LABEL).clone()?;
+        Ok(Self::new(label).with_identity(owner.0))
+    }
+}
+
 enum SetupAuthority {
-    Owner(Box<VerifiedAgent>),
+    Owner(Box<OwnerCredential>),
     FirstRun,
 }
 
 impl SetupAuthority {
     fn resolve(db: &Db, owner_file: &Path) -> Result<Self, SetupError> {
-        let conn = db.conn();
+        let conn = db.read();
         let policy = db::policy::get(conn)?;
         let registered = has_registered_tokens(identity::list(conn)?)?;
         if !(policy.enforce || registered || owner_file.try_exists()?) {
@@ -633,25 +662,20 @@ impl SetupAuthority {
                     "existing ledger requires its private owner credential; recover it before resuming setup",
                 )
             })?;
-        let owner = identity::verify(conn, raw.expose_secret().trim())?;
-        if !owner.allows(Capability::Admin)? {
-            return Err(SetupError::Invalid(
-                "owner credential lacks admin authority",
-            ));
-        }
+        let owner = OwnerCredential::try_from(identity::verify(conn, raw.expose_secret().trim())?)?;
         Ok(Self::Owner(Box::new(owner)))
     }
 
-    fn into_actor(self) -> Actor {
-        match self {
-            Self::Owner(owner) => Actor::new("desktop-owner").with_identity(*owner),
-            Self::FirstRun => Actor::new("desktop-setup"),
-        }
+    fn into_actor(self) -> Result<Actor, CliError> {
+        Ok(match self {
+            Self::Owner(owner) => Actor::try_from(*owner)?,
+            Self::FirstRun => Actor::new("desktop-setup".parse()?),
+        })
     }
 }
 
 fn has_registered_tokens(wire: serde_json::Value) -> Result<bool, SetupError> {
-    // The pinned CLI exposes JSON rather than a token count. Any registry row
+    // Upstream exposes JSON rather than a token count. Any registry row
     // requires the owner regardless of its contents, including revoked tokens.
     let rows: Vec<IgnoredAny> = serde_json::from_value(wire)
         .map_err(|_| SetupError::Invalid("upstream returned an invalid agent registry"))?;
@@ -665,7 +689,7 @@ fn provision(
     owner_file: &Path,
     preserve_preset: bool,
 ) -> Result<(), SetupError> {
-    let conn = db.conn();
+    let conn = db.read();
     if token_file.exists() {
         let raw = PrivateFile::open(token_file)?.read_secret(BEARER_FILE_LIMIT)?;
         let agent = identity::verify(conn, raw.expose_secret().trim())?;
@@ -681,15 +705,9 @@ fn provision(
         }
         return Ok(());
     }
-    let actor = SetupAuthority::resolve(db, owner_file)?.into_actor();
-    // init_root itself refuses replacement; only initialize a ledger with no root.
-    let has_root: bool = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM identity_root)", [], |row| {
-            row.get(0)
-        })
-        .map_err(CliError::from)?;
-    if !has_root {
-        identity::init_root(conn, &actor)?;
+    let actor = SetupAuthority::resolve(db, owner_file)?.into_actor()?;
+    if !beankeeper_cli::commands::setup::status(db)?.owner_key_initialized {
+        Granted::<Admin>::with_db(db, &actor, identity::init_root)?;
     }
     let bootstrap_owner = if actor.identity().is_none() {
         let issued = issue(db, &actor, "desktop_owner", OWNER_CAPABILITIES)?;
@@ -700,22 +718,24 @@ fn provision(
     } else {
         None
     };
+    let actor = bootstrap_owner.as_ref().unwrap_or(&actor);
     let mut companies = db::list_companies(conn)?;
     if companies.is_empty() {
-        db::create_company(conn, &actor, "personal", "Personal", None)?;
+        Granted::<Admin>::with_db(db, actor, |grant| {
+            db::create_company(grant, &"personal".parse()?, &"Personal".parse()?, None)
+        })?;
         companies = db::list_companies(conn)?;
     }
-    let issued = issue(db, &actor, "desktop_agent", options.preset.capabilities())?;
+    let issued = issue(db, actor, "desktop_agent", options.preset.capabilities())?;
     if options.preset == Preset::Bookkeeper {
         let caps = Caps::from_minor_units(Some(options.max_post), Some(options.daily_limit))?;
         for company in companies {
-            let company = company.slug.parse()?;
-            let limit = SpendLimit::new(issued.agent_uri.clone(), company, Currency::USD, caps);
-            audit::set_spend_limit(conn, &actor, &limit)?;
+            let limit =
+                SpendLimit::new(issued.agent_uri.clone(), company.slug, Currency::USD, caps);
+            Granted::<Admin>::with_db(db, actor, |grant| audit::set_spend_limit(grant, &limit))?;
         }
     }
-    let policy_actor = bootstrap_owner.as_ref().unwrap_or(&actor);
-    Granted::<Admin>::with(conn, policy_actor, |grant| audit::set_policy(grant, true))?;
+    Granted::<Admin>::with_db(db, actor, |grant| audit::set_policy(grant, true))?;
     private_create(token_file, issued.token().expose_secret().as_bytes())?;
     Ok(())
 }
@@ -730,17 +750,18 @@ fn issue(
         .iter()
         .map(|capability| capability.path().to_owned())
         .collect::<Vec<_>>();
-    Ok(identity::issue_credential(
-        db.conn(),
-        actor,
-        &IssueRequest {
-            name,
-            capabilities: &capabilities,
-            ttl: Duration::from_hours(8760),
-            public_key: None,
-            generate_key: true,
-        },
-    )?)
+    Ok(Granted::<Admin>::with_db(db, actor, |grant| {
+        identity::issue_credential(
+            grant,
+            &IssueRequest {
+                name,
+                capabilities: &capabilities,
+                ttl: Duration::from_hours(8760),
+                public_key: None,
+                generate_key: true,
+            },
+        )
+    })?)
 }
 
 fn generate_passphrase() -> Result<SecretString, SetupError> {
@@ -1163,15 +1184,15 @@ mod tests {
         let agent_file = books.with_extension("agent-token");
         let read_identity = |path: &Path| -> Result<VerifiedAgent, Box<dyn Error>> {
             let token = PrivateFile::open(path)?.read_secret(BEARER_FILE_LIMIT)?;
-            Ok(identity::verify(db.conn(), token.expose_secret())?)
+            Ok(identity::verify(db.read(), token.expose_secret())?)
         };
 
         provision(&db, &options, &agent_file, &owner_file, false)?;
         let owner = read_identity(&owner_file)?;
         assert!(owner.allows(Capability::Admin)?);
-        assert!(db::policy::get(db.conn())?.enforce);
+        assert!(db::policy::get(db.read())?.enforce);
         let policy_events = || {
-            let mut stmt = db.conn().prepare(
+            let mut stmt = db.read().prepare(
                 "SELECT token_jti FROM audit_log WHERE entity = 'policy' AND action = 'policy_change'",
             )?;
             stmt.query_map([], |row| row.get::<_, String>(0))?

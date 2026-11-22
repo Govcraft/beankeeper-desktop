@@ -7,7 +7,7 @@ use beankeeper_cli::{
         Charge, ReconciliationReport, ReconciliationRequest, Settlement, UnclearedEntry,
         compute_reconciliation, compute_settlement_reconciliation,
     },
-    db::Db,
+    db::{Db, companies::CompanySlug},
 };
 use serde_json::Value;
 
@@ -21,7 +21,7 @@ use super::{ReportFilters, report_error, resolve_currency};
 
 pub(super) fn read(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     query: &ReportFilters,
 ) -> Result<ReconciliationReport, ViewError> {
     let account = query
@@ -47,18 +47,18 @@ pub(super) fn read(
             .map_err(report_error)?;
     }
     match (query.mode.unwrap_or_default(), query.link_key.as_deref()) {
-        (ReconciliationMode::Bank, None) => compute_reconciliation(db, company, &request),
+        (ReconciliationMode::Bank, None) => compute_reconciliation(db, company.as_str(), &request),
         (ReconciliationMode::Bank, Some(_)) => {
             return Err(ViewError::Invalid("The link key requires settlement mode."));
         }
         (ReconciliationMode::Settlement, key) => {
-            compute_settlement_reconciliation(db, company, &request, key)
+            compute_settlement_reconciliation(db, company.as_str(), &request, key)
         }
     }
     .map_err(report_error)
 }
 
-pub(super) fn render(report: &ReconciliationReport, html: &mut Markup) {
+pub(super) fn render(report: &ReconciliationReport, html: &mut Markup) -> Result<(), ViewError> {
     write_markup!(
         html,
         "<h3>{} {}</h3><p>Account type {}. Normal balance {}.</p>",
@@ -89,7 +89,7 @@ pub(super) fn render(report: &ReconciliationReport, html: &mut Markup) {
     );
     if let (Some(statement), Some(difference), Some(reconciled)) = (
         report.statement_balance,
-        report.difference(),
+        report.difference().map_err(report_error)?,
         report.is_reconciled(),
     ) {
         amounts(
@@ -142,6 +142,7 @@ pub(super) fn render(report: &ReconciliationReport, html: &mut Markup) {
             }
         }
     }
+    Ok(())
 }
 
 fn amounts<const N: usize>(html: &mut Markup, values: [(&str, Money); N]) {

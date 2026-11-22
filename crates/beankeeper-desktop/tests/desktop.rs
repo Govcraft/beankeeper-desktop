@@ -1,5 +1,9 @@
-mod common;
+pub mod common;
 
+use beankeeper::types::AccountType;
+use beankeeper::types::Currency;
+use beankeeper::types::DebitOrCredit;
+use beankeeper_cli::identity::{Admin, Granted, Post};
 use std::{
     io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener},
@@ -235,11 +239,8 @@ fn binary_serves_embedded_views_and_authenticated_mcp_from_an_empty_directory() 
     };
     assert_eq!(payload[0]["slug"], "acme");
     let db = ledger.db()?;
-    identity::revoke(
-        db.conn(),
-        &Actor::new("owner"),
-        ledger.reader["token_jti"].as_str().ok_or("jti")?,
-    )?;
+    let jti = ledger.reader["token_jti"].as_str().ok_or("jti")?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| identity::revoke(grant, jti))?;
     assert_eq!(
         server
             .request("tools/list", json!({}), Some(token(&ledger.reader)?))?
@@ -359,7 +360,7 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     {
         let db = ledger.db()?;
         // Undo the two setup migrations to reproduce the prior ledger schema.
-        db.conn().execute_batch(
+        ledger.fixture_sql()?.execute_batch(
             "BEGIN;
              DROP TABLE setup_statement_batches;
              DROP TABLE setup_requests;
@@ -367,14 +368,14 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
              DELETE FROM schema_version WHERE version IN (22, 23);
              COMMIT;",
         )?;
-        assert_eq!(get_schema_version(db.conn())?, 21);
+        assert_eq!(get_schema_version(db.read())?, 21);
     }
 
     let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
     let passphrase = std::fs::read_to_string(&ledger.secret)?.into();
     let migrated = Db::open_snapshot(&ledger.path, Some(&passphrase))?;
-    assert_eq!(get_schema_version(migrated.conn())?, 23);
-    let setup_tables: u32 = migrated.conn().query_row(
+    assert_eq!(get_schema_version(migrated.read())?, 23);
+    let setup_tables: u32 = migrated.read().query_row(
         "SELECT COUNT(*) FROM sqlite_schema
          WHERE type = 'table' AND name IN (
              'setup_book_profiles', 'setup_requests', 'setup_statement_batches'
@@ -409,11 +410,10 @@ fn read_only_ceiling_and_process_fallback_are_preserved() -> TestResult {
             .status(),
         401
     );
-    identity::revoke(
-        ledger.db()?.conn(),
-        &Actor::new("owner"),
-        ledger.writer["token_jti"].as_str().ok_or("jti")?,
-    )?;
+    let jti = ledger.writer["token_jti"].as_str().ok_or("jti")?;
+    Granted::<Admin>::with_db(&ledger.db()?, ledger.owner(), |grant| {
+        identity::revoke(grant, jti)
+    })?;
     assert_eq!(server.request("tools/list", json!({}), None)?.status(), 401);
     Ok(())
 }
@@ -955,11 +955,10 @@ fn authenticated_mcp_invites_require_human_confirmation_and_keep_agents_isolated
     let response = server.request("tools/list", json!({}), Some(token(&ledger.writer)?))?;
     assert!(response.status().is_success());
     assert!(response.headers().get("beankeeper-pairing-url").is_some());
-    identity::revoke(
-        ledger.db()?.conn(),
-        &Actor::new("owner"),
-        ledger.reader["token_jti"].as_str().ok_or("jti")?,
-    )?;
+    let jti = ledger.reader["token_jti"].as_str().ok_or("jti")?;
+    Granted::<Admin>::with_db(&ledger.db()?, ledger.owner(), |grant| {
+        identity::revoke(grant, jti)
+    })?;
     let response = server.request("tools/list", json!({}), Some(token(&ledger.reader)?))?;
     assert_eq!(response.status(), 401);
     assert!(response.headers().get("beankeeper-pairing-url").is_none());
@@ -1096,23 +1095,28 @@ fn one_shot_passphrase_commands_are_consumed_once_for_both_transports() -> TestR
     Ok(())
 }
 
-fn seed_register_accounts(db: &Db) -> TestResult {
+fn seed_register_accounts(db: &Db, owner: &Actor) -> TestResult {
     use beankeeper_cli::db::{self, CreateAccountParams};
 
-    let owner = Actor::new("owner");
-    db::create_company(db.conn(), &owner, "other", "Other Books", None)?;
-    for (code, name, account_type) in [("1000", "Cash", "asset"), ("4000", "Sales", "revenue")] {
-        db::create_account(
-            db.conn(),
-            &owner,
-            &CreateAccountParams {
-                company_slug: "acme",
-                code,
-                name,
-                account_type,
-                default_tax_category: None,
-            },
-        )?;
+    Granted::<Admin>::with_db(db, owner, |grant| {
+        db::create_company(grant, &"other".parse()?, &"Other Books".parse()?, None)
+    })?;
+    for (code, name, account_type) in [
+        ("1000", "Cash", AccountType::Asset),
+        ("4000", "Sales", AccountType::Revenue),
+    ] {
+        Granted::<Admin>::with_db(db, owner, |grant| {
+            db::create_account(
+                grant,
+                &CreateAccountParams {
+                    company_slug: &"acme".parse()?,
+                    code,
+                    name,
+                    account_type,
+                    default_tax_category: None,
+                },
+            )
+        })?;
     }
     Ok(())
 }
@@ -1122,40 +1126,44 @@ fn posted_transaction_can_be_followed_from_register_to_detail_and_reloaded() -> 
     use beankeeper_cli::db::{self, ConflictStrategy, PostEntryParams, PostTransactionParams};
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    seed_register_accounts(&db)?;
-    let actor =
-        Actor::new("owner").with_identity(identity::verify(db.conn(), token(&ledger.writer)?)?);
+    seed_register_accounts(&db, ledger.owner())?;
+    let actor = Actor::new("owner".parse()?)
+        .with_identity(identity::verify(db.read(), token(&ledger.writer)?)?);
     let entries = [
         PostEntryParams {
             account_code: "1000".into(),
-            direction: "debit".into(),
-            amount: 2500,
+            direction: DebitOrCredit::Debit,
+            amount: 2500.try_into()?,
             memo: None,
             tax_category: None,
         },
         PostEntryParams {
             account_code: "4000".into(),
-            direction: "credit".into(),
-            amount: 2500,
+            direction: DebitOrCredit::Credit,
+            amount: 2500.try_into()?,
             memo: None,
             tax_category: None,
         },
     ];
-    let db::PostResult::Created(id) = db::post_transaction(
-        db.conn(),
-        &PostTransactionParams {
-            company_slug: "acme",
-            description: "Coffee <shop>",
-            metadata: Some("{\"source\":\"fixture\"}"),
-            currency: "USD",
-            date: "2026-11-20",
-            entries: &entries,
-            correlate: None,
-            reference: Some("inv&1"),
-            on_conflict: ConflictStrategy::Error,
-            actor: &actor,
-        },
-    )?
+    let db::PostResult::Created(id) = Granted::<Post>::with_db(&db, &actor, |grant| {
+        db::post_transaction(
+            grant,
+            &PostTransactionParams {
+                company_slug: &"acme".parse()?,
+                description: "Coffee <shop>",
+                metadata: Some("{\"source\":\"fixture\"}"),
+                currency: Currency::USD,
+                date: "2026-11-20".parse().map_err(|error: chrono::ParseError| {
+                    beankeeper_cli::error::CliError::Validation(error.to_string())
+                })?,
+                entries: &entries,
+                correlate: None,
+                reference: Some("inv&1"),
+                on_conflict: ConflictStrategy::Error,
+                actor: &actor,
+            },
+        )
+    })?
     else {
         return Err("transaction was not created".into());
     };

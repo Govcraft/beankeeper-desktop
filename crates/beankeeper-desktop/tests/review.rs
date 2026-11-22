@@ -2,6 +2,7 @@
 
 pub mod common;
 
+use beankeeper::types::AccountType;
 use std::time::Duration;
 
 use beankeeper::types::Currency;
@@ -12,7 +13,7 @@ use beankeeper_cli::{
         proposals::{self, ProposalState, ResolvedBy},
         spend_limits::{Caps, SpendLimit},
     },
-    identity::{self, IssueRequest},
+    identity::{self, Admin, Granted, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, token};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -27,50 +28,50 @@ struct ReviewFixture {
 impl ReviewFixture {
     fn new() -> TestResult<Self> {
         let ledger = Ledger::new()?;
+        ledger.enable_browser_review()?;
         let db = ledger.db()?;
-        db::create_company(
-            db.conn(),
-            &Actor::new("fixture-owner"),
-            "other",
-            "Other Books",
-            None,
-        )?;
+        Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+            db::create_company(grant, &"other".parse()?, &"Other Books".parse()?, None)
+        })?;
         for company in ["acme", "other"] {
-            db::create_account(
-                db.conn(),
-                &Actor::new("fixture-owner"),
-                &db::CreateAccountParams {
-                    company_slug: company,
-                    code: "1000",
-                    name: "Cash",
-                    account_type: "asset",
-                    default_tax_category: None,
-                },
-            )?;
-            db::create_account(
-                db.conn(),
-                &Actor::new("fixture-owner"),
-                &db::CreateAccountParams {
-                    company_slug: company,
-                    code: "5000",
-                    name: "Supplies",
-                    account_type: "expense",
-                    default_tax_category: None,
-                },
-            )?;
+            Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &company.parse()?,
+                        code: "1000",
+                        name: "Cash",
+                        account_type: AccountType::Asset,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
+            Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+                db::create_account(
+                    grant,
+                    &db::CreateAccountParams {
+                        company_slug: &company.parse()?,
+                        code: "5000",
+                        name: "Supplies",
+                        account_type: AccountType::Expense,
+                        default_tax_category: None,
+                    },
+                )
+            })?;
         }
         let issue = |name, capabilities: &[String]| {
-            identity::issue(
-                db.conn(),
-                &Actor::new("fixture-owner"),
-                &IssueRequest {
-                    name,
-                    capabilities,
-                    ttl: Duration::from_secs(3600),
-                    public_key: None,
-                    generate_key: true,
-                },
-            )
+            Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+                identity::issue(
+                    grant,
+                    &IssueRequest {
+                        name,
+                        capabilities,
+                        ttl: Duration::from_secs(3600),
+                        public_key: None,
+                        generate_key: true,
+                    },
+                )
+            })
         };
         let proposer = issue(
             "review_proposer",
@@ -84,15 +85,17 @@ impl ReviewFixture {
                 "ledger/admin".into(),
             ],
         )?;
-        let owner = Actor::new("fixture-owner")
-            .with_identity(identity::verify(db.conn(), token(&approver)?)?);
+        let owner = Actor::new("fixture-owner".parse()?)
+            .with_identity(identity::verify(db.read(), token(&approver)?)?);
         let agent = proposer["agent_uri"]
             .as_str()
             .ok_or("proposer URI")?
             .parse()?;
         let caps = Caps::from_minor_units(Some(100), Some(200))?;
         let limit = SpendLimit::new(agent, "acme".parse()?, Currency::USD, caps);
-        db::audit::set_spend_limit(db.conn(), &owner, &limit)?;
+        Granted::<Admin>::with_db(&db, &owner, |grant| {
+            db::audit::set_spend_limit(grant, &limit)
+        })?;
         Ok(Self {
             ledger,
             proposer,
@@ -168,8 +171,47 @@ fn decision(server: &Server, id: &str, action: &str, csrf: &str) -> RequestBuild
 
 fn transaction_count(db: &Db) -> TestResult<i64> {
     Ok(db
-        .conn()
+        .read()
         .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))?)
+}
+
+#[test]
+fn enforced_browser_review_requires_the_private_admin_sidecar() -> TestResult {
+    let fixture = ReviewFixture::new()?;
+    let id = fixture.propose("no-browser-authority")?;
+    let db = fixture.ledger.db()?;
+    let owner_path = fixture.ledger.path.with_extension("owner-token");
+    std::fs::remove_file(&owner_path)?;
+    let registry = identity::list(db.read())?;
+
+    for invalid_sidecar in [None, Some(token(&fixture.ledger.reader)?)] {
+        if let Some(token) = invalid_sidecar {
+            fixture.ledger.write_owner_token(token)?;
+        }
+        // Even a valid Admin MCP fallback cannot provide browser authority.
+        let mut server =
+            Server::start(&fixture.ledger, &["serve"], Some(token(&fixture.approver)?))?;
+        server.initialize(None)?;
+        server.pair()?;
+        let html = queue(&server)?;
+        assert!(html.contains("private owner credential with ledger/admin"));
+        assert!(html.contains("Intact: hash chain and all bk verify checks passed."));
+        assert!(!html.contains(&id));
+        assert_eq!(
+            decision(&server, &id, "approve", csrf(&html)?)
+                .send()?
+                .status(),
+            403
+        );
+        assert_eq!(identity::list(db.read())?, registry);
+    }
+
+    assert_eq!(
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
+        ProposalState::Pending,
+    );
+    assert_eq!(transaction_count(&db)?, 0);
+    Ok(())
 }
 
 #[test]
@@ -216,14 +258,14 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
         assert!(detail.contains(expected), "missing {expected}");
     }
     let db = fixture.ledger.db()?;
-    assert_rejected_insert_is_atomic(&db, &server, &id, csrf(&html)?)?;
+    assert_rejected_insert_is_atomic(&fixture.ledger, &db, &server, &id, csrf(&html)?)?;
     let response = decision(&server, &id, "approve", csrf(&html)?).send()?;
     assert_eq!(response.status(), 303);
     assert_eq!(
         response.headers()["location"],
         format!("/review/{id}?company=acme")
     );
-    let proposal = proposals::get(db.conn(), "acme", &id)?;
+    let proposal = proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?;
     let ProposalState::Approved {
         resolution,
         transaction_id,
@@ -241,23 +283,8 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
             .ok_or("proposer URI")?,
     );
     assert_ne!(uri, &proposal.proposer_uri);
-    let (transaction, entries) = db::get_transaction(db.conn(), "acme", *transaction_id)?;
-    assert_eq!(
-        transaction.posted_by.as_deref(),
-        Some("desktop-local-human")
-    );
-    assert_eq!(transaction.agent_uri.as_deref(), Some(uri.as_str()));
-    assert_eq!(transaction.token_jti.as_deref(), Some(jti.as_str()));
-    assert_ne!(
-        transaction.token_jti.as_deref(),
-        fixture.proposer["token_jti"].as_str()
-    );
-    assert_eq!(entries.len(), 2);
-    assert!(entries.iter().all(|entry| entry.amount == 2500));
-    let metadata: Value = serde_json::from_str(transaction.metadata.as_deref().ok_or("metadata")?)?;
-    assert_eq!(metadata["proposal_id"], id);
-    assert_eq!(metadata["source"], "fixture<&>");
-    let actor: String = db.conn().query_row(
+    assert_human_posting(&db, *transaction_id, uri, jti, &fixture, &id)?;
+    let actor: String = db.read().query_row(
         "SELECT actor FROM audit_log WHERE action = 'proposal_approve' AND entity_id = ?1",
         [&id],
         |row| row.get(0),
@@ -272,6 +299,40 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
     assert_eq!(transaction_count(&db)?, 1);
     assert!(!queue(&server)?.contains(&format!("/review/{id}?")));
     verify::execute_json(&db)?;
+    Ok(())
+}
+
+fn assert_human_posting(
+    db: &Db,
+    transaction_id: db::ids::TransactionId,
+    uri: &str,
+    jti: &str,
+    fixture: &ReviewFixture,
+    id: &str,
+) -> TestResult {
+    let (transaction, entries) = db::get_transaction(
+        &db::companies::Company::bind(db.read(), "acme".parse()?)?,
+        transaction_id,
+    )?;
+    assert_eq!(
+        transaction.posted_by.as_deref(),
+        Some("desktop-local-human")
+    );
+    assert_eq!(transaction.agent_uri.as_deref(), Some(uri));
+    assert_eq!(transaction.token_jti.as_deref(), Some(jti));
+    assert_ne!(
+        transaction.token_jti.as_deref(),
+        fixture.proposer["token_jti"].as_str()
+    );
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.amount.minor_units() == 2500)
+    );
+    let metadata: Value = serde_json::from_str(transaction.metadata.as_deref().ok_or("metadata")?)?;
+    assert_eq!(metadata["proposal_id"], id);
+    assert_eq!(metadata["source"], "fixture<&>");
     Ok(())
 }
 
@@ -294,7 +355,7 @@ fn human_rejection_records_reason_without_posting_and_cannot_be_approved_later()
         .send()?;
     assert_eq!(response.status(), 303);
     let db = fixture.ledger.db()?;
-    let proposal = proposals::get(db.conn(), "acme", &id)?;
+    let proposal = proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?;
     let ProposalState::Rejected { resolution, reason } = &proposal.state else {
         return Err("expected a rejected proposal".into());
     };
@@ -369,7 +430,7 @@ fn approval_bearer_tokens_cannot_replace_or_mix_with_browser_authority() -> Test
     }
     let db = fixture.ledger.db()?;
     assert_eq!(
-        proposals::get(db.conn(), "acme", &id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
@@ -424,7 +485,7 @@ fn proposal_resolution_and_deep_links_are_company_scoped() -> TestResult {
     assert!(!default.contains(&id));
     let db = fixture.ledger.db()?;
     assert_eq!(
-        proposals::get(db.conn(), "acme", &id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
@@ -443,7 +504,7 @@ fn verification_caches_its_last_result_and_explicit_recheck_detects_tampering() 
     let db = fixture.ledger.db()?;
     // This isolated encrypted temp ledger deliberately simulates an attacker who
     // bypassed the append-only trigger. Never run this against real books.
-    db.conn().execute_batch("DROP TRIGGER protect_audit_update; UPDATE audit_log SET actor = 'tampered' WHERE id = (SELECT MIN(id) FROM audit_log);")?;
+    fixture.ledger.fixture_sql()?.execute_batch("DROP TRIGGER protect_audit_update; UPDATE audit_log SET actor = 'tampered' WHERE id = (SELECT MIN(id) FROM audit_log);")?;
     assert!(verify::execute_json(&db).is_err());
     assert_eq!(
         queue(&server)?,
@@ -459,7 +520,7 @@ fn verification_caches_its_last_result_and_explicit_recheck_detects_tampering() 
         500
     );
     assert_eq!(
-        proposals::get(db.conn(), "acme", &id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
@@ -504,7 +565,7 @@ fn verification_failure_stays_visible_when_tampered_limits_prevent_queue_reads()
     let db = fixture.ledger.db()?;
     // Bypass the audited configuration API only in this temporary fixture,
     // leaving a live limit that disagrees with its immutable audit history.
-    let affected = db.conn().execute(
+    let affected = fixture.ledger.fixture_sql()?.execute(
         "UPDATE agent_spend_limits SET max_post = 9999
          WHERE agent_uri = ?1 AND company_slug = 'acme' AND currency = 'USD'",
         [fixture.proposer["agent_uri"]
@@ -531,7 +592,7 @@ fn verification_failure_stays_visible_when_tampered_limits_prevent_queue_reads()
     assert!(failed.contains("Re-run verification"));
     assert!(!failed.contains("Intact: hash chain"));
     assert_eq!(
-        proposals::get(db.conn(), "acme", &id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
@@ -546,15 +607,15 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
     server.pair()?;
     let html = queue(&server)?;
     let db = fixture.ledger.db()?;
-    let human_jti: String = db.conn().query_row(
+    let human_jti: String = db.read().query_row(
         "SELECT t.jti FROM agent_tokens t JOIN audit_log a ON a.entity_id = t.jti
-         WHERE a.action = 'token_issue' AND a.actor = 'desktop-local-human'",
+         WHERE a.action = 'token_issue' AND a.actor = 'desktop-owner'",
         [],
         |row| row.get(0),
     )?;
-    let owner = Actor::new("fixture-owner")
-        .with_identity(identity::verify(db.conn(), token(&fixture.approver)?)?);
-    identity::revoke(db.conn(), &owner, &human_jti)?;
+    let owner = Actor::new("fixture-owner".parse()?)
+        .with_identity(identity::verify(db.read(), token(&fixture.approver)?)?);
+    Granted::<Admin>::with_db(&db, &owner, |grant| identity::revoke(grant, &human_jti))?;
     assert_eq!(
         decision(&server, &id, "approve", csrf(&html)?)
             .send()?
@@ -562,7 +623,7 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
         403
     );
     assert_eq!(
-        proposals::get(db.conn(), "acme", &id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
@@ -591,32 +652,33 @@ fn generated_proposal_link_opens_the_exact_pending_review() -> TestResult {
 }
 
 fn assert_rejected_insert_is_atomic(
+    ledger: &Ledger,
     db: &Db,
     server: &Server,
     id: &str,
     csrf_token: &str,
 ) -> TestResult {
     let before: i64 = db
-        .conn()
+        .read()
         .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
-    db.conn().execute_batch("CREATE TRIGGER fixture_reject_post BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'fixture posting failure'); END;")?;
+    let fixture_db = ledger.fixture_sql()?;
+    fixture_db.execute_batch("CREATE TRIGGER fixture_reject_post BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'fixture posting failure'); END;")?;
     assert_eq!(
         decision(server, id, "approve", csrf_token).send()?.status(),
         500
     );
     assert_eq!(transaction_count(db)?, 0);
     assert_eq!(
-        proposals::get(db.conn(), "acme", id)?.state,
+        proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
     let after: i64 = db
-        .conn()
+        .read()
         .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
     assert_eq!(
         before, after,
         "failed posting must not leave a resolution audit"
     );
-    db.conn()
-        .execute_batch("DROP TRIGGER fixture_reject_post;")?;
+    fixture_db.execute_batch("DROP TRIGGER fixture_reject_post;")?;
     Ok(())
 }

@@ -6,8 +6,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use beankeeper::types::Sha256Hex;
 use beankeeper_cli::{
     capability::Capability,
-    db::{Actor, audit::setup::Generation},
-    identity::{self, IssueRequest, IssuedCredential},
+    db::audit::setup::Generation,
+    identity::{self, Admin, Granted, IssueRequest, IssuedCredential},
 };
 use common::{Ledger, Server, TestResult, rpc, token};
 use ed25519_dalek::SigningKey;
@@ -218,15 +218,20 @@ fn issue(ledger: &Ledger, name: &str, capabilities: &[Capability]) -> TestResult
         .iter()
         .map(|capability| capability.path().to_owned())
         .collect::<Vec<_>>();
-    Ok(identity::issue_credential(
-        ledger.db()?.conn(),
-        &Actor::new("statement-fixture"),
-        &IssueRequest {
-            name,
-            capabilities: &capabilities,
-            ttl: Duration::from_secs(600),
-            public_key: None,
-            generate_key: true,
+    Ok(Granted::<Admin>::with_db(
+        &ledger.db()?,
+        ledger.owner(),
+        |grant| {
+            identity::issue_credential(
+                grant,
+                &IssueRequest {
+                    name,
+                    capabilities: &capabilities,
+                    ttl: Duration::from_secs(600),
+                    public_key: None,
+                    generate_key: true,
+                },
+            )
         },
     )?)
 }

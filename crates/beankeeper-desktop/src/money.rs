@@ -1,15 +1,6 @@
 //! Exact, locale-independent monetary presentation for browser views.
 
-use beankeeper::types::{Amount, Currency, Money};
-
-/// Format ledger minor units without passing through floating point.
-pub(crate) fn minor(value: impl Into<i128>, code: &str) -> String {
-    let value = value.into();
-    Currency::from_code(code).map_or_else(
-        |_| format!("{value} {code} minor units (unknown currency)"),
-        |currency| ledger(Money::new(Amount::new(value), currency)),
-    )
-}
+use beankeeper::types::{Currency, Money};
 
 /// Format already validated ledger money without parsing its currency or amount.
 pub(crate) fn ledger(money: Money) -> String {
@@ -61,45 +52,50 @@ mod tests {
 
     #[test]
     fn currencies_use_exact_scale_sign_and_unambiguous_symbols() {
-        for (code, value, expected) in [
-            ("USD", 5_562_000, "$55,620.00"),
-            ("USD", 4_032_470, "$40,324.70"),
-            ("USD", -5, "-$0.05"),
-            ("USD", 0, "$0.00"),
-            ("JPY", 123_456, "¥123,456"),
-            ("BHD", -1234, "-BHD 1.234"),
-            ("KWD", 1, "KWD 0.001"),
-            ("EUR", 123_456, "€1,234.56"),
-            ("GBP", 123_456, "£1,234.56"),
-            ("CHF", 123_456, "CHF 1,234.56"),
-            ("CAD", 123_456, "CA$1,234.56"),
-            ("AUD", 123_456, "A$1,234.56"),
-            ("MXN", 123_456, "MX$1,234.56"),
+        for (currency, value, expected) in [
+            (Currency::USD, 5_562_000, "$55,620.00"),
+            (Currency::USD, 4_032_470, "$40,324.70"),
+            (Currency::USD, -5, "-$0.05"),
+            (Currency::USD, 0, "$0.00"),
+            (Currency::JPY, 123_456, "¥123,456"),
+            (Currency::BHD, -1234, "-BHD 1.234"),
+            (Currency::KWD, 1, "KWD 0.001"),
+            (Currency::EUR, 123_456, "€1,234.56"),
+            (Currency::GBP, 123_456, "£1,234.56"),
+            (Currency::CHF, 123_456, "CHF 1,234.56"),
+            (Currency::CAD, 123_456, "CA$1,234.56"),
+            (Currency::AUD, 123_456, "A$1,234.56"),
+            (Currency::MXN, 123_456, "MX$1,234.56"),
         ] {
-            assert_eq!(minor(value, code), expected);
+            assert_eq!(ledger(Money::from_minor(value, currency)), expected);
         }
-        assert_eq!(minor(i64::MIN, "USD"), "-$92,233,720,368,547,758.08");
-        assert_eq!(minor(i64::MAX, "BHD"), "BHD 9,223,372,036,854,775.807");
+        assert_eq!(
+            ledger(Money::from_minor(i64::MIN.into(), Currency::USD)),
+            "-$92,233,720,368,547,758.08"
+        );
+        assert_eq!(
+            ledger(Money::from_minor(i64::MAX.into(), Currency::BHD)),
+            "BHD 9,223,372,036,854,775.807"
+        );
     }
 
     #[test]
     fn currencies_without_symbol_mappings_use_code_and_exact_major_units() {
-        for (code, value, expected) in [
-            ("CHF", 123_456, "CHF 1,234.56"),
-            ("CHF", -5, "-CHF 0.05"),
-            ("BHD", -1_234, "-BHD 1.234"),
-            ("KWD", 1, "KWD 0.001"),
-            ("KWD", 0, "KWD 0.000"),
+        for (currency, value, expected) in [
+            (Currency::CHF, 123_456, "CHF 1,234.56"),
+            (Currency::CHF, -5, "-CHF 0.05"),
+            (Currency::BHD, -1_234, "-BHD 1.234"),
+            (Currency::KWD, 1, "KWD 0.001"),
+            (Currency::KWD, 0, "KWD 0.000"),
         ] {
-            assert_eq!(minor(value, code), expected);
+            assert_eq!(ledger(Money::from_minor(value, currency)), expected);
         }
     }
 
     #[test]
-    fn unknown_currency_keeps_minor_units_and_large_amounts_keep_exact_digits() {
-        assert_eq!(minor(123, "XYZ"), "123 XYZ minor units (unknown currency)");
+    fn large_amounts_keep_exact_digits() {
         assert_eq!(
-            minor(900_719_925_474_099_301_i64, "USD"),
+            ledger(Money::from_minor(900_719_925_474_099_301, Currency::USD)),
             "$9,007,199,254,740,993.01"
         );
     }

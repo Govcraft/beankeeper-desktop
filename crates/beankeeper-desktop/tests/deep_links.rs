@@ -1,5 +1,9 @@
-mod common;
+pub mod common;
 
+use beankeeper::types::AccountType;
+use beankeeper::types::Currency;
+use beankeeper::types::DebitOrCredit;
+use beankeeper_cli::identity::{Admin, Granted, Post};
 use common::{Ledger, Server, TestResult, clean_command, rpc, token};
 use serde_json::{Value, json};
 
@@ -19,28 +23,30 @@ fn link(server: &Server, bearer: &str, view: &str, state: Value) -> TestResult<V
 fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> TestResult {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    beankeeper_cli::db::create_account(
-        db.conn(),
-        &beankeeper_cli::db::Actor::new("owner"),
-        &beankeeper_cli::db::CreateAccountParams {
-            company_slug: "acme",
-            code: "1000",
-            name: "Cash",
-            account_type: "asset",
-            default_tax_category: None,
-        },
-    )?;
-    beankeeper_cli::db::create_account(
-        db.conn(),
-        &beankeeper_cli::db::Actor::new("owner"),
-        &beankeeper_cli::db::CreateAccountParams {
-            company_slug: "acme",
-            code: "1100",
-            name: "Clearing reserve",
-            account_type: "asset",
-            default_tax_category: None,
-        },
-    )?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        beankeeper_cli::db::create_account(
+            grant,
+            &beankeeper_cli::db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "1000",
+                name: "Cash",
+                account_type: AccountType::Asset,
+                default_tax_category: None,
+            },
+        )
+    })?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        beankeeper_cli::db::create_account(
+            grant,
+            &beankeeper_cli::db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "1100",
+                name: "Clearing reserve",
+                account_type: AccountType::Asset,
+                default_tax_category: None,
+            },
+        )
+    })?;
     drop(db);
     let reader = token(&ledger.reader)?;
     let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
@@ -105,64 +111,71 @@ fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> T
 #[test]
 fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     let ledger = Ledger::new()?;
+    ledger.enable_browser_review()?;
     let db = ledger.db()?;
-    beankeeper_cli::db::create_account(
-        db.conn(),
-        &beankeeper_cli::db::Actor::new("owner"),
-        &beankeeper_cli::db::CreateAccountParams {
-            company_slug: "acme",
-            code: "1000",
-            name: "Cash",
-            account_type: "asset",
-            default_tax_category: None,
-        },
-    )?;
-    beankeeper_cli::db::create_account(
-        db.conn(),
-        &beankeeper_cli::db::Actor::new("owner"),
-        &beankeeper_cli::db::CreateAccountParams {
-            company_slug: "acme",
-            code: "5000",
-            name: "Dining",
-            account_type: "expense",
-            default_tax_category: None,
-        },
-    )?;
-    let actor = beankeeper_cli::db::Actor::new("owner").with_identity(
-        beankeeper_cli::identity::verify(db.conn(), token(&ledger.writer)?)?,
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        beankeeper_cli::db::create_account(
+            grant,
+            &beankeeper_cli::db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "1000",
+                name: "Cash",
+                account_type: AccountType::Asset,
+                default_tax_category: None,
+            },
+        )
+    })?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        beankeeper_cli::db::create_account(
+            grant,
+            &beankeeper_cli::db::CreateAccountParams {
+                company_slug: &"acme".parse()?,
+                code: "5000",
+                name: "Dining",
+                account_type: AccountType::Expense,
+                default_tax_category: None,
+            },
+        )
+    })?;
+    let actor = beankeeper_cli::db::Actor::new("owner".parse()?).with_identity(
+        beankeeper_cli::identity::verify(db.read(), token(&ledger.writer)?)?,
     );
     let entries = [
         beankeeper_cli::db::PostEntryParams {
             account_code: "5000".into(),
-            direction: "debit".into(),
-            amount: 2500,
+            direction: DebitOrCredit::Debit,
+            amount: 2500.try_into()?,
             memo: None,
             tax_category: Some("sched-c:24b".into()),
         },
         beankeeper_cli::db::PostEntryParams {
             account_code: "1000".into(),
-            direction: "credit".into(),
-            amount: 2500,
+            direction: DebitOrCredit::Credit,
+            amount: 2500.try_into()?,
             memo: None,
             tax_category: None,
         },
     ];
     let beankeeper_cli::db::PostResult::Created(transaction_id) =
-        beankeeper_cli::db::post_transaction(
-            db.conn(),
-            &beankeeper_cli::db::PostTransactionParams {
-                company_slug: "acme",
-                description: "Dining",
-                metadata: Some("{\"payee\":\"Café & Tea / 100%\"}"),
-                currency: "USD",
-                date: "2026-10-20",
-                entries: &entries,
-                correlate: None,
-                reference: None,
-                on_conflict: beankeeper_cli::db::ConflictStrategy::Error,
-                actor: &actor,
-            },
-        )?
+        Granted::<Post>::with_db(&db, &actor, |grant| {
+            beankeeper_cli::db::post_transaction(
+                grant,
+                &beankeeper_cli::db::PostTransactionParams {
+                    company_slug: &"acme".parse()?,
+                    description: "Dining",
+                    metadata: Some("{\"payee\":\"Café & Tea / 100%\"}"),
+                    currency: Currency::USD,
+                    date: "2026-10-20".parse().map_err(|error: chrono::ParseError| {
+                        beankeeper_cli::error::CliError::Validation(error.to_string())
+                    })?,
+                    entries: &entries,
+                    correlate: None,
+                    reference: None,
+                    on_conflict: beankeeper_cli::db::ConflictStrategy::Error,
+                    actor: &actor,
+                },
+            )
+        })?
     else {
         return Err("transaction was not created".into());
     };
@@ -456,7 +469,11 @@ fn assert_link_cli_parity(server: &Server, reader: &str) -> TestResult {
     Ok(())
 }
 
-fn assert_view_links_resolve(server: &Server, reader: &str, transaction_id: i64) -> TestResult {
+fn assert_view_links_resolve(
+    server: &Server,
+    reader: &str,
+    transaction_id: beankeeper_cli::db::ids::TransactionId,
+) -> TestResult {
     for (view, state, expected_status) in [
         ("dashboard", json!({"company":"acme","currency":"USD"}), 200),
         (

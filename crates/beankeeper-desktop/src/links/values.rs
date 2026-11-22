@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr};
 use beankeeper::types::{
     AccountCode as LedgerAccountCode, Amount, ClearanceStatus, Currency as LedgerCurrency, Money,
 };
-use beankeeper_cli::db::BudgetMonths;
+use beankeeper_cli::db::{BudgetMonths, ids::TransactionId as LedgerTransactionId};
 use chrono::{Datelike, Month, NaiveDate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -285,20 +285,25 @@ impl fmt::Display for AccountSelection {
 /// A positive upstream SQLite transaction ID, retaining existing link addresses.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "i64", into = "i64")]
-pub(crate) struct TransactionId(i64);
+pub(crate) struct TransactionId(LedgerTransactionId);
 
 impl TryFrom<i64> for TransactionId {
     type Error = LinkError;
 
     fn try_from(value: i64) -> Result<Self, Self::Error> {
-        if value <= 0 {
-            return Err(LinkError("transaction requires a positive transaction_id."));
-        }
-        Ok(Self(value))
+        LedgerTransactionId::try_from(value)
+            .map(Self)
+            .map_err(|_| LinkError("transaction requires a positive transaction_id."))
     }
 }
 
 impl From<TransactionId> for i64 {
+    fn from(value: TransactionId) -> Self {
+        value.0.get()
+    }
+}
+
+impl From<TransactionId> for LedgerTransactionId {
     fn from(value: TransactionId) -> Self {
         value.0
     }

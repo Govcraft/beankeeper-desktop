@@ -7,7 +7,7 @@ use beankeeper_cli::{
         report_periods::PeriodArg,
         report_trend::{TrendMetric, TrendReport, TrendRequest, compute_trend},
     },
-    db::Db,
+    db::{Db, companies::CompanySlug},
 };
 use serde::Serialize;
 
@@ -28,14 +28,18 @@ pub(super) enum FlowReport {
 }
 
 impl FlowReport {
-    pub(super) fn cash(db: &Db, company: &str, filters: &Filters) -> Result<Self, ViewError> {
+    pub(super) fn cash(
+        db: &Db,
+        company: &CompanySlug,
+        filters: &Filters,
+    ) -> Result<Self, ViewError> {
         let dates = report_dates(filters)?;
         let currency = resolve_currency(db, company, filters)?;
         let accounts = filters
             .cash_account
             .as_ref()
             .map_or_else(Vec::new, AccountSelection::ledger_codes);
-        compute_cash_flow(db, company, dates, currency, &accounts)
+        compute_cash_flow(db, company.as_str(), dates, currency, &accounts)
             .map(Box::new)
             .map(Self::Cash)
             .map_err(report_error)
@@ -43,7 +47,7 @@ impl FlowReport {
 
     pub(super) fn trend(
         db: &Db,
-        company: &str,
+        company: &CompanySlug,
         filters: &Filters,
         metric: TrendMetric,
         period: PeriodArg,
@@ -52,7 +56,7 @@ impl FlowReport {
         let currency = resolve_currency(db, company, filters)?;
         compute_trend(
             db,
-            company,
+            company.as_str(),
             TrendRequest {
                 dates,
                 currency,

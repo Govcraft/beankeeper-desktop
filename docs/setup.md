@@ -101,6 +101,9 @@ bk --db /path/books.db --passphrase-file /private/recovered-passphrase setup \
 Setup checks that this passphrase decrypts the ledger before updating the store.
 Keep an offline backup of the separate owner-token file as well; the passphrase
 alone does not replace a lost or expired bearer credential under enforcement.
+On enforced ledgers, Desktop uses a live `ledger/admin` credential in the
+private owner-token file to enable browser proposal approval. After restoring
+the owner credential beside its ledger, restart Desktop and pair again.
 If both the keychain and recorded passphrase are lost, the ledger cannot be
 recovered. There is no bypass or backdoor.
 

@@ -7,7 +7,10 @@ use beankeeper_cli::{
         report::DateRange, report_currency::resolve_report_currency, report_periods::PeriodArg,
         report_reconciliation::ReconciliationReport, report_trend::TrendMetric,
     },
-    db::{self, BudgetVarianceReport, Db},
+    db::{
+        self, BudgetVarianceReport, Db,
+        companies::{Company, CompanySlug},
+    },
     error::CliError,
     output::statements::{BalanceSheet, IncomeStatement},
 };
@@ -47,7 +50,7 @@ enum ReportData {
 }
 
 impl ReportData {
-    fn read(db: &Db, company: &str, query: &ReportFilters) -> Result<Self, ViewError> {
+    fn read(db: &Db, company: &CompanySlug, query: &ReportFilters) -> Result<Self, ViewError> {
         let kind = query
             .kind
             .ok_or(ViewError::Invalid("Choose a report first."))?;
@@ -102,15 +105,16 @@ impl ReportData {
         }
     }
 
-    fn render(&self, html: &mut Markup) {
+    fn render(&self, html: &mut Markup) -> Result<(), ViewError> {
         match self {
             Self::Tax(data) => data.render(html),
             Self::Income(data) => statements::render_income(data, html),
             Self::Balance(data) => statements::render_balance(data, html),
             Self::Budget(data) => statements::render_budget(data, html),
             Self::Flow(data) => data.render(html),
-            Self::Reconciliation(data) => reconciliation::render(data, html),
+            Self::Reconciliation(data) => reconciliation::render(data, html)?,
         }
+        Ok(())
     }
 
     fn csv(&self) -> Result<String, ViewError> {
@@ -121,9 +125,13 @@ impl ReportData {
     }
 }
 
-fn resolve_currency(db: &Db, company: &str, filters: &Filters) -> Result<Currency, ViewError> {
+fn resolve_currency(
+    db: &Db,
+    company: &CompanySlug,
+    filters: &Filters,
+) -> Result<Currency, ViewError> {
     filters.currency.as_ref().map_or_else(
-        || resolve_report_currency(db.conn(), company, None).map_err(report_error),
+        || resolve_report_currency(db.read(), company.as_str(), None).map_err(report_error),
         |currency| Ok(currency.ledger()),
     )
 }
@@ -239,13 +247,25 @@ fn option_name<T: ValueEnum>(option: &T) -> Option<String> {
 }
 
 impl ReportQuery {
-    pub(crate) fn parse(self, path: &str) -> Result<ReportFilters, ViewError> {
+    #[cfg(test)]
+    fn parse(self, path: &str) -> Result<ReportFilters, ViewError> {
+        self.parse_with_company(path, None)
+    }
+
+    pub(crate) fn parse_with_company(
+        self,
+        path: &str,
+        configured_company: Option<CompanySlug>,
+    ) -> Result<ReportFilters, ViewError> {
         let kind = if path == "/reports" {
             None
         } else {
             Some(Kind::parse(path).ok_or(ViewError::NotFound)?)
         };
-        let filters = self.filters.parse()?;
+        let filters = self
+            .filters
+            .parse()?
+            .with_configured_company(configured_company);
         if filters.category.is_some() || filters.payee.is_some() {
             return Err(ViewError::Invalid(
                 "Category and payee filters require the transactions view.",
@@ -371,12 +391,12 @@ pub(crate) fn render(
     query: &ReportFilters,
 ) -> Result<ReportResponse, ViewError> {
     let kind = query.kind;
-    let companies = db::list_companies(db.conn())?;
+    let companies = db::list_companies(db.read())?;
     let company = query
         .filters
         .company
-        .as_deref()
-        .or_else(|| companies.first().map(|c| c.slug.as_str()));
+        .as_ref()
+        .or_else(|| companies.first().map(|c| &c.slug));
     let title = kind.map_or("Reports", Kind::title);
     let nav = if kind == Some(Kind::Reconciliation) {
         "/reconciliation"
@@ -396,13 +416,13 @@ pub(crate) fn render(
             "<p class=\"empty\">No companies yet. Ask your agent to initialize your books.</p>"
         )));
     };
-    if !companies.iter().any(|c| c.slug == company) {
+    if !companies.iter().any(|c| &c.slug == company) {
         return Err(ViewError::NotFound);
     }
     let mut html = Markup::default();
     let Some(kind) = kind else {
         html = form(db, &companies, company, path, None, query)?;
-        report_catalog(company, &mut html);
+        report_catalog(company.as_str(), &mut html);
         return Ok(page(html));
     };
     append_report_notices(&mut html, kind);
@@ -449,16 +469,16 @@ pub(crate) fn render(
     write_markup!(
         html,
         "<p><a download href=\"{}\">Download JSON</a>",
-        query.url(path, company, Format::Json)
+        query.url(path, company.as_str(), Format::Json)
     );
     if kind.tax() && comparison.is_none() {
         write_markup!(
             html,
             " · <a download href=\"{}\">Download CSV</a>",
-            query.url(path, company, Format::Csv)
+            query.url(path, company.as_str(), Format::Csv)
         );
     }
-    render_results(kind, &data, comparison.as_ref(), &mut html);
+    render_results(kind, &data, comparison.as_ref(), &mut html)?;
     Ok(page(html))
 }
 
@@ -545,12 +565,12 @@ fn render_results(
     data: &ReportData,
     comparison: Option<&(ReportFilters, ReportData)>,
     html: &mut Markup,
-) {
+) -> Result<(), ViewError> {
     write_markup!(
         html,
         "</p><section id=\"report-results\" class=\"report-results\"><h2>Report results</h2>"
     );
-    data.render(html);
+    data.render(html)?;
     write_markup!(html, "</section>");
     if let Some((q, data)) = comparison {
         write_markup!(
@@ -581,9 +601,10 @@ fn render_results(
                 )
             }
         );
-        data.render(html);
+        data.render(html)?;
         write_markup!(html, "</section>");
     }
+    Ok(())
 }
 
 fn report_error(error: CliError) -> ViewError {
@@ -619,7 +640,7 @@ fn select<T: ValueEnum>(html: &mut Markup, name: &str, label: &str, value: &T) {
 fn form(
     db: &Db,
     companies: &[db::CompanyRow],
-    company: &str,
+    company: &CompanySlug,
     path: &str,
     kind: Option<Kind>,
     q: &ReportFilters,
@@ -633,7 +654,7 @@ fn form(
             html,
             "<option value=\"{}\"{}>{} ({})</option>",
             &c.slug,
-            Attribute::Selected(c.slug == company),
+            Attribute::Selected(&c.slug == company),
             &c.name,
             &c.slug
         );
@@ -715,7 +736,7 @@ fn form(
 
 fn reconciliation_fields(
     db: &Db,
-    company: &str,
+    company: &CompanySlug,
     q: &ReportFilters,
     html: &mut Markup,
 ) -> Result<(), ViewError> {
@@ -724,9 +745,8 @@ fn reconciliation_fields(
         "<label>Account<select name=\"account\"><option value=\"\">Choose account</option>"
     );
     for account in db::list_accounts(
-        db.conn(),
+        &Company::bind(db.read(), company.clone())?,
         &db::ListAccountParams {
-            company_slug: company,
             type_filter: None,
             name_filter: None,
         },
@@ -784,7 +804,9 @@ mod tests {
 
     #[test]
     fn empty_books_and_read_failures_have_explicit_states() -> TestResult {
-        let db = Db::open_in_memory()?;
+        let fixture = tempfile::tempdir()?;
+        let path = fixture.path().join("books.db");
+        let db = Db::open(&path, None)?;
         for path in ["/reports", "/reports/schedule-c", "/reconciliation"] {
             let ReportResponse::Page(page) =
                 render(&db, path, &ReportQuery::default().parse(path)?)?
@@ -793,7 +815,7 @@ mod tests {
             };
             assert!(page.content.as_str().contains("No companies yet"));
         }
-        db.conn().execute("DROP TABLE companies", [])?;
+        rusqlite::Connection::open(path)?.execute("DROP TABLE companies", [])?;
         let error = render(&db, "/reports", &ReportQuery::default().parse("/reports")?)
             .err()
             .ok_or("expected read failure")?;
@@ -854,7 +876,7 @@ mod tests {
     fn tax_links_encode_and_preserve_statement_and_report_filters() -> TestResult {
         let q = ReportQuery {
             filters: ViewQuery {
-                company: Some("a&b".into()),
+                company: Some("a-b".into()),
                 from: Some("2026-01-01".into()),
                 to: Some("2026-03-31".into()),
                 currency: Some("USD".into()),
@@ -870,12 +892,12 @@ mod tests {
         };
         let url = q
             .parse("/reports/1099")?
-            .url("/reports/1099", "a&b", Format::Csv);
+            .url("/reports/1099", "a-b", Format::Csv);
         assert!(url.ends_with("&format=csv"));
         let link = markup!("<a href=\"{}\">Download</a>", url);
         let link = link.as_str();
         for expected in [
-            "company=a%26b",
+            "company=a-b",
             "&amp;from=2026-01-01",
             "&amp;to=2026-03-31",
             "&amp;currency=USD",
