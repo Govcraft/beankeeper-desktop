@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Config, Paths, ServiceError, private_write, remove_if_exists};
+use super::{Config, Paths, ServiceError, private_write, remove_if_exists, session::Session};
 use crate::private_file::PrivateFile;
 
 const UNIT: &str = "beankeeper-desktop.service";
@@ -50,17 +50,14 @@ pub(super) fn install(paths: &Paths, config: &Config) -> Result<(), ServiceError
     Ok(())
 }
 
-pub(super) fn start(paths: &Paths) -> Result<(), ServiceError> {
+pub(super) fn start(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
     if cfg!(target_os = "linux") {
-        checked("systemctl", &["--user", "unmask", UNIT])?;
-        checked(
-            "systemctl",
-            &["--user", "link", "--force", text(&linux_artifact(paths))?],
-        )?;
-        checked("systemctl", &["--user", "daemon-reload"])?;
-        checked("systemctl", &["--user", "enable", "--now", UNIT])?;
+        systemctl(session, &["unmask", UNIT])?;
+        systemctl(session, &["link", "--force", text(&linux_artifact(paths))?])?;
+        systemctl(session, &["daemon-reload"])?;
+        systemctl(session, &["enable", "--now", UNIT])?;
         // A failed unit may still be inside its restart delay.
-        checked("systemctl", &["--user", "start", UNIT])
+        systemctl(session, &["start", UNIT])
     } else if cfg!(target_os = "macos") {
         let domain = domain()?;
         checked("launchctl", &["enable", &format!("{domain}/{LABEL}")])?;
@@ -78,20 +75,20 @@ pub(super) fn start(paths: &Paths) -> Result<(), ServiceError> {
     }
 }
 
-pub(super) fn stop(paths: &Paths) -> Result<(), ServiceError> {
+pub(super) fn stop(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
     if cfg!(target_os = "linux") {
         // Inspect the policy before stopping. Mask replaces the owned linked unit,
         // preventing both crash restarts and activation on the next login.
-        let _policy = output(
-            "systemctl",
-            &["--user", "show", UNIT, "--property=Restart", "--value"],
+        let _policy = command_output(
+            systemctl_command(session),
+            &["show", UNIT, "--property=Restart", "--value"],
         )?;
         let masked = std::fs::read_link(&paths.definition)
             .is_ok_and(|target| target == Path::new("/dev/null"));
         if paths.definition.try_exists()? && !masked {
-            checked("systemctl", &["--user", "disable", "--now", UNIT])?;
+            systemctl(session, &["disable", "--now", UNIT])?;
         }
-        checked("systemctl", &["--user", "mask", "--now", "--force", UNIT])
+        systemctl(session, &["mask", "--now", "--force", UNIT])
     } else if cfg!(target_os = "macos") {
         let domain = domain()?;
         let target = format!("{domain}/{LABEL}");
@@ -106,12 +103,12 @@ pub(super) fn stop(paths: &Paths) -> Result<(), ServiceError> {
     }
 }
 
-pub(super) fn uninstall(paths: &Paths) -> Result<(), ServiceError> {
-    stop(paths)?;
+pub(super) fn uninstall(paths: &Paths, session: &Session) -> Result<(), ServiceError> {
+    stop(paths, session)?;
     if cfg!(target_os = "linux") {
-        checked("systemctl", &["--user", "unmask", UNIT])?;
+        systemctl(session, &["unmask", UNIT])?;
         remove_if_exists(&linux_artifact(paths))?;
-        checked("systemctl", &["--user", "daemon-reload"])?;
+        systemctl(session, &["daemon-reload"])?;
     } else if cfg!(target_os = "macos") {
         remove_if_exists(&paths.definition)?;
     } else {
@@ -123,18 +120,14 @@ pub(super) fn uninstall(paths: &Paths) -> Result<(), ServiceError> {
     Ok(())
 }
 
-pub(super) fn running(paths: &Paths) -> Result<bool, ServiceError> {
-    if cfg!(target_os = "linux") {
-        success("systemctl", &["--user", "is-active", "--quiet", UNIT])
-    } else if cfg!(target_os = "macos") {
-        let target = format!("{}/{LABEL}", domain()?);
-        if !success("launchctl", &["print", &target])? {
-            return Ok(false);
-        }
-        Ok(output("launchctl", &["print", &target])?.contains("state = running"))
-    } else {
-        powershell_success(paths, "running")
-    }
+fn systemctl_command(session: &Session) -> Command {
+    let mut command = manager_command("systemctl");
+    session.apply(&mut command);
+    command.arg("--user");
+    command
+}
+fn systemctl(session: &Session, args: &[&str]) -> Result<(), ServiceError> {
+    check_command(systemctl_command(session), args)
 }
 fn linux_artifact(paths: &Paths) -> std::path::PathBuf {
     paths.state.join("systemd").join(UNIT)
@@ -160,7 +153,10 @@ fn manager_command(program: &str) -> Command {
 }
 
 fn checked(program: &str, args: &[&str]) -> Result<(), ServiceError> {
-    if success(program, args)? {
+    check_command(manager_command(program), args)
+}
+fn check_command(command: Command, args: &[&str]) -> Result<(), ServiceError> {
+    if command_succeeded(command, args)? {
         Ok(())
     } else {
         Err(ServiceError::Manager(
@@ -169,7 +165,10 @@ fn checked(program: &str, args: &[&str]) -> Result<(), ServiceError> {
     }
 }
 fn success(program: &str, args: &[&str]) -> Result<bool, ServiceError> {
-    Ok(manager_command(program)
+    command_succeeded(manager_command(program), args)
+}
+fn command_succeeded(mut command: Command, args: &[&str]) -> Result<bool, ServiceError> {
+    Ok(command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -178,10 +177,10 @@ fn success(program: &str, args: &[&str]) -> Result<bool, ServiceError> {
         .success())
 }
 fn output(program: &str, args: &[&str]) -> Result<String, ServiceError> {
-    let output = manager_command(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()?;
+    command_output(manager_command(program), args)
+}
+fn command_output(mut command: Command, args: &[&str]) -> Result<String, ServiceError> {
+    let output = command.args(args).output()?;
     if !output.status.success() {
         return Err(ServiceError::Manager(
             "cannot query the OS service manager; ensure your user session is available",
@@ -350,7 +349,7 @@ fn windows_task(paths: &Paths) -> Result<String, ServiceError> {
     ))?;
     let stop = ps(text(&paths.state.join(WINDOWS_STOP_SIGNAL))?)?;
     let script = format!(
-        r#"param([ValidateSet('install','start','stop','uninstall','running')][string]$Operation)
+        r#"param([ValidateSet('install','start','stop','uninstall')][string]$Operation)
 $ErrorActionPreference = 'Stop'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -381,7 +380,6 @@ switch ($Operation) {{
         }}
     }}
     'uninstall' {{ if ($task) {{ Unregister-ScheduledTask -TaskName $name -Confirm:$false }} }}
-    'running' {{ if (-not $task -or $task.State -ne 'Running') {{ exit 1 }} }}
 }}
 "#
     );

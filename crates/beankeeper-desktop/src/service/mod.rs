@@ -3,11 +3,12 @@
 mod extension;
 mod manager;
 mod mcp;
+mod session;
 
 use std::{
     error::Error,
     fmt, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -15,15 +16,18 @@ use std::{
 
 use beankeeper_cli::cli::Cli;
 use clap::{Args, Subcommand};
+use reqwest::{Url, blocking::Client, redirect::Policy};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    private_file::{BEARER_FILE_LIMIT, PrivateFile},
+    bridge,
+    private_file::PrivateFile,
     setup::{self, ClientRegistration, ServiceSecretStorage, keychain},
 };
 
 pub(crate) use extension::connection as extension_connection;
+use session::Session;
 
 const DEFAULT_PORT: u16 = 8750;
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -79,6 +83,16 @@ pub enum ServiceError {
     Configuration(&'static str),
     /// An OS manager command failed. Secret-bearing output is never included.
     Manager(&'static str),
+    /// This Linux process cannot locate the owner's session bus.
+    SessionEnvUnavailable,
+    /// No managed background service is installed.
+    NotInstalled,
+    /// The advertised loopback endpoint could not be reached.
+    EndpointConnect,
+    /// The responding endpoint did not match the service descriptor.
+    EndpointIdentity,
+    /// The endpoint was reached, but opening an authenticated MCP session failed.
+    EndpointMcp(Box<crate::bridge::BridgeError>),
     /// Encrypted provisioning failed.
     Setup(Box<setup::SetupError>),
     /// Desktop hosting failed.
@@ -95,6 +109,11 @@ impl ServiceError {
             Self::Io(_) => "SERVICE_IO",
             Self::Configuration(_) => "SERVICE_CONFIGURATION",
             Self::Manager(_) => "SERVICE_MANAGER",
+            Self::SessionEnvUnavailable => "SESSION_ENV_UNAVAILABLE",
+            Self::NotInstalled => "SERVICE_NOT_INSTALLED",
+            Self::EndpointConnect => "SERVICE_ENDPOINT_UNREACHABLE",
+            Self::EndpointIdentity => "SERVICE_ENDPOINT_IDENTITY",
+            Self::EndpointMcp(error) => error.diagnostic_code(),
             Self::Setup(_) => "SERVICE_SETUP",
             Self::Desktop(_) => "SERVICE_HOST",
             Self::NotReady => "SERVICE_NOT_READY",
@@ -106,6 +125,11 @@ impl fmt::Display for ServiceError {
         match self {
             Self::Io(error) => write!(f, "service I/O failed: {error}"),
             Self::Configuration(message) | Self::Manager(message) => f.write_str(message),
+            Self::SessionEnvUnavailable => f.write_str("Cannot find your Linux session bus. Run Beankeeper as the owner from an active login session, or pass that session's XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS to your terminal or agent."),
+            Self::NotInstalled => f.write_str("Beankeeper is not installed as a background service. Run bk service install."),
+            Self::EndpointConnect => f.write_str("Cannot connect to the published Desktop endpoint. Run bk service status --json and inspect the private service log."),
+            Self::EndpointIdentity => f.write_str("The published endpoint did not identify itself as the expected Beankeeper process. Run bk service status --json and inspect the private service log."),
+            Self::EndpointMcp(error) => error.fmt(f),
             Self::Setup(error) => write!(f, "{error}"),
             Self::Desktop(error) => write!(f, "{error}"),
             Self::NotReady => f.write_str("service did not become ready; inspect the private service log and run `bk service status --json`"),
@@ -262,6 +286,9 @@ pub struct Status {
     pub service_definition: PathBuf,
     /// PID of the managed server, absent when stopped.
     pub pid: Option<u32>,
+    /// Named failure when the advertised service cannot be reached or authenticated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
     /// Plain-language status.
     pub message: String,
 }
@@ -282,83 +309,167 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         mcp_endpoint: None,
         desktop_url: None,
         pid: None,
-        books: config
-            .as_ref()
-            .map_or_else(|| paths.data.join("books.db"), |c| c.books.clone()),
+        books: config.map_or_else(|| paths.data.join("books.db"), |config| config.books),
         log: paths.log(),
         service_definition: paths.definition.clone(),
-        message: "Beankeeper is not installed as a background service. Run bk service install."
-            .into(),
+        error_code: None,
+        message: ServiceError::NotInstalled.to_string(),
     };
     if !result.installed {
         return Ok(result);
     }
-    result.message = "Beankeeper is stopped. Run bk service start.".into();
-    if !paths.runtime().try_exists()? {
-        return Ok(result);
+    match authenticated_endpoint(paths, &result.books) {
+        Ok(Some(AuthenticatedEndpoint(endpoint))) => {
+            result.running = true;
+            result.desktop_url = Some(endpoint.desktop_url().into());
+            result.mcp_endpoint = Some(endpoint.url.into());
+            result.version = Some(endpoint.version);
+            result.pid = Some(endpoint.pid);
+            result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
+        }
+        Ok(None) => result.message = "Beankeeper is stopped. Run bk service start.".into(),
+        Err(
+            error @ (ServiceError::EndpointConnect
+            | ServiceError::EndpointIdentity
+            | ServiceError::EndpointMcp(_)),
+        ) => {
+            result.error_code = Some(error.code());
+            result.message = error.to_string();
+        }
+        Err(error) => return Err(error),
     }
-    let runtime: Runtime = read_private(&paths.runtime())?;
-    if runtime.books != result.books
+    Ok(result)
+}
+
+/// An endpoint from the private descriptor whose health response matched its process.
+pub(crate) struct Endpoint {
+    url: Url,
+    token_file: PathBuf,
+    version: String,
+    pid: u32,
+}
+
+impl Endpoint {
+    pub(crate) fn url(&self) -> &Url {
+        &self.url
+    }
+
+    pub(crate) fn token_file(&self) -> &Path {
+        &self.token_file
+    }
+
+    fn desktop_url(&self) -> Url {
+        let mut url = self.url.clone();
+        url.set_path("/");
+        url
+    }
+}
+
+fn endpoint_at(paths: &Paths, books: &Path) -> Result<Option<Endpoint>, ServiceError> {
+    let runtime: Runtime = match read_private(&paths.runtime()) {
+        Ok(runtime) => runtime,
+        Err(ServiceError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if runtime.books != books
         || runtime.bind.ip() != Ipv4Addr::LOCALHOST
         || runtime.bind.port() == 0
+        || runtime.pid == 0
     {
         return Err(ServiceError::Configuration(
             "invalid service runtime descriptor",
         ));
     }
-    if !manager::running(paths)? {
-        return Ok(result);
+    let mut url = Url::parse(&crate::server::local_url(runtime.bind))
+        .map_err(|_| ServiceError::Configuration("invalid service runtime address"))?;
+    url.set_path("/health");
+    let response = Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(2))
+        .build()
+        .and_then(|client| client.get(url.clone()).send())
+        .map_err(|_| ServiceError::EndpointConnect)?;
+    let pid = response
+        .headers()
+        .get("x-beankeeper-desktop-pid")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok());
+    let version = response
+        .headers()
+        .get("x-beankeeper-desktop-version")
+        .and_then(|value| value.to_str().ok())
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
+        .ok_or(ServiceError::EndpointIdentity)?;
+    if !response.status().is_success() || pid != Some(runtime.pid) {
+        return Err(ServiceError::EndpointIdentity);
     }
-    result.message = "Beankeeper is registered but is not ready. Inspect the service log; an expired or revoked agent token needs owner renewal.".into();
-    let token_file = result.books.with_extension("agent-token");
-    let token = PrivateFile::open(&token_file)?.read_secret(BEARER_FILE_LIMIT)?;
-    if setup::running_for_ledger(runtime.bind, &token).unwrap_or(false) {
-        let client = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(2))
-            .build()
-            .map_err(crate::DesktopError::from)?;
-        let Ok(response) = client
-            .get(format!("{}health", crate::server::local_url(runtime.bind)))
-            .send()
-        else {
-            return Ok(result);
-        };
-        if response
-            .headers()
-            .get("x-beankeeper-desktop-pid")
-            .and_then(|h| h.to_str().ok())
-            != Some(runtime.pid.to_string().as_str())
-        {
-            return Ok(result);
-        }
-        let version = response
-            .headers()
-            .get("x-beankeeper-desktop-version")
-            .and_then(|h| h.to_str().ok())
-            .map(str::to_owned);
-        if version.is_none() {
-            return Ok(result);
-        }
-        result.running = true;
-        result.version = version;
-        result.pid = Some(runtime.pid);
-        result.desktop_url = Some(crate::server::local_url(runtime.bind));
-        result.mcp_endpoint = Some(format!("{}mcp", crate::server::local_url(runtime.bind)));
-        result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
+    let mut body = String::new();
+    response
+        .take(64)
+        .read_to_string(&mut body)
+        .map_err(|_| ServiceError::EndpointConnect)?;
+    if body != crate::ui::HEALTH {
+        return Err(ServiceError::EndpointIdentity);
     }
-    Ok(result)
+    url.set_path("/mcp");
+    Ok(Some(Endpoint {
+        url,
+        token_file: runtime.books.with_extension("agent-token"),
+        version,
+        pid: runtime.pid,
+    }))
 }
 
-/// Resolve the managed bridge's current URL and private token path.
-///
-/// # Errors
-/// Returns a named lifecycle error when the service is stopped or unavailable.
-pub(crate) fn connection() -> Result<(String, PathBuf), ServiceError> {
-    let status = status()?;
-    let endpoint = status.mcp_endpoint.ok_or(ServiceError::NotReady)?;
-    Ok((endpoint, status.books.with_extension("agent-token")))
+/// A live bridge endpoint only needs its private descriptor and HTTP health.
+/// The OS manager is needed for lifecycle changes, including restarting a service.
+pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
+    let paths = Paths::discover()?;
+    let config = Config::load(&paths)?.ok_or(ServiceError::NotInstalled)?;
+    if !paths.definition.try_exists()? {
+        return Err(ServiceError::NotInstalled);
+    }
+    if let Some(endpoint) = endpoint_at(&paths, &config.books)? {
+        Ok(endpoint)
+    } else {
+        Session::discover()?;
+        Err(ServiceError::NotReady)
+    }
+}
+
+struct AuthenticatedEndpoint(Endpoint);
+
+fn authenticated_endpoint(
+    paths: &Paths,
+    books: &Path,
+) -> Result<Option<AuthenticatedEndpoint>, ServiceError> {
+    endpoint_at(paths, books)?
+        .map(|endpoint| {
+            bridge::probe_service(&endpoint, bridge::Probe::Authentication)
+                .map_err(|error| ServiceError::EndpointMcp(Box::new(error)))?;
+            Ok(AuthenticatedEndpoint(endpoint))
+        })
+        .transpose()
+}
+
+/// Check session availability for registration when a managed service exists.
+/// Healthy endpoints work without a session bus in the client process.
+pub(crate) fn registration_session() -> Result<(), ServiceError> {
+    let Err(error) = Session::discover() else {
+        return Ok(());
+    };
+    let paths = Paths::discover()?;
+    if let Some(config) = Config::load(&paths)?
+        && paths.definition.try_exists()?
+        && matches!(
+            endpoint_at(&paths, &config.books),
+            Ok(None) | Err(ServiceError::EndpointConnect)
+        )
+    {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Dispatch a service command. Global ledger flags are used only for first install.
@@ -423,20 +534,20 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
             }
         }
         ServiceCommand::Start => {
-            require_installed(previous.as_ref())?;
-            manager::start(&paths)?;
-            wait_ready(&paths)?;
+            let config = require_installed(previous.as_ref())?;
+            manager::start(&paths, &Session::discover()?)?;
+            wait_ready(&paths, &config.books)?;
             println!("Beankeeper started.");
         }
         ServiceCommand::Stop => {
             if previous.is_some() {
-                manager::stop(&paths)?;
+                manager::stop(&paths, &Session::discover()?)?;
             }
             println!("Beankeeper stopped; login startup is disabled until bk service start.");
         }
         ServiceCommand::Uninstall => {
             if previous.is_some() {
-                manager::uninstall(&paths)?;
+                manager::uninstall(&paths, &Session::discover()?)?;
                 remove_if_exists(&paths.config())?;
                 remove_if_exists(&paths.runtime())?;
             }
@@ -473,6 +584,7 @@ fn install(
         InstallMode::Extension => (false, ServiceSecretStorage::NativeRequired),
     };
     manager::check_user()?;
+    let session = Session::discover()?;
     if let Some(previous) = previous {
         if explicit_db && fs::canonicalize(&cli.db)? != previous.books {
             return Err(ServiceError::Configuration(
@@ -480,7 +592,7 @@ fn install(
             ));
         }
         cli.db.clone_from(&previous.books);
-        manager::stop(paths)?;
+        manager::stop(paths, &session)?;
     } else {
         if paths.definition.symlink_metadata().is_ok() {
             return Err(ServiceError::Configuration(
@@ -521,8 +633,8 @@ fn install(
     };
     private_json(&paths.config(), &config)?;
     manager::install(paths, &config)?;
-    manager::start(paths)?;
-    wait_ready(paths)?;
+    manager::start(paths, &session)?;
+    wait_ready(paths, &config.books)?;
     println!(
         "Beankeeper is running in the background. Recovery kit: {}. Keep an offline copy under your own control.",
         config.books.with_extension("recovery.txt").display()
@@ -530,20 +642,26 @@ fn install(
     Ok(())
 }
 
-fn require_installed(config: Option<&Config>) -> Result<(), ServiceError> {
-    config.map(|_| ()).ok_or(ServiceError::Configuration(
+fn require_installed(config: Option<&Config>) -> Result<&Config, ServiceError> {
+    config.ok_or(ServiceError::Configuration(
         "service is not installed; run bk service install",
     ))
 }
-fn wait_ready(paths: &Paths) -> Result<(), ServiceError> {
+fn wait_ready(paths: &Paths, books: &Path) -> Result<(), ServiceError> {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last_error = ServiceError::NotReady;
     while Instant::now() < deadline {
-        if status_at(paths)?.running {
-            return Ok(());
+        match authenticated_endpoint(paths, books) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error @ (ServiceError::EndpointConnect | ServiceError::EndpointIdentity)) => {
+                last_error = error;
+            }
+            Err(error) => return Err(error),
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err(ServiceError::NotReady)
+    Err(last_error)
 }
 fn host(paths: &Paths) -> Result<(), ServiceError> {
     let config = Config::load(paths)?.ok_or(ServiceError::Configuration(

@@ -6,16 +6,18 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Config, Paths, ServiceError, keychain, lock};
+use super::{Config, Endpoint, Paths, ServiceError, Session, keychain, lock};
 
-pub(crate) fn connection() -> Result<(String, PathBuf), ServiceError> {
+pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
     let paths = Paths::discover()?;
     if Config::load(&paths)?.is_none() {
         paths.prepare()?;
         let _lock = lock(&paths.state.join("extension-install.lock"))?;
         if Config::load(&paths)?.is_none() {
+            let session = Session::discover()?;
             let executable = install_executable(&std::env::current_exe()?, &paths)?;
             let mut installer = Command::new(executable);
+            session.apply(&mut installer);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;

@@ -22,9 +22,12 @@ use reqwest::{
 };
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
+use crate::{
+    private_file::{BEARER_FILE_LIMIT, PrivateFile},
+    service::{self, Endpoint, ServiceError},
+};
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask the owner for decisions before changing the books. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
@@ -68,6 +71,25 @@ pub enum BridgeError {
     ToolFailed,
 }
 
+impl BridgeError {
+    pub(crate) fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Service(error) => error.code(),
+            Self::InvalidToken => "AGENT_CREDENTIAL_INVALID",
+            Self::Rejected(_) => "AGENT_MCP_REJECTED",
+            Self::ToolFailed => "AGENT_TOOL_FAILED",
+            Self::Http(_) => "AGENT_MCP_UNREACHABLE",
+            _ => "AGENT_MCP_PROTOCOL",
+        }
+    }
+}
+
+impl From<ServiceError> for BridgeError {
+    fn from(error: ServiceError) -> Self {
+        Self::Service(Box::new(error))
+    }
+}
+
 impl fmt::Display for BridgeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -76,7 +98,8 @@ impl fmt::Display for BridgeError {
             Self::InvalidToken => f.write_str("MCP bridge requires a nonempty private agent token file (Unix mode 0600); run `bk setup` to configure it"),
             Self::Io(error) => write!(f, "MCP bridge I/O failed: {error}"),
             Self::Http(error) => write!(f, "MCP bridge cannot reach Desktop; start `bk serve` first: {error}"),
-            Self::Rejected(status) => write!(f, "Desktop rejected the MCP bridge request (HTTP {status}); check the running server and agent token"),
+            Self::Rejected(status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)) => write!(f, "Desktop rejected MCP authentication (HTTP {status}); ask the owner to check or renew the agent credential"),
+            Self::Rejected(status) => write!(f, "Desktop rejected the MCP bridge request (HTTP {status}); check the running server"),
             Self::Protocol => f.write_str("MCP bridge received malformed or oversized JSON-RPC"),
             Self::ToolFailed => f.write_str("Desktop rejected the read-only MCP diagnostic. Check the agent's ledger read access."),
         }
@@ -107,18 +130,22 @@ impl From<reqwest::Error> for BridgeError {
 /// # Errors
 /// Rejects remote URLs, invalid credentials, HTTP failures, and malformed traffic.
 pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
-    let (url, token_file) = if options.service {
-        crate::service::connection().map_err(|error| BridgeError::Service(Box::new(error)))?
+    if options.service {
+        let endpoint = service::connection().map_err(|error| match error {
+            ServiceError::NotInstalled => ServiceError::NotReady,
+            error => error,
+        })?;
+        run_connected(endpoint.url().clone(), endpoint.token_file(), None)
     } else {
-        (
-            options.url.clone(),
+        run_connected(
+            local_url(&options.url)?,
             options
                 .token_file
-                .clone()
+                .as_deref()
                 .ok_or(BridgeError::InvalidToken)?,
+            None,
         )
-    };
-    run_connected(&url, &token_file, None)
+    }
 }
 
 /// Start the service when launched from an accepted extension, then bridge MCP.
@@ -126,13 +153,16 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
 /// # Errors
 /// Returns actionable setup, service discovery, credential and transport errors.
 pub fn run_extension() -> Result<(), BridgeError> {
-    let (url, token_file) = crate::service::extension_connection()
-        .map_err(|error| BridgeError::Service(Box::new(error)))?;
-    run_connected(&url, &token_file, Some(EXTENSION_INSTRUCTIONS))
+    let endpoint = service::extension_connection()?;
+    run_connected(
+        endpoint.url().clone(),
+        endpoint.token_file(),
+        Some(EXTENSION_INSTRUCTIONS),
+    )
 }
 
 fn run_connected(
-    url: &str,
+    url: Url,
     token_file: &Path,
     instructions: Option<&'static str>,
 ) -> Result<(), BridgeError> {
@@ -143,62 +173,31 @@ fn run_connected(
     result
 }
 
-/// Check a fixed read-only tool through the same protocol transport as clients.
-/// No tool result or credential is printed.
-pub(crate) fn probe_service_tool(url: &str, token_file: &Path) -> Result<(), BridgeError> {
-    use rmcp::model::CallToolResult;
-    use serde_json::json;
+/// How far to exercise the managed service, using the same transport as clients.
+#[derive(Clone, Copy)]
+pub(crate) enum Probe {
+    Authentication,
+    ReadOnlyTool,
+}
 
-    let mut transport = connected_transport(url, token_file, None, Duration::from_secs(5))?;
-    let mut requests = Vec::new();
-    for request in [
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{
-                "name":"bk agents doctor", "version":env!("CARGO_PKG_VERSION")
-            }
-        }}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "name":"company_list", "arguments":{}
-        }}),
-    ] {
-        serde_json::to_writer(&mut requests, &request).map_err(|_| BridgeError::Protocol)?;
-        requests.push(b'\n');
-    }
-    let mut replies = Vec::new();
-    let result = transport.forward(requests.as_slice(), &mut replies);
+pub(crate) fn probe_service(endpoint: &Endpoint, probe: Probe) -> Result<(), BridgeError> {
+    let mut transport = connected_transport(
+        endpoint.url().clone(),
+        endpoint.token_file(),
+        None,
+        Duration::from_secs(5),
+    )?;
+    let result = transport.probe(probe);
     transport.close();
-    result?;
-    if transport.session.is_none() || transport.protocol.is_none() {
-        return Err(BridgeError::Protocol);
-    }
-    for line in replies.lines() {
-        let reply: Value = serde_json::from_str(&line?).map_err(|_| BridgeError::Protocol)?;
-        if reply.get("id").and_then(Value::as_u64) != Some(2) {
-            continue;
-        }
-        let result = reply.get("result").ok_or(BridgeError::ToolFailed)?;
-        let result = CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)?;
-        // A list can travel as text content when the negotiated MCP version
-        // does not support array-shaped structured content.
-        return if result.is_error != Some(true)
-            && (result.structured_content.is_some() || !result.content.is_empty())
-        {
-            Ok(())
-        } else {
-            Err(BridgeError::ToolFailed)
-        };
-    }
-    Err(BridgeError::Protocol)
+    result
 }
 
 fn connected_transport(
-    url: &str,
+    url: Url,
     token_file: &Path,
     instructions: Option<&'static str>,
     timeout: Duration,
 ) -> Result<Transport, BridgeError> {
-    let url = local_url(url)?;
     let secret = PrivateFile::open(token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
@@ -274,39 +273,91 @@ impl Transport {
             {
                 return Err(BridgeError::Protocol);
             }
-            let mut request = self
-                .client
-                .post(self.url.clone())
-                .header("Accept", "application/json, text/event-stream")
-                .json(&message);
-            if let Some(session) = &self.session {
-                request = request.header("Mcp-Session-Id", session);
-            }
-            if let Some(protocol) = &self.protocol {
-                request = request.header("MCP-Protocol-Version", protocol);
-            }
-            let response = request.send()?;
-            if !response.status().is_success() {
-                return Err(BridgeError::Rejected(response.status()));
-            }
-            if let Some(session) = response.headers().get("Mcp-Session-Id") {
-                self.session = Some(session.clone());
-            }
-            let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
-            let relay = ReplyContext {
-                request_id: message.get("id"),
-                instructions: if initial { self.instructions } else { None },
-            };
-            let replies = relay_response(response, relay, output)?;
-            if initial {
-                self.protocol = replies.iter().find_map(|reply| {
-                    reply
-                        .get("result")?
-                        .get("protocolVersion")?
-                        .as_str()
-                        .map(str::to_owned)
-                });
-            }
+            self.exchange(&message, output)?;
+        }
+    }
+
+    fn exchange(
+        &mut self,
+        message: &Value,
+        output: &mut impl Write,
+    ) -> Result<Vec<Value>, BridgeError> {
+        let mut request = self
+            .client
+            .post(self.url.clone())
+            .header("Accept", "application/json, text/event-stream")
+            .json(message);
+        if let Some(session) = &self.session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        if let Some(protocol) = &self.protocol {
+            request = request.header("MCP-Protocol-Version", protocol);
+        }
+        let response = request.send()?;
+        if !response.status().is_success() {
+            return Err(BridgeError::Rejected(response.status()));
+        }
+        if let Some(session) = response.headers().get("Mcp-Session-Id") {
+            self.session = Some(session.clone());
+        }
+        let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
+        let relay = ReplyContext {
+            request_id: message.get("id"),
+            instructions: if initial { self.instructions } else { None },
+        };
+        let replies = relay_response(response, relay, output)?;
+        if initial {
+            self.protocol = replies.iter().find_map(|reply| {
+                reply
+                    .get("result")?
+                    .get("protocolVersion")?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        }
+        Ok(replies)
+    }
+
+    fn probe(&mut self, probe: Probe) -> Result<(), BridgeError> {
+        let mut output = io::sink();
+        self.exchange(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{
+                    "name":"bk service probe", "version":env!("CARGO_PKG_VERSION")
+                }
+            }}),
+            &mut output,
+        )?;
+        if self.session.is_none() || self.protocol.is_none() {
+            return Err(BridgeError::Protocol);
+        }
+        if matches!(probe, Probe::Authentication) {
+            return Ok(());
+        }
+        self.exchange(
+            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            &mut output,
+        )?;
+        let replies = self.exchange(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"company_list", "arguments":{}
+            }}),
+            &mut output,
+        )?;
+        let reply = replies
+            .iter()
+            .find(|reply| reply.get("id").and_then(Value::as_u64) == Some(2))
+            .ok_or(BridgeError::Protocol)?;
+        let result = reply.get("result").ok_or(BridgeError::ToolFailed)?;
+        let result =
+            rmcp::model::CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)?;
+        // Array-shaped results can travel as text in some MCP versions.
+        if result.is_error != Some(true)
+            && (result.structured_content.is_some() || !result.content.is_empty())
+        {
+            Ok(())
+        } else {
+            Err(BridgeError::ToolFailed)
         }
     }
 

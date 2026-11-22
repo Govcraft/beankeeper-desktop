@@ -229,6 +229,11 @@ def main():
                    BEANKEEPER_NO_UPDATE_CHECK="1")
         for key in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN"):
             env.pop(key, None)
+        if sys.platform.startswith("linux"):
+            # Simulate SSH, tmux and GUI launchers that never inherited these
+            # variables. CI prepares the real user bus and Secret Service first.
+            env.pop("XDG_RUNTIME_DIR", None)
+            env.pop("DBUS_SESSION_BUS_ADDRESS", None)
         # Keep client configs and LaunchAgent definitions away from runner defaults.
         # Linux systemd's own unit lookup uses the logged-in user's real home.
         if os.name == "nt":
