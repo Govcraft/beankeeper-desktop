@@ -11,10 +11,10 @@ $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $ArtifactDirectory) { $ArtifactDirectory = Join-Path $root 'dist' }
 $versionText = & python "$root/scripts/release.py" version
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the built release version.' }
-$version = $versionText.Trim()
-$archive = "bk-$version-x86_64-pc-windows-msvc.zip"
-$releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$version"
-$skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$version"
+$fixtureVersion = $versionText.Trim()
+$archive = "bk-$fixtureVersion-x86_64-pc-windows-msvc.zip"
+$releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$fixtureVersion"
+$skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$fixtureVersion"
 $installerUrl = 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1'
 $guide = [regex]::Match((Get-Content -LiteralPath "$root/SKILL.md" -Raw), '(?s)```powershell\r?\n(.*?)```')
 if (-not $guide.Success) { throw 'Missing the Windows installation block in SKILL.md.' }
@@ -86,9 +86,9 @@ function Invoke-RestMethod([string]$Uri) {
         [pscustomobject]@{ tag_name = 'beankeeper-desktop-v99.0.0'; draft = $true; prerelease = $false },
         [pscustomobject]@{ tag_name = 'beankeeper-desktop-v98.0.0'; draft = $false; prerelease = $false; assets = @() },
         [pscustomobject]@{
-            tag_name = "beankeeper-desktop-v$version"
+            tag_name = "beankeeper-desktop-v$fixtureVersion"
             draft = $false
-            prerelease = $version.Contains('-rc.')
+            prerelease = $fixtureVersion.Contains('-rc.')
             assets = @($fixtureFiles | ForEach-Object { @{ name = $_ } })
         }
     )
@@ -135,7 +135,7 @@ try {
     $reportedBooks = [string]$status.books
     if ($reportedBooks.StartsWith('\\?\')) { $reportedBooks = $reportedBooks.Substring(4) }
     if (-not $status.installed -or -not $status.running -or
-        $status.version -ne $version -or $reportedBooks -ne $books) {
+        $status.version -ne $fixtureVersion -or $reportedBooks -ne $books) {
         throw 'The skill block did not install and start its isolated service.'
     }
     if (-not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($books, 'recovery.txt')))) {
