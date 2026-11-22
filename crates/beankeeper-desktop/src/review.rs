@@ -19,6 +19,7 @@ use beankeeper_cli::{
     commands::verify,
     db::{
         self, Actor, Db,
+        companies::CompanySlug,
         proposals::{self, Proposal, ProposalId, ProposalState, Resolution, ResolvedBy},
         spend_limits::Cap,
     },
@@ -112,7 +113,7 @@ impl Review {
     fn decide(
         &mut self,
         _write: &HumanWrite,
-        company: &CompanySlug,
+        company: &RequestedCompany,
         id: &ProposalId,
         decision: Decision,
     ) -> Result<Response, CliError> {
@@ -158,13 +159,13 @@ impl Review {
 /// This credential never becomes an MCP fallback or a browser credential.
 pub(crate) fn router(
     db: Db,
-    company: Option<String>,
+    company: Option<CompanySlug>,
     pairing: PairingState,
 ) -> Result<Router, CliError> {
     let authority = ApprovalAuthority::for_launch(&db)?;
     let state = ReviewState(Arc::new(Mutex::new(Review {
         db,
-        company: company.map(CompanySlug),
+        company,
         authority,
         verification: None,
     })));
@@ -183,9 +184,9 @@ pub(crate) fn router(
 
 #[derive(Deserialize)]
 #[serde(transparent)]
-struct CompanySlug(String);
+struct RequestedCompany(String);
 
-impl CompanySlug {
+impl RequestedCompany {
     fn as_str(&self) -> &str {
         &self.0
     }
@@ -193,17 +194,17 @@ impl CompanySlug {
 
 #[derive(Default, Deserialize)]
 struct ReviewQuery {
-    company: Option<CompanySlug>,
+    company: Option<RequestedCompany>,
 }
 
 #[derive(Deserialize)]
 struct ApproveForm {
-    company: CompanySlug,
+    company: RequestedCompany,
 }
 
 #[derive(Deserialize)]
 struct RejectForm {
-    company: CompanySlug,
+    company: RequestedCompany,
     reason: Option<String>,
 }
 
@@ -327,7 +328,7 @@ async fn resolve(
     write: HumanWrite,
     state: ReviewState,
     id: String,
-    company: CompanySlug,
+    company: RequestedCompany,
     decision: Decision,
 ) -> Response {
     run(state, None, move |review| {
@@ -368,7 +369,7 @@ fn render(
     let selected_company = query
         .company
         .as_ref()
-        .map(CompanySlug::as_str)
+        .map(RequestedCompany::as_str)
         .filter(|value| !value.is_empty())
         .or_else(|| review.company.as_ref().map(CompanySlug::as_str))
         .or_else(|| companies.first().map(|company| company.slug.as_str()));

@@ -613,7 +613,7 @@ fn transaction_table(
         );
         write_markup!(html, "<td><ul>");
         for entry in entries {
-            let values = EntryValues::read(entry, currency)?;
+            let values = EntryValues::read(entry, currency);
             write_markup!(
                 html,
                 "<li>{}: {} {} ({})</li>",
@@ -840,7 +840,7 @@ fn detail(
     );
     let currency = ledger_rows::currency(&txn.currency)?;
     for entry in &entries {
-        let values = EntryValues::read(entry, currency)?;
+        let values = EntryValues::read(entry, currency);
         write_markup!(
             html,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td class=\"amount\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
@@ -963,11 +963,32 @@ mod tests {
 
     fn fixture() -> TestResult<Db> {
         let db = Db::open_in_memory()?;
-        db::create_company(db.conn(), "acme", "Acme & Sons", None)?;
-        db::create_company(db.conn(), "other", "Other", None)?;
+        let owner = Actor::new("owner");
+        db::create_company(db.conn(), &owner, "acme", "Acme & Sons", None)?;
+        db::create_company(db.conn(), &owner, "other", "Other", None)?;
         for company in ["acme", "other"] {
-            db::create_account(db.conn(), company, "1000", "Cash <bank>", "asset", None)?;
-            db::create_account(db.conn(), company, "4000", "Sales", "revenue", None)?;
+            db::create_account(
+                db.conn(),
+                &owner,
+                &db::CreateAccountParams {
+                    company_slug: company,
+                    code: "1000",
+                    name: "Cash <bank>",
+                    account_type: "asset",
+                    default_tax_category: None,
+                },
+            )?;
+            db::create_account(
+                db.conn(),
+                &owner,
+                &db::CreateAccountParams {
+                    company_slug: company,
+                    code: "4000",
+                    name: "Sales",
+                    account_type: "revenue",
+                    default_tax_category: None,
+                },
+            )?;
         }
         Ok(db)
     }
@@ -1178,8 +1199,8 @@ mod tests {
             db.conn(),
             &Actor::new("owner"),
             "acme",
-            id,
-            entries[0].id,
+            id.try_into()?,
+            entries[0].id.try_into()?,
             db::EntryStatus::Cleared,
         )?;
         let query = ViewQuery {
@@ -1416,7 +1437,7 @@ mod tests {
                 .as_str()
                 .contains("No companies yet")
         );
-        db::create_company(db.conn(), "empty", "Empty", None)?;
+        db::create_company(db.conn(), &Actor::new("owner"), "empty", "Empty", None)?;
         assert!(
             render_query(&db, "/accounts", &ViewQuery::default())?
                 .content
@@ -1462,10 +1483,22 @@ mod identity_tests {
             &dir.path().join("books.db"),
             Some(&"test-passphrase".into()),
         )?;
-        db::create_company(db.conn(), "acme", "Acme", None)?;
-        db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
-        db::create_account(db.conn(), "acme", "4000", "Sales", "revenue", None)?;
         let owner = db::Actor::new("owner");
+        db::create_company(db.conn(), &owner, "acme", "Acme", None)?;
+        for (code, name, account_type) in [("1000", "Cash", "asset"), ("4000", "Sales", "revenue")]
+        {
+            db::create_account(
+                db.conn(),
+                &owner,
+                &db::CreateAccountParams {
+                    company_slug: "acme",
+                    code,
+                    name,
+                    account_type,
+                    default_tax_category: None,
+                },
+            )?;
+        }
         identity::init_root(db.conn(), &owner)?;
         let issued = identity::issue(
             db.conn(),

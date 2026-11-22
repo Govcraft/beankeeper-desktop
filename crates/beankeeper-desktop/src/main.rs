@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use beankeeper_cli::{
     cli::{Cli, Command},
     commands,
+    db::companies::CompanySlug,
     error::CliError,
 };
 use beankeeper_desktop::{
@@ -77,7 +78,7 @@ fn main() -> ExitCode {
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
                 .unwrap_or_else(|error| error.exit());
             let json = ledger.is_json();
-            links::run(*options, ledger.company, json).map_err(DesktopError::Link)
+            links::run(*options, ledger.company.as_ref(), json).map_err(DesktopError::Link)
         }
         DesktopCommand::Agents(options) => {
             let json = matches.get_flag("json")
@@ -181,8 +182,12 @@ fn upstream(matches: &clap::ArgMatches) -> ExitCode {
         }
     };
     let json_mode = cli.is_json();
-    let meta =
-        json_mode.then(|| cli.meta(commands::command_name(&cli.command), cli.company.as_deref()));
+    let meta = json_mode.then(|| {
+        cli.meta(
+            commands::command_name(&cli.command),
+            cli.company.as_ref().map(CompanySlug::as_str),
+        )
+    });
     // Preserve upstream's explicit restore-destination safety check.
     let result = if matches!(cli.command, Command::Restore { .. })
         && matches.value_source("db") != Some(ValueSource::CommandLine)

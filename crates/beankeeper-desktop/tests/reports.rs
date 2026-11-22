@@ -73,19 +73,35 @@ const FIXTURE_POSTINGS: &[FixturePosting] = &[
     ),
 ];
 
-fn fixture() -> TestResult<Ledger> {
-    let ledger = Ledger::new()?;
-    let db = ledger.db()?;
-    db::create_company(db.conn(), "other", "Other company", None)?;
+fn seed_report_accounts(db: &Db) -> TestResult {
+    let owner = Actor::new("owner");
+    db::create_company(db.conn(), &owner, "other", "Other company", None)?;
     for company in ["acme", "other"] {
         for (code, name, kind) in [
             ("1000", "Checking <bank>", "asset"),
             ("4000", "Sales", "revenue"),
             ("5000", "Office supplies", "expense"),
         ] {
-            db::create_account(db.conn(), company, code, name, kind, None)?;
+            db::create_account(
+                db.conn(),
+                &owner,
+                &db::CreateAccountParams {
+                    company_slug: company,
+                    code,
+                    name,
+                    account_type: kind,
+                    default_tax_category: None,
+                },
+            )?;
         }
     }
+    Ok(())
+}
+
+fn fixture() -> TestResult<Ledger> {
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    seed_report_accounts(&db)?;
     for &(company, date, currency, debit, credit, amount, category) in FIXTURE_POSTINGS {
         let metadata = json!({"payee":"Vendor, \"quoted\"\n<script>", "tin":"000-00-0000", "payee_address":"A & B", "applies_to":"sale"}).to_string();
         let entries = [
@@ -143,8 +159,8 @@ fn fixture() -> TestResult<Ledger> {
                     &Actor::new("owner"),
                     &db::ClearRequest {
                         company_slug: company,
-                        transaction_id: id,
-                        entry_id: entry.id,
+                        transaction_id: id.try_into()?,
+                        entry_id: entry.id.try_into()?,
                         amount: Some(amount),
                         date: date.parse()?,
                         statement: Some(statement),
@@ -282,10 +298,30 @@ fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_resul
     let historical = format!("{previous_year}-01-10");
     for company in ["acme", "other", "empty"] {
         if company != "acme" {
-            db::create_company(db.conn(), company, company, None)?;
+            db::create_company(db.conn(), &Actor::new("owner"), company, company, None)?;
         }
-        db::create_account(db.conn(), company, "1000", "Checking", "asset", None)?;
-        db::create_account(db.conn(), company, "4000", "Sales", "revenue", None)?;
+        db::create_account(
+            db.conn(),
+            &Actor::new("owner"),
+            &db::CreateAccountParams {
+                company_slug: company,
+                code: "1000",
+                name: "Checking",
+                account_type: "asset",
+                default_tax_category: None,
+            },
+        )?;
+        db::create_account(
+            db.conn(),
+            &Actor::new("owner"),
+            &db::CreateAccountParams {
+                company_slug: company,
+                code: "4000",
+                name: "Sales",
+                account_type: "revenue",
+                default_tax_category: None,
+            },
+        )?;
     }
     post_income_activity(&db, "acme", &historical, "USD", "1000", "4000")?;
     // Activity in another company or currency must not hide the empty-range note.
@@ -325,7 +361,17 @@ fn income_statement_exposes_defaults_and_empty_ranges_without_changing_cli_resul
 fn zero_net_income_and_offsetting_postings_are_not_reported_as_no_activity() -> TestResult {
     let ledger = fixture()?;
     let db = ledger.db()?;
-    db::create_account(db.conn(), "acme", "4001", "Refunds", "revenue", None)?;
+    db::create_account(
+        db.conn(),
+        &Actor::new("owner"),
+        &db::CreateAccountParams {
+            company_slug: "acme",
+            code: "4001",
+            name: "Refunds",
+            account_type: "revenue",
+            default_tax_category: None,
+        },
+    )?;
     for (date, debit, credit) in [
         ("2024-01-10", "1000", "4000"),
         ("2024-01-10", "4000", "1000"),

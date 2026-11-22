@@ -422,10 +422,25 @@ fn paired_sse_delivers_scoped_navigation_highlight_and_confirmed_status() -> Tes
     Ok(())
 }
 
+fn report_navigation_ledger() -> TestResult<Ledger> {
+    let ledger = Ledger::new()?;
+    db::create_account(
+        ledger.db()?.conn(),
+        &Actor::new("owner"),
+        &db::CreateAccountParams {
+            company_slug: "acme",
+            code: "1000",
+            name: "Cash",
+            account_type: "asset",
+            default_tax_category: None,
+        },
+    )?;
+    Ok(ledger)
+}
+
 #[test]
 fn report_navigation_restores_filters_and_acknowledges_report_highlights() -> TestResult {
-    let ledger = Ledger::new()?;
-    db::create_account(ledger.db()?.conn(), "acme", "1000", "Cash", "asset", None)?;
+    let ledger = report_navigation_ledger()?;
     let navigator = issue(&ledger, "navigator")?;
     let nav = token(&navigator)?;
     let mut server = Server::start(&ledger, &["serve"], None)?;

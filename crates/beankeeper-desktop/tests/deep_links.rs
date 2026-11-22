@@ -19,14 +19,27 @@ fn link(server: &Server, bearer: &str, view: &str, state: Value) -> TestResult<V
 fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> TestResult {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    beankeeper_cli::db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
     beankeeper_cli::db::create_account(
         db.conn(),
-        "acme",
-        "1100",
-        "Clearing reserve",
-        "asset",
-        None,
+        &beankeeper_cli::db::Actor::new("owner"),
+        &beankeeper_cli::db::CreateAccountParams {
+            company_slug: "acme",
+            code: "1000",
+            name: "Cash",
+            account_type: "asset",
+            default_tax_category: None,
+        },
+    )?;
+    beankeeper_cli::db::create_account(
+        db.conn(),
+        &beankeeper_cli::db::Actor::new("owner"),
+        &beankeeper_cli::db::CreateAccountParams {
+            company_slug: "acme",
+            code: "1100",
+            name: "Clearing reserve",
+            account_type: "asset",
+            default_tax_category: None,
+        },
     )?;
     drop(db);
     let reader = token(&ledger.reader)?;
@@ -93,8 +106,28 @@ fn upstream_view_targets_restore_summary_dates_and_multiple_cash_accounts() -> T
 fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
-    beankeeper_cli::db::create_account(db.conn(), "acme", "1000", "Cash", "asset", None)?;
-    beankeeper_cli::db::create_account(db.conn(), "acme", "5000", "Dining", "expense", None)?;
+    beankeeper_cli::db::create_account(
+        db.conn(),
+        &beankeeper_cli::db::Actor::new("owner"),
+        &beankeeper_cli::db::CreateAccountParams {
+            company_slug: "acme",
+            code: "1000",
+            name: "Cash",
+            account_type: "asset",
+            default_tax_category: None,
+        },
+    )?;
+    beankeeper_cli::db::create_account(
+        db.conn(),
+        &beankeeper_cli::db::Actor::new("owner"),
+        &beankeeper_cli::db::CreateAccountParams {
+            company_slug: "acme",
+            code: "5000",
+            name: "Dining",
+            account_type: "expense",
+            default_tax_category: None,
+        },
+    )?;
     let actor = beankeeper_cli::db::Actor::new("owner").with_identity(
         beankeeper_cli::identity::verify(db.conn(), token(&ledger.writer)?)?,
     );

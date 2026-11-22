@@ -552,7 +552,7 @@ fn write_store_marker(
 }
 
 enum SetupAuthority {
-    Owner(VerifiedAgent),
+    Owner(Box<VerifiedAgent>),
     FirstRun,
 }
 
@@ -577,12 +577,12 @@ impl SetupAuthority {
                 "owner credential lacks admin authority",
             ));
         }
-        Ok(Self::Owner(owner))
+        Ok(Self::Owner(Box::new(owner)))
     }
 
     fn into_actor(self) -> Actor {
         match self {
-            Self::Owner(owner) => Actor::new("desktop-owner").with_identity(owner),
+            Self::Owner(owner) => Actor::new("desktop-owner").with_identity(*owner),
             Self::FirstRun => Actor::new("desktop-setup"),
         }
     }
@@ -635,7 +635,7 @@ fn provision(
     }
     let mut companies = db::list_companies(conn)?;
     if companies.is_empty() {
-        db::create_company(conn, "personal", "Personal", None)?;
+        db::create_company(conn, &actor, "personal", "Personal", None)?;
         companies = db::list_companies(conn)?;
     }
     let issued = issue(db, &actor, "desktop_agent", options.preset.capabilities())?;
