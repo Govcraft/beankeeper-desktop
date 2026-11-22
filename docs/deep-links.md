@@ -4,9 +4,10 @@ The agent answers in plain words and can draw its own chart from ledger data.
 A Desktop link is an optional way to inspect the matching detail. Generating a
 link never opens a tab, changes a view, highlights a row, or posts to the ledger.
 
-`ui_get_link` requires `ledger/read`, works under `--read-only`, and accepts
-`view_id` plus an optional `state` object. It needs no browser pairing or UI
-credential. It returns readable text and this structured shape:
+`ui_get_link` is advertised as read-only on the managed ledger MCP connection.
+It requires `ledger/read`, works under `--read-only`, and accepts `view_id` plus
+an optional `state` object. It needs no browser pairing or UI credential. It
+returns readable text and this structured shape:
 
 ```json
 {

@@ -291,9 +291,9 @@ tokens cannot authorize them. These summaries are not filed tax forms.
 Answer the financial question in plain words before offering a view. Use the
 structured numbers and chartable series from ledger tools to draw charts in the
 conversation when useful. The owner never needs Desktop to understand the answer.
-Offer a deep link only for optional visuals, source detail or human review.
+Offer a deep link only when a chart or detailed view helps the owner.
 
-Call `ui_get_link` on your normal ledger connection (`ledger/read`) with the
+Call `ui_get_link` on the managed ledger connection (`ledger/read`) with the
 same `view_id` and `state` used by `ui_show_view`. This tool succeeds without a
 paired browser, UI credential or live tab, works under `--read-only`, and never
 navigates. Put its `url` in your answer as an optional detail link. Do not call
