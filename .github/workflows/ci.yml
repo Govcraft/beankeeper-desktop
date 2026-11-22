@@ -4,69 +4,136 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# New pushes supersede PR runs. Every main run keeps a unique group so merges
+# landing back to back are each validated.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match scripts/ci/cache.py CARGO_ENV: caches are built with these.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
-  stable:
-    name: Stable / format, clippy, tests and embedded UI
-    runs-on: ubuntu-latest
+  changes:
+    name: Select checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      service: ${{ steps.plan.outputs.service }}
+      service_any: ${{ steps.plan.outputs.service_any }}
+      packaging: ${{ steps.plan.outputs.packaging }}
+      packaging_any: ${{ steps.plan.outputs.packaging_any }}
+      tooling: ${{ steps.plan.outputs.tooling }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - name: Check the documented installer contract
-        run: python3 -m unittest discover -s scripts/tests -p 'test_install.py'
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test CI planning, gate and cache helpers
+        run: python -B -m unittest discover -s scripts/ci/tests -v
+      - name: Test installer and release helpers
+        run: python -B -m unittest discover -s scripts/tests -v
+      - name: Select affected checks
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PUSH_FORCED: ${{ github.event.forced }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python scripts/ci/plan.py
+      - name: Read the workspace version
+        id: version
+        run: echo "version=$(python scripts/release.py version)" >> "$GITHUB_OUTPUT"
+      - name: Lint workflows
+        if: steps.plan.outputs.tooling == 'true'
+        uses: docker://rhysd/actionlint:1.7.12
+      - uses: astral-sh/ruff-action@v4.1.0
+        if: steps.plan.outputs.tooling == 'true'
+        with:
+          version: '0.16.10'
+          src: scripts/ci
+      - name: Check CI helper formatting
+        if: steps.plan.outputs.tooling == 'true'
+        run: ruff format --check scripts/ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-plan
+          path: ci-plan.json
+          retention-days: 7
 
+  stable:
+    name: Stable / format, clippy, tests and embedded UI
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust-setup
+        with:
+          family: dev-linux
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+          fallback: none
+      - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Compiling the test binaries also rebuilds the HTML/CSS embedded by
       # include_str!, directly from the checked-in UI sources.
       - name: Build embedded UI and test workspace
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked
+      - name: Documentation tests
+        run: cargo test --workspace --locked --doc
 
   msrv:
     name: MSRV / Rust 1.91
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.91.0
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: ./.github/actions/rust-setup
         with:
-          key: msrv-1.91
+          family: msrv-linux
       - run: cargo check --workspace --all-targets --locked
 
-  service-lifecycle:
+  service:
     name: Background service / ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.service_any == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.service) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: ./.github/actions/rust-setup
         with:
-          key: service-${{ matrix.os }}
-          cache-on-failure: true
-      - name: Select native Windows Perl for vendored OpenSSL
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          family: ${{ matrix.family }}
       - run: cargo build --locked
       - name: Prepare the native credential store
         if: runner.os != 'Windows'
@@ -78,3 +145,31 @@ jobs:
           binary=target/debug/bk
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           python scripts/tests/service-lifecycle.py "$binary"
+
+  packaging:
+    needs: changes
+    if: needs.changes.outputs.packaging_any == 'true'
+    uses: ./.github/workflows/packaging.yml
+    with:
+      matrix: ${{ needs.changes.outputs.packaging }}
+      version: ${{ needs.changes.outputs.version }}
+
+  # The single required status check: it fails on any failure, cancellation or
+  # skip the plan did not intend, so path-selected jobs can stay optional.
+  ci-gate:
+    name: ci-gate
+    needs: [changes, stable, msrv, service, packaging]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Require every selected check to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/ci/gate.py

@@ -1,0 +1,47 @@
+name: Build the release binary
+description: >-
+  Compile bk for one release target with embedded license trust. Linux builds
+  run in the Ubuntu 22.04 image so the binary keeps a glibc 2.35 floor.
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+  license-public-keys-json:
+    description: Optional override for packaging/license-embed.json public keys
+    default: ''
+  license-service-url:
+    description: Optional override for packaging/license-embed.json service URL
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Embed production license trust
+      shell: bash
+      env:
+        BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON: ${{ inputs.license-public-keys-json }}
+        BEANKEEPER_LICENSE_SERVICE_URL: ${{ inputs.license-service-url }}
+      run: python scripts/release.py license-env
+    - name: Build Linux Desktop against Ubuntu 22.04
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        toolchain=$(rustc --print sysroot)
+        cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
+        docker build -f packaging/linux-release.Dockerfile -t beankeeper-linux-builder packaging
+        docker run --rm --user "$(id -u):$(id -g)" \
+          --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+          --mount "type=bind,source=$toolchain,target=/opt/rust,readonly" \
+          --mount "type=bind,source=$cargo_home,target=/cargo" \
+          --env CARGO_HOME=/cargo \
+          --env BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON \
+          --env BEANKEEPER_LICENSE_SERVICE_URL \
+          beankeeper-linux-builder \
+          cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
+    - name: Build Desktop binary and embedded UI
+      if: runner.os != 'Linux'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
