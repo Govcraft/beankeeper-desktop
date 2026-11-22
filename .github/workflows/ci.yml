@@ -68,14 +68,10 @@ jobs:
         run: |
           "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: cargo build --locked
-      - name: Prepare Linux user bus
-        if: runner.os == 'Linux'
+      - name: Prepare the native credential store
+        if: runner.os != 'Windows'
         shell: bash
-        run: |
-          uid=$(id -u)
-          sudo systemctl start "user@$uid.service"
-          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+        run: bash scripts/tests/prepare-native-keychain.sh
       - name: Exercise native lifecycle and crash recovery
         shell: bash
         run: |

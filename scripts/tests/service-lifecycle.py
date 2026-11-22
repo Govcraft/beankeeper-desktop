@@ -2,6 +2,7 @@
 """Exercise real per-user managers on disposable CI runners. Never run on an owner's machine."""
 
 import argparse
+import filecmp
 import hashlib
 import json
 import os
@@ -10,12 +11,14 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 import urllib.error
+import zipfile
 
 
 def safe_log_tail(path):
@@ -26,26 +29,59 @@ def safe_log_tail(path):
     return content[-8000:]
 
 
-def exercise_extension(binary, root, base_env):
+def extension_launcher(binary, cache, bundle):
+    if bundle is None:
+        launcher = cache / binary.name
+        shutil.copy2(binary, launcher)
+        return launcher, ("mcp", "extension"), None
+
+    with zipfile.ZipFile(bundle) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        server = manifest["server"]
+        entry = server["entry_point"]
+        assert server["type"] == "binary" and entry == f"server/{binary.name}"
+        config = server["mcp_config"]
+        assert config == {"command": "${__dirname}/" + entry, "args": ["mcp", "extension"]}
+        member = archive.getinfo(entry)
+        mode = member.external_attr >> 16
+        assert stat.S_ISREG(mode) and mode & 0o111
+        launcher = cache / entry
+        launcher.parent.mkdir()
+        with archive.open(member) as source, launcher.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+        launcher.chmod(mode & 0o777)
+        assert filecmp.cmp(launcher, binary, shallow=False)
+    return launcher, tuple(config["args"]), manifest
+
+
+def exercise_extension(binary, root, base_env, bundle=None):
     """Exercise the MCPB launch command with a fresh native service registration."""
     parent = root / "fresh extension"
     cache = parent / "Claude cache"
     cache.mkdir(parents=True)
-    launcher = cache / binary.name
-    shutil.copy2(binary, launcher)
+    launcher, arguments, manifest = extension_launcher(binary, cache, bundle)
     env = {
         **base_env,
         "BEANKEEPER_SERVICE_DATA_DIR": str(parent / "data"),
         "BEANKEEPER_DESKTOP_STATE_DIR": str(parent / "state"),
         "BEANKEEPER_SERVICE_LOG_DIR": str(parent / "logs"),
     }
-    if os.name == "nt":
-        home = Path(env["USERPROFILE"])
-        claude_desktop = home / "AppData/Roaming/Claude/claude_desktop_config.json"
+    home = Path(env["USERPROFILE" if os.name == "nt" else "HOME"])
+    if manifest is not None and os.name == "nt":
+        local_data = parent / "Local app data"
+        env["LOCALAPPDATA"] = str(local_data)
+        env.pop("CLAUDE_USER_DATA_DIR", None)
+        claude_directory = local_data / "Claude-Data" / "claude_pzs8sxrjxfjjc"
+    elif manifest is not None:
+        claude_directory = parent / "Claude profile"
+        env["CLAUDE_USER_DATA_DIR"] = str(claude_directory)
+    elif os.name == "nt":
+        claude_directory = Path(env.get("APPDATA") or home / "AppData/Roaming") / "Claude"
     else:
-        home = Path(env["HOME"])
-        support = "Library/Application Support" if sys.platform == "darwin" else ".config"
-        claude_desktop = home / support / "Claude/claude_desktop_config.json"
+        support = (home / "Library/Application Support" if sys.platform == "darwin"
+                   else Path(env.get("XDG_CONFIG_HOME") or home / ".config"))
+        claude_directory = support / "Claude"
+    claude_desktop = claude_directory / "claude_desktop_config.json"
     client_configs = (home / ".claude.json", home / ".codex/config.toml", claude_desktop)
     before = {path: path.read_bytes() if path.exists() else None for path in client_configs}
 
@@ -54,6 +90,11 @@ def exercise_extension(binary, root, base_env):
             [str(executable), *arguments], env=kwargs.pop("env", env), capture_output=True,
             text=True, encoding="utf-8", timeout=120, **kwargs,
         )
+
+    baseline = run(binary, "service", "status", "--json")
+    assert baseline.returncode == 0, baseline.stderr
+    definition = Path(json.loads(baseline.stdout)["service_definition"])
+    assert not definition.exists() and not definition.is_symlink(), "service must start unregistered"
 
     requests = [
         {"id": 1, "method": "initialize", "params": {
@@ -66,7 +107,7 @@ def exercise_extension(binary, root, base_env):
     ]
     messages = "".join(json.dumps({"jsonrpc": "2.0", **request}) + "\n" for request in requests)
     try:
-        output = run(launcher, "mcp", "extension", input=messages)
+        output = run(launcher, *arguments, input=messages)
         assert output.returncode == 0, output.stderr + safe_log_tail(parent / "logs/service.log")
         replies = {reply["id"]: reply["result"] for reply in map(json.loads, output.stdout.splitlines())}
         assert replies[1]["serverInfo"]["name"] == "beankeeper"
@@ -87,8 +128,23 @@ def exercise_extension(binary, root, base_env):
         assert status["installed"] and status["running"]
         books = Path(status["books"])
         assert books.with_suffix(".recovery.txt").exists()
+        assert not books.with_suffix(".passphrase").exists()
+        metadata = json.loads(books.with_suffix(".desktop.json").read_text(encoding="utf-8"))
+        assert metadata["secret_store_file"] is None
         assert not books.read_bytes().startswith(b"SQLite format 3")
         assert {path: path.read_bytes() if path.exists() else None for path in client_configs} == before
+        if manifest is not None:
+            assert status["version"] == manifest["version"]
+            for action in ("stop", "start"):
+                result = run(installed, "service", action)
+                assert result.returncode == 0, result.stderr + safe_log_tail(parent / "logs/service.log")
+            restarted = run(installed, "service", "status", "--json")
+            assert restarted.returncode == 0, restarted.stderr
+            status = json.loads(restarted.stdout)
+            assert status["installed"] and status["running"]
+            exercise_claude_doctor(run, installed, claude_directory, manifest, status)
+            print("Packaged Claude extension first launch, setup_status, and doctor registry fixture passed")
+            return
 
         # Exercise the same authenticated tool through the public doctor command.
         agent_env = {**env, "CODEX_HOME": str(parent / "codex")}
@@ -120,9 +176,38 @@ def exercise_extension(binary, root, base_env):
         run(binary, "service", "uninstall")
 
 
+def exercise_claude_doctor(run, binary, directory, manifest, service):
+    directory.mkdir(parents=True)
+    registry = directory / "extensions-installations.json"
+    extension_id = "local.mcpb.govcraft.beankeeper"
+    installations = {"extensions": {extension_id: {"id": extension_id, "manifest": manifest}}}
+    registry.write_text(json.dumps(installations), encoding="utf-8")
+    settings = directory / "Claude Extensions Settings" / f"{extension_id}.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"isEnabled": True}), encoding="utf-8")
+
+    output = run(binary, "agents", "doctor", "claude-desktop", "--json")
+    assert output.returncode == 0, output.stdout + output.stderr
+    diagnostic = json.loads(output.stdout)
+    assert diagnostic["ok"]
+    assert diagnostic["data"]["agents"][0]["state"] == "extension_managed"
+    assert diagnostic["data"]["service"]["state"] == "ready"
+    assert diagnostic["data"]["service"]["endpoint"] == service["mcp_endpoint"]
+
+    settings.write_text(json.dumps({"isEnabled": False}), encoding="utf-8")
+    output = run(binary, "agents", "doctor", "claude-desktop", "--json")
+    assert output.returncode != 0, output.stdout + output.stderr
+    diagnostic = json.loads(output.stdout)
+    assert not diagnostic["ok"]
+    assert diagnostic["data"]["agents"][0]["state"] == "extension_disabled"
+    assert diagnostic["data"]["agents"][0]["error"]["code"] == "AGENT_EXTENSION_DISABLED"
+    assert diagnostic["data"]["service"]["state"] == "ready"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--extension", type=Path, help="exercise the packaged Claude extension only")
     args = parser.parse_args()
     if os.environ.get("CI") != "true":
         parser.error("requires CI=true and a disposable runner")
@@ -139,6 +224,7 @@ def main():
         # Linux systemd's own unit lookup uses the logged-in user's real home.
         if os.name == "nt":
             env["USERPROFILE"] = str(root / "home")
+            env["APPDATA"] = str(root / "home/AppData/Roaming")
         elif sys.platform == "darwin":
             env["HOME"] = str(root / "home")
         else:
@@ -153,6 +239,9 @@ def main():
             assert int.from_bytes(image[optional:optional + 2], "little") == 0x20b
             reserve = int.from_bytes(image[optional + 72:optional + 80], "little")
             assert reserve >= 8 * 1024 * 1024, f"Windows main stack reserve is only {reserve} bytes"
+        if args.extension is not None:
+            exercise_extension(binary, root, env, args.extension)
+            return
         occupied = socket.socket()
         occupied.bind(("127.0.0.1", 8750))
         occupied.listen()

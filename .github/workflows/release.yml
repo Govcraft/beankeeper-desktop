@@ -231,13 +231,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/tests/install-windows.ps1
-      - name: Prepare Linux user bus for the agent install guide
-        if: runner.os == 'Linux'
+      - name: Prepare the native credential store
+        if: runner.os != 'Windows'
+        run: bash scripts/tests/prepare-native-keychain.sh
+      - name: Exercise the packaged Claude extension and doctor
         run: |
-          uid=$(id -u)
-          sudo systemctl start "user@$uid.service"
-          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          executable=bk
+          if [[ "$RUNNER_OS" == Windows ]]; then executable=bk.exe; fi
+          python scripts/tests/service-lifecycle.py "staging/bk-$VERSION-$TARGET/$executable" \
+            --extension "dist/bk-$VERSION-$TARGET.mcpb"
       - name: Test the agent install guide on Linux and macOS
         if: runner.os != 'Windows'
         run: python scripts/tests/skill-install-posix.py --target "$TARGET"
