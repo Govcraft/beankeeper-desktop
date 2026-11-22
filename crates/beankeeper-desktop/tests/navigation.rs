@@ -2,7 +2,7 @@ mod common;
 
 use beankeeper_cli::{
     db::{self, Actor},
-    identity::{self, IssueRequest},
+    identity::{self, Admin, Granted, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, rpc, token};
 use reqwest::blocking::Response;
@@ -159,14 +159,17 @@ fn event(reader: &mut impl BufRead, kind: &str) -> TestResult<Value> {
 
 #[test]
 fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
-    let ledger = Ledger::new()?;
+    let (ledger, owner) = Ledger::new_with_policy_admin()?;
     let navigator = issue(&ledger, "navigator")?;
     let nav = token(&navigator)?;
     let reader = token(&ledger.reader)?;
     let mut server = Server::start(&ledger, &["serve"], Some(reader))?;
     server.initialize(Some(reader))?;
+    let db = ledger.db()?;
     for enforce in [true, false] {
-        db::audit::set_policy(ledger.db()?.conn(), &Actor::new("owner"), enforce)?;
+        Granted::<Admin>::with(db.conn(), &owner, |grant| {
+            db::audit::set_policy(grant, enforce)
+        })?;
         for bearer in [reader, token(&ledger.writer)?, nav] {
             let tools = rpc(server.request("tools/list", json!({}), Some(bearer))?)?;
             let tools = tools["result"]["tools"].as_array().ok_or("tools")?;

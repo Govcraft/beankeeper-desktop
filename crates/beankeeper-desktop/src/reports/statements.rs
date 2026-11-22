@@ -88,7 +88,7 @@ pub(super) fn income_context(
     // with the same company, currency and inclusive dates as the statement.
     let from = dates.from().to_string();
     let to = dates.to().to_string();
-    let currency = statement.currency().code();
+    let currency = statement.currency();
     for account_type in [AccountType::Revenue, AccountType::Expense] {
         let balances = db::compute_trial_balance(
             db.conn(),
@@ -96,7 +96,7 @@ pub(super) fn income_context(
             Some(account_type.code()),
             Some(&from),
             Some(&to),
-            Some(currency),
+            currency,
         )?;
         if balances
             .iter()
@@ -108,9 +108,9 @@ pub(super) fn income_context(
     write_markup!(
         html,
         "<p class=\"empty\">No revenue or expense activity in this range for {}. Choose different dates above to see another period, or <a href=\"/transactions?company={}&amp;currency={}\">view company transactions across all dates</a>.</p>",
-        currency,
+        currency.code(),
         encode(company),
-        encode(currency)
+        encode(currency.code())
     );
     Ok(html)
 }

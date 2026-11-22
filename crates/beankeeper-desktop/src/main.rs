@@ -184,7 +184,7 @@ fn upstream(matches: &clap::ArgMatches) -> ExitCode {
     let json_mode = cli.is_json();
     let meta = json_mode.then(|| {
         cli.meta(
-            commands::command_name(&cli.command),
+            commands::operation(&cli.command),
             cli.company.as_ref().map(CompanySlug::as_str),
         )
     });
@@ -201,7 +201,7 @@ fn upstream(matches: &clap::ArgMatches) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let meta = meta.map(|meta| cli.meta(&meta.command, meta.company.as_deref()));
+            let meta = meta.map(|meta| cli.meta(meta.command, meta.company.as_deref()));
             error.report(json_mode, meta);
             ExitCode::from(error.exit_code())
         }

@@ -16,7 +16,7 @@ use beankeeper_cli::{
     error::CliError,
     identity::{self, VerifiedAgent},
     mcp::{HostTool, HostToolEffect, HostToolHandler},
-    output::json::{self, Envelope},
+    output::json::EnvelopeError,
     passphrase,
 };
 use rmcp::{
@@ -26,7 +26,11 @@ use rmcp::{
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{navigation::Navigation, setup};
+use crate::{
+    navigation::Navigation,
+    output::{Envelope, Metadata},
+    setup,
+};
 
 const STATUS_TOOL: &str = "setup_status";
 
@@ -276,10 +280,16 @@ fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), Cl
     Ok((report, agent))
 }
 
-/// Print read-only setup status using the normal CLI output envelope and exit codes.
+#[derive(Clone, Copy, Serialize)]
+enum SetupOperation {
+    #[serde(rename = "setup.status")]
+    Status,
+}
+
+/// Print read-only setup status using the Desktop CLI response envelope and standard exit codes.
 pub fn run_status(mut cli: Cli) -> ExitCode {
     let use_json = cli.is_json();
-    let mut meta = json::meta("setup.status", None);
+    let mut meta = Metadata::new(SetupOperation::Status);
     let result = inspect_cli(&mut cli).and_then(|(report, agent)| {
         meta.agent = agent.map(|agent| agent.uri().to_owned());
         if use_json {
@@ -287,13 +297,13 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
                 ok: true,
                 meta: meta.clone(),
                 data: Some(report),
-                error: None,
+                error: None::<EnvelopeError>,
             };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&envelope).map_err(|error| CliError::General(
-                    format!("cannot encode setup status: {error}")
-                ))?
+                serde_json::to_string_pretty(&envelope).map_err(|error| {
+                    CliError::General(format!("cannot encode setup status: {error}"))
+                })?
             );
         } else {
             println!("{}", report.summary);
@@ -303,7 +313,23 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            error.report(use_json, Some(meta));
+            if use_json {
+                let envelope = Envelope {
+                    ok: false,
+                    meta,
+                    data: None::<SetupReport>,
+                    error: Some(EnvelopeError {
+                        code: error.code(),
+                        message: error.to_string(),
+                    }),
+                };
+                match serde_json::to_string_pretty(&envelope) {
+                    Ok(response) => eprintln!("{response}"),
+                    Err(_) => error.report(true, None),
+                }
+            } else {
+                error.report(false, None);
+            }
             ExitCode::from(error.exit_code())
         }
     }

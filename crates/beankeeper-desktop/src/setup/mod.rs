@@ -21,7 +21,7 @@ use beankeeper_cli::{
         spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
-    identity::{self, IssueRequest, IssuedCredential, VerifiedAgent},
+    identity::{self, Admin, Granted, IssueRequest, IssuedCredential, VerifiedAgent},
     passphrase,
 };
 use clap::{Args, ValueEnum};
@@ -561,7 +561,7 @@ impl SetupAuthority {
         let conn = db.conn();
         let policy = db::policy::get(conn)?;
         let registered = has_registered_tokens(identity::list(conn)?)?;
-        if !(policy.enforce || registered) {
+        if !(policy.enforce || registered || owner_file.try_exists()?) {
             return Ok(Self::FirstRun);
         }
         let raw = PrivateFile::open(owner_file)
@@ -629,10 +629,15 @@ fn provision(
     if !has_root {
         identity::init_root(conn, &actor)?;
     }
-    if !owner_file.exists() {
+    let bootstrap_owner = if actor.identity().is_none() {
         let issued = issue(db, &actor, "desktop_owner", OWNER_CAPABILITIES)?;
-        private_create(owner_file, issued.token().expose_secret().as_bytes())?;
-    }
+        let bearer = issued.token().expose_secret();
+        let owner = identity::verify(conn, bearer)?;
+        private_create(owner_file, bearer.as_bytes())?;
+        Some(actor.clone().with_identity(owner))
+    } else {
+        None
+    };
     let mut companies = db::list_companies(conn)?;
     if companies.is_empty() {
         db::create_company(conn, &actor, "personal", "Personal", None)?;
@@ -647,7 +652,8 @@ fn provision(
             audit::set_spend_limit(conn, &actor, &limit)?;
         }
     }
-    audit::set_policy(conn, &actor, true)?;
+    let policy_actor = bootstrap_owner.as_ref().unwrap_or(&actor);
+    Granted::<Admin>::with(conn, policy_actor, |grant| audit::set_policy(grant, true))?;
     private_create(token_file, issued.token().expose_secret().as_bytes())?;
     Ok(())
 }
@@ -1008,6 +1014,51 @@ mod tests {
         )?;
         assert_eq!(fs::read(books.with_extension("recovery.txt"))?, recovery);
         assert_eq!(fs::read(books.with_extension("agent-token"))?, token);
+        Ok(())
+    }
+
+    #[test]
+    fn provision_attributes_policy_to_the_owner_and_recovers_the_agent_file()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let books = root.path().join("books.db");
+        let db = Db::open(&books, Some(&SecretString::from("setup-policy-fixture")))?;
+        let options = SetupOptions::from_service(root.path(), "127.0.0.1:8750".parse()?);
+        let owner_file = books.with_extension("owner-token");
+        let agent_file = books.with_extension("agent-token");
+        let read_identity = |path: &Path| -> Result<VerifiedAgent, Box<dyn Error>> {
+            let token = PrivateFile::open(path)?.read_secret(BEARER_FILE_LIMIT)?;
+            Ok(identity::verify(db.conn(), token.expose_secret())?)
+        };
+
+        provision(&db, &options, &agent_file, &owner_file, false)?;
+        let owner = read_identity(&owner_file)?;
+        assert!(owner.allows(Capability::Admin)?);
+        assert!(db::policy::get(db.conn())?.enforce);
+        let policy_events = || {
+            let mut stmt = db.conn().prepare(
+                "SELECT token_jti FROM audit_log WHERE entity = 'policy' AND action = 'policy_change'",
+            )?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        };
+        assert_eq!(policy_events()?, [owner.jti()]);
+        assert!(
+            options
+                .preset
+                .matches_grants(read_identity(&agent_file)?.capabilities())
+        );
+
+        fs::remove_file(&agent_file)?;
+        provision(&db, &options, &agent_file, &owner_file, false)?;
+        assert_eq!(read_identity(&owner_file)?.jti(), owner.jti());
+        assert!(
+            options
+                .preset
+                .matches_grants(read_identity(&agent_file)?.capabilities())
+        );
+        assert_eq!(policy_events()?, [owner.jti()]);
         Ok(())
     }
 

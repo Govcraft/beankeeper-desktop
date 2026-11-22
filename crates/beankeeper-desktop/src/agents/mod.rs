@@ -12,12 +12,12 @@ use std::{
     process::ExitCode,
 };
 
-use beankeeper_cli::output::json::{Meta, meta};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::{
     bridge::{self, BridgeError},
+    output::{Envelope, Metadata},
     service,
 };
 use adapters::{Agent, Locations};
@@ -52,23 +52,16 @@ struct Selection {
     agent: Option<Agent>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 enum Operation {
+    #[serde(rename = "agents.detect")]
     Detect,
+    #[serde(rename = "agents.connect")]
     Connect,
+    #[serde(rename = "agents.disconnect")]
     Disconnect,
+    #[serde(rename = "agents.doctor")]
     Doctor,
-}
-
-impl Operation {
-    const fn command(self) -> &'static str {
-        match self {
-            Self::Detect => "agents.detect",
-            Self::Connect => "agents.connect",
-            Self::Disconnect => "agents.disconnect",
-            Self::Doctor => "agents.doctor",
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -244,15 +237,7 @@ struct Report {
     service: Option<ServiceCheck>,
 }
 
-#[derive(Serialize)]
-struct Output {
-    ok: bool,
-    meta: Meta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Report>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<Failure>,
-}
+type Output = Envelope<Operation, Report, Failure>;
 
 /// Run the requested local agent operation and print its result.
 pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
@@ -262,7 +247,7 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
         AgentCommand::Disconnect(selection) => (Operation::Disconnect, selected_agent(&selection)),
         AgentCommand::Doctor(selection) => (Operation::Doctor, selected_agent(&selection)),
     };
-    let output_meta = meta(operation.command(), None);
+    let output_meta = Metadata::new(operation);
     let output = match perform(operation, selected) {
         Ok(data) => {
             let ok = data.agents.iter().all(|item| item.error.is_none())
