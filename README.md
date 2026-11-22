@@ -84,8 +84,11 @@ a fallback when port 8750 is occupied. On Linux, lifecycle commands can find the
 owner's session bus when Claude Desktop, an IDE, tmux or SSH launches `bk`
 without the login environment. Status verifies the live service directly.
 Recovery material stays in a private file under the owner's control.
+Fresh managed installs give the agent a bookkeeper credential that posts
+transactions directly and attributes each write to that agent. The owner can
+undo with an audited reversal or opt in to sign-off for a grant.
 See [background hosting](docs/service.md) for OS paths, credential storage,
-Linux lingering, upgrades and installer opt-out flags.
+Linux lingering, upgrades and how to change the agent's write mode.
 
 Run `bk agents connect claude-code` to register or refresh the Claude Code
 connection and skill. Existing entries with the managed command and arguments

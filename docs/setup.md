@@ -1,8 +1,9 @@
 # Desktop setup command reference
 
 For quiet login startup, automatic crash recovery and lifecycle MCP tools, use
-[`bk service install`](service.md). The commands below remain available for
-manual onboarding and foreground hosting.
+[`bk service install`](service.md). New managed installs issue a direct
+bookkeeper grant. The commands below cover manual onboarding and foreground
+hosting.
 
 Run `bk setup` to create an encrypted ledger, save its passphrase in the OS
 keychain, prepare a private recovery kit, configure three MCP clients, start the

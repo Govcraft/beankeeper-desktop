@@ -9,8 +9,9 @@ bk service status --json
 ```
 
 First install creates encrypted local books, a random passphrase in the native
-OS secret store, a private recovery kit, and separate owner and read-only agent
-credentials. It registers login startup and starts the service. It never opens
+OS secret store, a private recovery kit, and separate owner and bookkeeper
+credentials. The bookkeeper credential posts transactions directly by default.
+The installer registers login startup and starts the service. It never opens
 a browser or prints a passphrase, recovery key or bearer token. Keep an offline
 copy of the recovery kit and owner credential. Those files belong to the owner;
 the agent must not read or show them. The kit is created once and preserved on
@@ -31,7 +32,7 @@ passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-
 | `bk service install` | Create books on first use; register and start hosting. Reinstall updates the executable registration and preserves books, credentials, recovery kit and agent grants. |
 | `bk service start` | Enable login startup and start installed hosting. |
 | `bk service stop` | Stop hosting and disable login startup and automatic restarts until `start`. |
-| `bk service status --json` | Report installed/running state, running Desktop version, PID, MCP endpoint, optional Desktop URL, books and log paths, and a plain-language message. |
+| `bk service status --json` | Report installed/running state, running Desktop version, PID, MCP endpoint, optional Desktop URL, books and log paths, and the running agent's preset and write mode. |
 | `bk service uninstall` | Stop and remove hosting. Preserve all books, secrets, recovery material and MCP configuration. |
 | `bk service mcp` | Serve local lifecycle tools over stdio, including while the HTTP service is stopped. |
 
@@ -78,7 +79,9 @@ ledger MCP client after service replacement. Explicit bridge `--url` and
 
 Status verifies Desktop's launch identity and PID before using the private agent
 credential to open a short MCP session. It reads the version from the responding
-server. The running bridge and status check work from the published endpoint
+server and retrieves the verified `agent_access` from `setup_status`. Status
+reports `agent_access: null` when it cannot verify access with the running
+service. The bridge and status check work from the published endpoint
 even when the calling agent has no connection to the OS service manager.
 `bk service status --json` includes an `error_code` if the published endpoint
 cannot be reached, its process identity differs, or MCP authentication fails.
@@ -90,6 +93,42 @@ is listening on port 8750. The warning names its books path when a local record
 identifies it. Older Linux instances with an explicit `--db` can also be
 identified from their launch arguments. If the path is unavailable, the warning
 still identifies the competing listener. These checks never open competing books.
+
+## Choose a write mode
+
+On a fresh managed install, `txn_post` and `bk txn post` record transactions
+directly under the bookkeeper's identity. Ask your agent to tell you what it
+recorded, with the company and transaction ID. Undo a post from your owner
+session with `bk --db BOOKS --company COMPANY txn reverse ID` or use
+`txn_reverse` on an owner-controlled connection that holds `ledger/reverse`.
+That appends a linked reversal and records both actions in audit history.
+
+To opt in to sign-off, use the upstream agent commands in your own terminal.
+Use the `books` path from `bk service status --json` and supply your owner
+credential privately through `BK_AGENT_TOKEN` for the issuance and revocation
+commands. List the existing grants with `bk --db BOOKS --json agent list` and
+identify the current managed grant's token ID.
+
+```sh
+bk --db BOOKS --json agent issue --name desktop_agent --generate-key \
+  --caps ledger/read,ledger/post,ledger/propose --write-mode propose-only --ttl 30d
+```
+
+Direct the issuance output to a new owner-only file before running the command.
+It contains both the replacement bearer (`data.token`) and a generated private
+key. Replace the contents of the sibling `books.agent-token` file with just the
+new bearer, keeping the file owner-only. Reload the agent's MCP connection and
+verify `agent_access.write_mode` with `bk service status --json`. Revoke the
+previous token with `bk --db BOOKS agent revoke OLD_TOKEN_ID`, and remove the
+temporary issuance output when finished. Keep the owner token in its own file.
+
+The grant applies across companies in the selected ledger. To use a different
+grant policy for a book, keep that book in its own ledger. For occasional
+sign-off within one ledger, ask the agent to use `txn_propose` for that entry.
+`txn_post` under a `propose-only` grant returns a pending proposal that a
+separate approving credential can resolve. For an existing read-only grant,
+use the same replacement steps with `--write-mode direct` to enable direct
+posting. Reinstall preserves the existing grant.
 
 ## Platform behavior and files
 

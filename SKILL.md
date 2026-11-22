@@ -123,6 +123,8 @@ These local tools have OS-user service authority, separate from ledger grants;
 use them only when the owner's request authorizes that lifecycle action.
 They accept no arguments and return named errors or structured status with a
 plain-language message, running version, MCP endpoint and optional Desktop link.
+When running, `service_status` also reports the managed credential's
+`agent_access`, including its `preset`, `write_mode` and a plain-language note.
 Answer in plain words first. Offer the Desktop view only when useful.
 
 The ledger MCP entry runs `bk mcp bridge --service`, discovering the current
@@ -182,11 +184,10 @@ stores the passphrase in the OS keychain, prepares a private recovery kit and
 merges the `beankeeper` MCP server into Claude Desktop, Claude Code and Codex
 configs. Restart the agent client afterward.
 
-The default preset is read-only. `--preset bookkeeper` adds posting and proposals
-with initial per-company USD spend caps, without approval or administrative
-grants. Use proposal tools for work requiring human review. Never ask for, read,
+Standalone `bk setup` defaults to read-only. For its optional bookkeeper preset,
+see the [standalone setup options](docs/setup.md#options). Never ask for, read,
 print, copy or attach the recovery kit, passphrase store or owner-token file.
-The human owns backup/recovery and approval credentials.
+The owner controls recovery, credential changes and reversal authority.
 
 Manual setup configs invoke `bk mcp bridge` with an explicit endpoint and a
 private agent-token file path. This bridge connects to the running `bk serve`.
@@ -196,15 +197,42 @@ for enrolled ledgers; explicit upstream secret sources take precedence.
 
 `setup --force` resumes without deleting data, rotating the root or changing an
 existing preset. Capability changes and token renewal use upstream commands
-under the human owner's control. A token is secret and expires after one year.
-New companies need owner-configured spend limits before agent use.
+under the owner's control.
+
+## Record transactions and explain undo
+
+Fresh managed installs give the agent the bookkeeper preset with
+`write_mode: direct`. When asked to record a transaction, use `txn_post` over
+the managed connection or `bk txn post` with the same agent credential. After
+the ledger posts it, tell the owner what was recorded and give them the book
+and transaction ID. Offer the optional transaction detail link through
+`ui_get_link`.
+
+If the owner wants to undo a posting, give them
+`bk --db BOOKS --company COMPANY txn reverse ID` or the equivalent
+`txn_reverse` arguments `company` and `id` for a connection they control with
+`ledger/reverse`. Upstream appends an offsetting transaction linked to the
+original and records the owner's action in the audit trail.
+
+For ongoing sign-off, the owner can choose `ProposeOnly` for a grant. Ask them
+to follow the [owner credential steps](docs/service.md#choose-a-write-mode)
+from their own terminal. The replacement grant applies across companies in
+that ledger. Use a separate ledger for a book that needs its own grant policy,
+or use `txn_propose` (`bk txn propose`) for individual entries the owner wants
+to sign off within a shared ledger. A `propose-only` post returns a pending
+proposal ID. Report it as pending and give the owner its optional review link.
+
+Reinstall preserves existing grants, including older read-only credentials.
+If `agent_access.preset` is `read-only` and the owner wants the agent to post,
+point them to the owner credential steps for issuing a direct bookkeeper grant.
 
 ## Guide the owner through book setup
 
 Start with `setup_status` over MCP or `bk --db BOOKS setup status --json`. For a
 managed ledger, use the `books` path from `bk service status --json` as `BOOKS`.
 For a manually enrolled ledger, use its enrolled path. Use `next_step` and the
-recorded facts to skip questions the owner has already answered.
+recorded facts to skip questions the owner has already answered. Use
+`agent_access` to explain what the authenticated credential can do.
 
 1. Ask whether the owner keeps personal books, business books, or both. Confirm
    the reporting currency and the start of the financial year for each book.
