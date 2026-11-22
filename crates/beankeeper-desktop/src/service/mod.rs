@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
-    setup::{self, ClientRegistration, keychain},
+    setup::{self, ClientRegistration, ServiceSecretStorage, keychain},
 };
 
 pub(crate) use extension::connection as extension_connection;
@@ -406,7 +406,11 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
             &mut cli,
             previous.as_ref(),
             InstallMode::Command {
-                file_store,
+                storage: if file_store {
+                    ServiceSecretStorage::PrivateFile
+                } else {
+                    ServiceSecretStorage::NativeWithFileFallback
+                },
                 explicit_db,
                 no_agents,
             },
@@ -448,7 +452,7 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
 enum InstallMode {
     Command {
         explicit_db: bool,
-        file_store: bool,
+        storage: ServiceSecretStorage,
         no_agents: bool,
     },
     Extension,
@@ -460,13 +464,13 @@ fn install(
     previous: Option<&Config>,
     mode: InstallMode,
 ) -> Result<(), ServiceError> {
-    let (explicit_db, file_store) = match mode {
+    let (explicit_db, storage) = match mode {
         InstallMode::Command {
             explicit_db,
-            file_store,
+            storage,
             ..
-        } => (explicit_db, file_store),
-        InstallMode::Extension => (false, false),
+        } => (explicit_db, storage),
+        InstallMode::Extension => (false, ServiceSecretStorage::NativeRequired),
     };
     manager::check_user()?;
     if let Some(previous) = previous {
@@ -508,7 +512,7 @@ fn install(
         &paths.home,
         (Ipv4Addr::LOCALHOST, port).into(),
         registration,
-        file_store,
+        storage,
     )?;
     let config = Config {
         executable,
