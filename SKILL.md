@@ -7,6 +7,25 @@ description: Work with the user's encrypted local Beankeeper Desktop workspace o
 
 ## Install and set up Beankeeper on this machine
 
+Run the commands below from an authorized shell in the owner's logged-in OS
+session. Choose the setup path for your client first.
+
+- **Claude Desktop chat.** Use the verified `.mcpb` extension.
+  [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
+- **Claude Code, local Codex, and Grok Build.** Follow the steps below when
+  running on the owner's machine.
+- **ChatGPT Work with local shell access.** Run setup, then check for the
+  local Beankeeper MCP tools in this session. If they are unavailable,
+  continue in local Codex on the same machine.
+  [ChatGPT MCP](https://learn.chatgpt.com/docs/extend/mcp)
+- **Grok Bot with approved local execution.** Run setup, then connect through
+  Grok Build or another supported local client. Grok Bot's Command MCP runs
+  on its cloud computer.
+  [Grok Bot computer access](https://docs.x.ai/grok-bot/computer-and-apps)
+- **Clients without local shell access.** Ask the owner to open a supported
+  local client. If none can run setup, give the owner the signed installation
+  instructions below for their OS.
+
 Run `bk service status --json` in the owner's logged-in user session. If
 `bk` is missing from PATH, check the per-user install location first.
 That is `$HOME/.local/bin/bk` on Linux and macOS, and
@@ -93,11 +112,6 @@ the owner that the books are encrypted locally, give the exact books path from
 `bk service uninstall` remove the connection and background service while
 preserving the books. The binary can then be removed from its install directory.
 
-If you cannot run commands on the owner's machine, give them the installation
-instructions for their platform or the Beankeeper extension for Claude Desktop
-when available. A browser-only agent needs a supported local connection to use
-the books.
-
 ## Manage background hosting
 
 Installers normally configure encrypted local books and background hosting.
@@ -129,9 +143,16 @@ read-only tool call through the local service.
 
 Supported clients are Claude Desktop, Claude Code, Codex CLI, Cursor, Gemini
 CLI, VS Code with Copilot, and Grok Build. An installed Beankeeper extension
-manages its own Claude Desktop connection. ChatGPT and hosted Grok appear as
-unsupported local configurations. Configuration changes leave other server
-entries in place and keep a private `.beankeeper-backup` beside the original.
+manages its own Claude Desktop connection. For local Codex in the ChatGPT
+desktop app, run `bk agents connect codex --json`, then restart the servers
+from **Settings → MCP servers**. Confirm that `company_list` responds in a
+local Codex chat.
+[ChatGPT MCP settings](https://learn.chatgpt.com/docs/extend/mcp)
+
+For Grok Build, run `bk agents connect grok-build --json` and restart the client.
+
+Configuration changes leave other server entries in place and keep a private
+`.beankeeper-backup` beside the original.
 `bk agents disconnect <client>` removes the managed entries and skill for that
 client. Remove the Beankeeper extension from Claude Desktop Settings to
 remove an extension-managed connection.
