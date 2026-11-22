@@ -184,10 +184,12 @@ stores the passphrase in the OS keychain, prepares a private recovery kit and
 merges the `beankeeper` MCP server into Claude Desktop, Claude Code and Codex
 configs. Restart the agent client afterward.
 
-Standalone `bk setup` defaults to read-only. For its optional bookkeeper preset,
-see the [standalone setup options](docs/setup.md#options). Never ask for, read,
-print, copy or attach the recovery kit, passphrase store or owner-token file.
-The owner controls recovery, credential changes and reversal authority.
+Standalone `bk setup` defaults to read-only. Its optional
+`--preset bookkeeper` records transactions directly without Desktop-provisioned
+spend limits. See the [standalone setup options](docs/setup.md#options).
+Never ask for, read, print, copy or attach the recovery kit, passphrase store or
+owner-token file. The owner controls recovery, credential changes and reversal
+authority.
 
 Manual setup configs invoke `bk mcp bridge` with an explicit endpoint and a
 private agent-token file path. This bridge connects to the running `bk serve`.

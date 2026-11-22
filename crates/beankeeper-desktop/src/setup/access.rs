@@ -5,7 +5,8 @@ use beankeeper_cli::{
     identity::{VerifiedAgent, WriteMode},
 };
 use clap::ValueEnum;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
+use serde_with::{As, DisplayFromStr};
 
 /// Least-privilege grants for the owner's MCP client.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, ValueEnum)]
@@ -61,19 +62,35 @@ impl TryFrom<&VerifiedAgent> for Preset {
 }
 
 /// The caller's current grants and signed write mode, with no credential material.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 pub struct AgentAccess {
     preset: Option<Preset>,
-    #[serde(deserialize_with = "deserialize_write_mode")]
+    #[serde(deserialize_with = "As::<DisplayFromStr>::deserialize")]
     write_mode: WriteMode,
-    note: String,
 }
 
 impl From<&VerifiedAgent> for AgentAccess {
     fn from(agent: &VerifiedAgent) -> Self {
-        let preset = Preset::try_from(agent).ok();
-        let write_mode = agent.write_mode();
-        let note = match (preset, write_mode) {
+        Self {
+            preset: Preset::try_from(agent).ok(),
+            write_mode: agent.write_mode(),
+        }
+    }
+}
+
+impl Serialize for AgentAccess {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut access = serializer.serialize_struct("AgentAccess", 3)?;
+        access.serialize_field("preset", &self.preset)?;
+        access.serialize_field("write_mode", &self.write_mode)?;
+        access.serialize_field("note", self.note())?;
+        access.end()
+    }
+}
+
+impl AgentAccess {
+    pub(crate) const fn note(&self) -> &'static str {
+        match (self.preset, self.write_mode) {
             (Some(Preset::ReadOnly), _) => {
                 "This agent can read the books. The owner can issue a bookkeeper credential to enable posting."
             }
@@ -86,25 +103,38 @@ impl From<&VerifiedAgent> for AgentAccess {
             (None, _) => {
                 "This credential has a custom grant. Its signed permissions determine which actions it can take."
             }
-        };
-        Self {
-            preset,
-            write_mode,
-            note: note.into(),
         }
     }
 }
 
-impl AgentAccess {
-    pub(crate) fn note(&self) -> &str {
-        &self.note
-    }
-}
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
 
-fn deserialize_write_mode<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<WriteMode, D::Error> {
-    String::deserialize(deserializer)?
-        .parse()
-        .map_err(serde::de::Error::custom)
+    use super::AgentAccess;
+
+    #[test]
+    fn status_note_is_derived_from_the_preset_and_write_mode() -> serde_json::Result<()> {
+        for (preset, write_mode, guidance) in [
+            (Some("read-only"), "direct", "can read the books"),
+            (
+                Some("bookkeeper"),
+                "direct",
+                "records transactions directly",
+            ),
+            (Some("bookkeeper"), "propose-only", "for sign-off"),
+            (None, "direct", "custom grant"),
+        ] {
+            let mut wire = json!({ "preset": preset, "write_mode": write_mode });
+            let access: AgentAccess = serde_json::from_value(wire.clone())?;
+            assert!(access.note().contains(guidance));
+
+            wire["note"] = json!("This agent can administer the ledger.");
+            let received: AgentAccess = serde_json::from_value(wire.clone())?;
+            assert_eq!(received.note(), access.note());
+            wire["note"] = json!(access.note());
+            assert_eq!(serde_json::to_value(received)?, wire);
+        }
+        Ok(())
+    }
 }

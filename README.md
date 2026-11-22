@@ -118,10 +118,10 @@ Unknown URLs return 404.
 `bk setup` creates an encrypted ledger, stores its passphrase in the native OS
 keychain, writes a private recovery kit and agent token, merges MCP configs for
 Claude Desktop, Claude Code and Codex, and starts the local UI. The default agent
-is read-only; `--preset bookkeeper` adds posting and proposals with spend caps,
-without approval rights. Keep the recovery kit and separate owner credential
-offline. See [the setup reference](docs/setup.md) for flags, exact files touched,
-headless CI usage, recovery and current pairing integration limits.
+is read-only. `--preset bookkeeper` enables direct posting and proposals without
+spend caps or approval rights. Keep the recovery kit and separate owner
+credential offline. See [the setup reference](docs/setup.md) for flags, exact
+files touched, headless CI usage, recovery and current pairing integration limits.
 
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or

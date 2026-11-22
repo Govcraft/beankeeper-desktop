@@ -5,8 +5,8 @@ use std::{error::Error, fs, os::unix::fs::PermissionsExt, path::Path, process::C
 
 use beankeeper_cli::{
     capability::Capability,
-    db::{self, Db, spend_limits::Cap},
-    identity,
+    db::{self, Db},
+    identity::{self, WriteMode},
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -151,19 +151,11 @@ fn encrypted_setup_preserves_configs_keeps_secrets_private_and_reads_keychain_on
 }
 
 #[test]
-fn bookkeeper_has_spend_caps_and_cannot_approve_or_administer() -> TestResult {
+fn standalone_bookkeeper_uses_direct_mode_without_spend_limits() -> TestResult {
     let setup = Setup::new()?;
     let output = setup
         .setup()
-        .args([
-            "--preset",
-            "bookkeeper",
-            "--max-post",
-            "1234",
-            "--daily-limit",
-            "5678",
-            "--demo",
-        ])
+        .args(["--preset", "bookkeeper", "--demo"])
         .output()?;
     assert!(
         output.status.success(),
@@ -173,6 +165,7 @@ fn bookkeeper_has_spend_caps_and_cannot_approve_or_administer() -> TestResult {
     let db = setup.db()?;
     let raw = fs::read_to_string(setup.path("books.agent-token"))?;
     let agent = identity::verify(db.read(), &raw)?;
+    assert_eq!(agent.write_mode(), WriteMode::Direct);
     for capability in [Capability::Read, Capability::Post, Capability::Propose] {
         assert!(agent.allows(capability)?);
     }
@@ -181,12 +174,7 @@ fn bookkeeper_has_spend_caps_and_cannot_approve_or_administer() -> TestResult {
         assert!(identity::authorize(db.read(), Some(&raw), capability).is_err());
     }
     let limits = db::spend_limits::list(db.read(), agent.uri(), None)?;
-    assert_eq!(limits.len(), 3);
-    for limit in limits {
-        let caps = limit.caps();
-        assert_eq!(caps.max_post().map(Cap::minor_units), Some(1234));
-        assert_eq!(caps.daily_limit().map(Cap::minor_units), Some(5678));
-    }
+    assert_eq!(limits.len(), 0, "unexpected spend limits: {limits:?}");
     assert_eq!(db::list_companies(db.read())?.len(), 3);
     Ok(())
 }

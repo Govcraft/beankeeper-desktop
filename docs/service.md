@@ -10,7 +10,8 @@ bk service status --json
 
 First install creates encrypted local books, a random passphrase in the native
 OS secret store, a private recovery kit, and separate owner and bookkeeper
-credentials. The bookkeeper credential posts transactions directly by default.
+credentials. The bookkeeper credential posts transactions directly without
+Desktop-provisioned spend limits.
 The installer registers login startup and starts the service. It never opens
 a browser or prints a passphrase, recovery key or bearer token. Keep an offline
 copy of the recovery kit and owner credential. Those files belong to the owner;
@@ -79,9 +80,10 @@ ledger MCP client after service replacement. Explicit bridge `--url` and
 
 Status verifies Desktop's launch identity and PID before using the private agent
 credential to open a short MCP session. It reads the version from the responding
-server and retrieves the verified `agent_access` from `setup_status`. Status
-reports `agent_access: null` when it cannot verify access with the running
-service. The bridge and status check work from the published endpoint
+server and retrieves the verified `agent_access` from `setup_status`. The
+plain-language `note` is derived from the reported preset and signed write mode.
+Status reports `agent_access: null` when it cannot verify access with the
+running service. The bridge and status check work from the published endpoint
 even when the calling agent has no connection to the OS service manager.
 `bk service status --json` includes an `error_code` if the published endpoint
 cannot be reached, its process identity differs, or MCP authentication fails.

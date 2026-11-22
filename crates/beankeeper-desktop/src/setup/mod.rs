@@ -16,14 +16,12 @@ use std::{
     time::Duration,
 };
 
-use beankeeper::types::Currency;
 use beankeeper_cli::{
     capability::Capability,
     cli::Cli,
     db::{
         self, Actor, Db, audit,
         audit::{ActorLabel, BlankActorLabel},
-        spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
     identity::{self, Admin, Granted, IssueRequest, IssuedCredential, VerifiedAgent, WriteMode},
@@ -79,36 +77,6 @@ pub struct SetupOptions {
     /// Local Desktop address; requires a nonzero port.
     #[arg(long, default_value = "127.0.0.1:8750")]
     pub bind: SocketAddr,
-    /// Spend limits used by standalone setup only.
-    #[command(flatten)]
-    spend_limits: StandaloneSpendLimits,
-}
-
-#[derive(Args, Debug)]
-struct StandaloneSpendLimits {
-    /// Bookkeeper's maximum post in USD cents, per initial company.
-    #[arg(long, default_value_t = Self::default().max_post)]
-    max_post: i64,
-    /// Bookkeeper's daily spend in USD cents, per initial company.
-    #[arg(long, default_value_t = Self::default().daily_limit)]
-    daily_limit: i64,
-}
-
-impl Default for StandaloneSpendLimits {
-    fn default() -> Self {
-        Self {
-            max_post: 10_000,
-            daily_limit: 50_000,
-        }
-    }
-}
-
-impl TryFrom<&StandaloneSpendLimits> for Caps {
-    type Error = CliError;
-
-    fn try_from(limits: &StandaloneSpendLimits) -> Result<Self, Self::Error> {
-        Self::from_minor_units(Some(limits.max_post), Some(limits.daily_limit))
-    }
 }
 
 /// Options controlling how setup opens the local Desktop workspace.
@@ -270,7 +238,6 @@ impl SetupOptions {
                 no_open: true,
             },
             bind,
-            spend_limits: StandaloneSpendLimits::default(),
         }
     }
 }
@@ -295,35 +262,25 @@ impl SetupMode {
 
 #[derive(Clone, Copy)]
 enum Provisioning {
-    StandaloneReadOnly,
-    StandaloneBookkeeper(Caps),
+    Standalone(Preset),
     Managed(SetupMode),
 }
 
-impl TryFrom<(&SetupOptions, ClientRegistration<'_>, SetupMode)> for Provisioning {
-    type Error = CliError;
-
-    fn try_from(
-        (options, registration, mode): (&SetupOptions, ClientRegistration<'_>, SetupMode),
-    ) -> Result<Self, Self::Error> {
-        Ok(match registration {
-            ClientRegistration::Standalone => {
-                let caps = Caps::try_from(&options.spend_limits)?;
-                match options.preset.unwrap_or_default() {
-                    Preset::ReadOnly => Self::StandaloneReadOnly,
-                    Preset::Bookkeeper => Self::StandaloneBookkeeper(caps),
-                }
-            }
+impl From<(Option<Preset>, ClientRegistration<'_>, SetupMode)> for Provisioning {
+    fn from(
+        (preset, registration, mode): (Option<Preset>, ClientRegistration<'_>, SetupMode),
+    ) -> Self {
+        match registration {
+            ClientRegistration::Standalone => Self::Standalone(preset.unwrap_or_default()),
             ClientRegistration::Managed { .. } | ClientRegistration::Skip => Self::Managed(mode),
-        })
+        }
     }
 }
 
 impl Provisioning {
     fn preset(self) -> Preset {
         match self {
-            Self::StandaloneReadOnly => Preset::ReadOnly,
-            Self::StandaloneBookkeeper(_) => Preset::Bookkeeper,
+            Self::Standalone(preset) => preset,
             Self::Managed(_) => Preset::MANAGED,
         }
     }
@@ -346,7 +303,7 @@ fn run_with_store(
         ));
     }
     let mode = SetupMode::for_ledger(&cli.db, options.force)?;
-    let provisioning = Provisioning::try_from((options, registration, mode))?;
+    let provisioning = Provisioning::from((options.preset, registration, mode));
     let home = options
         .config_home
         .clone()
@@ -759,13 +716,6 @@ fn provision(
         "desktop_agent",
         provisioning.preset().capabilities(),
     )?;
-    if let Provisioning::StandaloneBookkeeper(caps) = provisioning {
-        for company in db::list_companies(conn)? {
-            let limit =
-                SpendLimit::new(issued.agent_uri.clone(), company.slug, Currency::USD, caps);
-            Granted::<Admin>::with_db(db, actor, |grant| audit::set_spend_limit(grant, &limit))?;
-        }
-    }
     Granted::<Admin>::with_db(db, actor, |grant| audit::set_policy(grant, true))?;
     private_create(token_file, issued.token().expose_secret().as_bytes())?;
     Ok(())
