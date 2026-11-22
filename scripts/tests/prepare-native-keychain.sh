@@ -38,5 +38,6 @@ case "$RUNNER_OS" in
     security list-keychains -d user -s "$keychain"
     security default-keychain -d user -s "$keychain"
     security unlock-keychain -p "$password" "$keychain"
+    echo "BK_TEST_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
     ;;
 esac

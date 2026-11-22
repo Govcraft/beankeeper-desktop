@@ -66,6 +66,10 @@ def exercise_extension(binary, root, base_env, bundle=None):
         "BEANKEEPER_DESKTOP_STATE_DIR": str(parent / "state"),
         "BEANKEEPER_SERVICE_LOG_DIR": str(parent / "logs"),
     }
+    if sys.platform == "darwin":
+        # Use the login session that prepared the native keychain. The ledger,
+        # service state and logs still live under the test's temporary root.
+        env["HOME"] = str(Path.home())
     home = Path(env["USERPROFILE" if os.name == "nt" else "HOME"])
     if manifest is not None and os.name == "nt":
         local_data = parent / "Local app data"
@@ -90,6 +94,11 @@ def exercise_extension(binary, root, base_env, bundle=None):
             [str(executable), *arguments], env=kwargs.pop("env", env), capture_output=True,
             text=True, encoding="utf-8", timeout=120, **kwargs,
         )
+
+    if sys.platform == "darwin":
+        keychain = run("/usr/bin/security", "default-keychain", "-d", "user")
+        assert keychain.returncode == 0, keychain.stderr
+        assert Path(keychain.stdout.strip().strip('"')).resolve() == Path(env["BK_TEST_KEYCHAIN"]).resolve()
 
     baseline = run(binary, "service", "status", "--json")
     assert baseline.returncode == 0, baseline.stderr

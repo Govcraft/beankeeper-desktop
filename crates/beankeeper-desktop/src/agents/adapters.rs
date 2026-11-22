@@ -127,6 +127,7 @@ impl Adapter {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ExtensionId<'a>(&'a str);
 
 impl<'a> ExtensionId<'a> {
