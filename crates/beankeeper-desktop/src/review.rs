@@ -1,9 +1,10 @@
 //! Browser-only proposal review using the upstream atomic ledger operations.
 
+mod credential;
+
 use std::{
     path::Path as FsPath,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use axum::{
@@ -16,7 +17,6 @@ use axum::{
 };
 use beankeeper::types::{Amount, Money};
 use beankeeper_cli::{
-    capability::Capability,
     db::{
         self, Actor, Db,
         companies::CompanySlug,
@@ -29,6 +29,7 @@ use beankeeper_cli::{
     identity::{self, Admin, Approve, Granted, IssueRequest, ResolveProposal},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
+use credential::HumanCredentialRequest;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -73,25 +74,15 @@ impl ApprovalAuthority {
         let owner = match identity::verify(db.read(), owner_token.expose_secret().trim())
             .and_then(OwnerCredential::try_from)
         {
-            Ok(owner) => Actor::new("desktop-owner".parse()?).with_identity(owner.into()),
+            Ok(owner) => Actor::try_from(owner)?,
             Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => {
                 return Ok(Self::Unavailable);
             }
             Err(error) => return Err(error),
         };
         match Granted::<Admin>::with_db(db, &owner, |grant| {
-            let capabilities = [Capability::Read, Capability::Approve]
-                .map(|capability| capability.path().to_owned());
-            identity::issue_credential(
-                grant,
-                &IssueRequest {
-                    name: "desktop_human",
-                    capabilities: &capabilities,
-                    ttl: Duration::from_hours(12),
-                    public_key: None,
-                    generate_key: true,
-                },
-            )
+            let request = HumanCredentialRequest::default();
+            identity::issue_credential(grant, &IssueRequest::from(&request))
         }) {
             Ok(issued) => Ok(Self::Credential(issued.token().clone())),
             Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => Ok(Self::Unavailable),

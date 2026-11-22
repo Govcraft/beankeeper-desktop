@@ -9,6 +9,7 @@ use std::{
     io::{self, IsTerminal, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::LazyLock,
     time::Duration,
 };
 
@@ -18,6 +19,7 @@ use beankeeper_cli::{
     cli::Cli,
     db::{
         self, Actor, Db, audit,
+        audit::{ActorLabel, BlankActorLabel},
         spend_limits::{Caps, SpendLimit},
     },
     error::CliError,
@@ -628,9 +630,15 @@ impl TryFrom<VerifiedAgent> for OwnerCredential {
     }
 }
 
-impl From<OwnerCredential> for VerifiedAgent {
-    fn from(owner: OwnerCredential) -> Self {
-        owner.0
+impl TryFrom<OwnerCredential> for Actor {
+    type Error = BlankActorLabel;
+
+    fn try_from(owner: OwnerCredential) -> Result<Self, Self::Error> {
+        static OWNER_LABEL: LazyLock<Result<ActorLabel, BlankActorLabel>> =
+            LazyLock::new(|| "desktop-owner".parse());
+
+        let label = LazyLock::force(&OWNER_LABEL).clone()?;
+        Ok(Self::new(label).with_identity(owner.0))
     }
 }
 
@@ -660,9 +668,7 @@ impl SetupAuthority {
 
     fn into_actor(self) -> Result<Actor, CliError> {
         Ok(match self {
-            Self::Owner(owner) => {
-                Actor::new("desktop-owner".parse()?).with_identity((*owner).into())
-            }
+            Self::Owner(owner) => Actor::try_from(*owner)?,
             Self::FirstRun => Actor::new("desktop-setup".parse()?),
         })
     }
