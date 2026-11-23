@@ -1,15 +1,22 @@
 # Beankeeper Desktop
 
-Beankeeper Desktop adds a local browser workspace to `bk`. Your own agent talks
-to the authenticated MCP endpoint; the browser displays the workspace. This
-preview shows a financial snapshot, accounts, transactions, financial reports, tax
-summaries and reconciliation, with read-only ledger views and a browser review
-queue for agent proposals. Agents with a separate UI credential can navigate a
-paired tab and highlight rows over SSE.
+Your AI agent keeps your books through MCP or the `bk` command line. It can
+post transactions, reverse them, and run reports through either interface. When
+you ask about your finances, your agent answers in plain words with data it can
+chart.
+
+Beankeeper Desktop is the paid, self-hosted layer. It runs as a local service
+with signed updates and offline licensing.
+
+Your agent can link directly to optional browser views where you can review its
+work. To undo a posted transaction, ask an agent with reversal access to record
+an audited reversal. [One-step undo from the browser][browser-undo] is planned.
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
 [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
+
+[browser-undo]: https://github.com/Govcraft/beankeeper-desktop/issues/90
 
 ## Release packages
 
