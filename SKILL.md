@@ -275,6 +275,36 @@ tell the owner that you can now record transactions for them and they can say
 “make me read-only” to undo the change. The access change in chat uses the
 local owner’s authority and takes effect in the running managed connection.
 
+## Try it with demo books
+
+When the owner asks to try Beankeeper or see sample data, use `demo_start`
+on the managed Beankeeper connection. Wait for `state: active` before asking
+the books for anything. The owner can stay in chat. The service creates
+encrypted fictional books and uses your existing access for every call.
+
+1. On the managed connection, the next ledger calls use the demo automatically.
+   If you are using HTTP directly, send `Beankeeper-Ledger-Target` with the
+   returned `target` on each demo tool call and tool discovery request. Reuse
+   the same session and credential.
+2. Use `company_list` and choose a sample book. Try a report, explain the
+   numbers in plain words, and label the figures and any chart **fictional**.
+   Check that `_meta["beankeeper/ledgerTarget"]` matches the demo target.
+   Demo results are for chat or a chart. Desktop links and change receipts
+   are available on the owner's books.
+3. If asked to practice recording an entry, use `txn_post`. Report what
+   happened and provide the transaction ID. Use `txn_reverse` for individual
+   undo when your existing grant lists it. With the standard managed grant,
+   the owner can ask you to discard all practice entries by removing the demo.
+4. If asked to discard the demo, call `demo_remove`. From direct HTTP, send
+   this control request to the startup books by omitting the target header.
+   A successful removal returns a managed chat to the owner's books. If the
+   demo becomes unavailable, resolve that with `demo_start` or `demo_remove`
+   before making any more bookkeeping calls.
+
+For CLI automation, `bk demo start --json` and `bk demo remove --json` call
+the running service with its managed credential. A CLI call does not select
+books in an open chat.
+
 ## Guide the owner through book setup
 
 Start with `setup_status` over MCP or `bk --db BOOKS setup status --json`. For a
