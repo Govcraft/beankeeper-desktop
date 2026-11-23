@@ -1,6 +1,12 @@
 //! Parse browser wire parameters into filters that are safe to render and query.
 
-use beankeeper_cli::db::companies::CompanySlug;
+use beankeeper_cli::{
+    commands::{
+        report::DateRange,
+        summary::{SummaryDates, SummaryWindow},
+    },
+    db::companies::CompanySlug,
+};
 use serde::Deserialize;
 
 use crate::links::{
@@ -32,27 +38,68 @@ pub(crate) struct ViewQuery {
 }
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct DateBounds {
-    from: Option<Date>,
-    to: Option<Date>,
+pub(crate) enum DateBounds {
+    #[default]
+    Unbounded,
+    StartingOn(Date),
+    Through(Date),
+    Exact(Period),
+}
+
+impl TryFrom<(Option<Date>, Option<Date>)> for DateBounds {
+    type Error = ViewError;
+
+    fn try_from((from, to): (Option<Date>, Option<Date>)) -> Result<Self, Self::Error> {
+        match (from, to) {
+            (None, None) => Ok(Self::default()),
+            (Some(from), None) => Ok(Self::StartingOn(from)),
+            (None, Some(to)) => Ok(Self::Through(to)),
+            (Some(from), Some(to)) => Period::try_from((from, to)).map(Self::Exact),
+        }
+    }
+}
+
+impl TryFrom<DateRange> for DateBounds {
+    type Error = ViewError;
+
+    fn try_from(range: DateRange) -> Result<Self, Self::Error> {
+        let date = |value: chrono::NaiveDate| {
+            Date::try_from(value).map_err(|error| ViewError::Invalid(error.0))
+        };
+        Ok(Self::Exact(Period {
+            from: date(range.from())?,
+            to: date(range.to())?,
+            range,
+        }))
+    }
+}
+
+impl From<DateBounds> for SummaryWindow {
+    fn from(bounds: DateBounds) -> Self {
+        match bounds {
+            DateBounds::Unbounded => Self::default(),
+            DateBounds::StartingOn(from) => Self::StartingOn(from.date()),
+            DateBounds::Through(to) => Self::Through(to.date()),
+            DateBounds::Exact(period) => Self::Exact(period.range),
+        }
+    }
 }
 
 impl DateBounds {
-    pub(crate) fn new(from: Option<Date>, to: Option<Date>) -> Result<Self, ViewError> {
-        if matches!((from, to), (Some(from), Some(to)) if from > to) {
-            return Err(ViewError::Invalid(
-                "The start date must not be after the end date.",
-            ));
-        }
-        Ok(Self { from, to })
-    }
-
     pub(crate) const fn from(self) -> Option<Date> {
-        self.from
+        match self {
+            Self::StartingOn(from) => Some(from),
+            Self::Exact(period) => Some(period.from),
+            Self::Unbounded | Self::Through(_) => None,
+        }
     }
 
     pub(crate) const fn to(self) -> Option<Date> {
-        self.to
+        match self {
+            Self::Through(to) => Some(to),
+            Self::Exact(period) => Some(period.to),
+            Self::Unbounded | Self::StartingOn(_) => None,
+        }
     }
 }
 
@@ -66,9 +113,23 @@ pub(crate) enum Comparison {
 pub(crate) struct Period {
     from: Date,
     to: Date,
+    range: DateRange,
+}
+
+impl TryFrom<(Date, Date)> for Period {
+    type Error = ViewError;
+
+    fn try_from((from, to): (Date, Date)) -> Result<Self, Self::Error> {
+        let range = DateRange::new(from.date(), to.date())
+            .map_err(|_| ViewError::Invalid("The start date must not be after the end date."))?;
+        Ok(Self { from, to, range })
+    }
 }
 
 impl Comparison {
+    const INVALID_BOUNDS: &str =
+        "Comparison requires compare_from and compare_to in chronological order.";
+
     fn parse(from: Option<&str>, to: Option<&str>) -> Result<Option<Self>, ViewError> {
         fn date(value: &str) -> Result<Date, ViewError> {
             value.parse().map_err(|_| {
@@ -78,31 +139,17 @@ impl Comparison {
         match (from, to) {
             (None, None) => Ok(None),
             (None, Some(to)) => Ok(Some(Self::AsOf(date(to)?))),
-            (Some(from), Some(to)) => {
-                let (from, to) = (date(from)?, date(to)?);
-                if from > to {
-                    return Err(ViewError::Invalid(
-                        "Comparison requires compare_from and compare_to in chronological order.",
-                    ));
-                }
-                Ok(Some(Self::Period(Period { from, to })))
-            }
-            (Some(_), None) => Err(ViewError::Invalid(
-                "Comparison requires compare_from and compare_to in chronological order.",
-            )),
+            (Some(from), Some(to)) => Period::try_from((date(from)?, date(to)?))
+                .map(|period| Some(Self::Period(period)))
+                .map_err(|_| ViewError::Invalid(Self::INVALID_BOUNDS)),
+            (Some(_), None) => Err(ViewError::Invalid(Self::INVALID_BOUNDS)),
         }
     }
 
     pub(crate) fn bounds(self) -> DateBounds {
         match self {
-            Self::Period(period) => DateBounds {
-                from: Some(period.from),
-                to: Some(period.to),
-            },
-            Self::AsOf(to) => DateBounds {
-                from: None,
-                to: Some(to),
-            },
+            Self::Period(period) => DateBounds::Exact(period),
+            Self::AsOf(to) => DateBounds::Through(to),
         }
     }
 }
@@ -150,6 +197,23 @@ pub(crate) struct Filters {
     pub(super) offset: Offset,
 }
 
+impl TryFrom<&Filters> for SummaryDates {
+    type Error = ViewError;
+
+    fn try_from(filters: &Filters) -> Result<Self, Self::Error> {
+        let comparison = match filters.comparison {
+            Some(Comparison::Period(period)) => Some(period.range),
+            Some(Comparison::AsOf(_)) => {
+                return Err(ViewError::Invalid(
+                    "Financial summary comparison requires compare_from and compare_to.",
+                ));
+            }
+            None => None,
+        };
+        Ok((filters.dates.into(), comparison).into())
+    }
+}
+
 pub(crate) fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -169,11 +233,15 @@ where
 
 impl ViewQuery {
     pub(crate) fn parse(self) -> Result<Filters, ViewError> {
-        let dates = DateBounds::new(parse_optional(self.from)?, parse_optional(self.to)?)?;
+        let dates = (parse_optional(self.from)?, parse_optional(self.to)?).try_into()?;
         let currency = nonempty(self.currency)
-            .map(|value| value.trim().to_ascii_uppercase().parse())
+            .map(|value| {
+                value
+                    .parse::<beankeeper::types::Currency>()
+                    .map(Currency::from)
+            })
             .transpose()
-            .map_err(|LinkError(message)| ViewError::Invalid(message))?;
+            .map_err(|_| ViewError::Invalid("Choose a valid currency code."))?;
         Ok(Filters {
             company: nonempty(self.company)
                 .map(|slug| slug.parse().map_err(|_| ViewError::NotFound))

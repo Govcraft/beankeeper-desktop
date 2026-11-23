@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use beankeeper::types::Currency;
 use beankeeper_cli::{
-    commands::verify,
     db::{
         self, Actor, Db,
         proposals::{self, ProposalState, ResolvedBy},
         spend_limits::{Caps, SpendLimit},
+        verification::VerifiedLedger,
     },
     identity::{self, Admin, Granted, IssueRequest},
 };
@@ -303,7 +303,7 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
     );
     assert_eq!(transaction_count(&db)?, 1);
     assert!(!queue(&server)?.contains(&format!("/review/{id}?")));
-    verify::execute_json(&db)?;
+    VerifiedLedger::read(&db)?;
     Ok(())
 }
 
@@ -384,7 +384,7 @@ fn human_rejection_records_reason_without_posting_and_cannot_be_approved_later()
         .text()?;
     assert!(detail.contains("Wrong &lt;vendor&gt; &amp; amount"));
     assert!(!detail.contains("Approve and post"));
-    verify::execute_json(&db)?;
+    VerifiedLedger::read(&db)?;
     Ok(())
 }
 
@@ -517,7 +517,7 @@ fn verification_caches_its_last_result_and_explicit_recheck_detects_tampering() 
         "UPDATE audit_log SET actor = 'tampered' WHERE id = ?1",
         [row.id],
     )?;
-    assert!(verify::execute_json(&db).is_err());
+    assert!(VerifiedLedger::read(&db).is_err());
     assert_eq!(
         queue(&server)?,
         intact,
@@ -585,7 +585,7 @@ fn verification_failure_stays_visible_when_tampered_limits_prevent_queue_reads()
             .ok_or("proposer URI")?],
     )?;
     assert_eq!(affected, 1);
-    assert!(verify::execute_json(&db).is_err());
+    assert!(VerifiedLedger::read(&db).is_err());
     assert_eq!(
         server
             .client
@@ -646,7 +646,7 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
         ProposalState::Pending
     );
     assert_eq!(transaction_count(&db)?, 0);
-    verify::execute_json(&db)?;
+    VerifiedLedger::read(&db)?;
     Ok(())
 }
 

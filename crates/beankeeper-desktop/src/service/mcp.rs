@@ -8,6 +8,9 @@ use rmcp::{
     },
     service::RequestContext,
 };
+use std::path::Path;
+
+use serde::Deserialize;
 use serde_json::json;
 
 use super::{ServiceError, ServiceOperation, Status, execute};
@@ -19,7 +22,7 @@ impl ServerHandler for Lifecycle {
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("beankeeper-service", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some("Local per-user service management only. Answer in plain words using the structured status. Desktop is optional. Recovery material stays under the owner's control; never read or show recovery, passphrase or owner-token files.".into());
+        info.instructions = Some("Manage per-user hosting and agent access. Use access_set when the owner asks to change access. Answer in plain words using the structured status. Desktop is optional. Recovery material stays under the owner's control; never read or show recovery, passphrase or owner-token files.".into());
         info
     }
     fn list_tools(
@@ -43,13 +46,29 @@ impl ServerHandler for Lifecycle {
             Ok(operation) => operation,
             Err(error) => return Ok(failure(&error).into()),
         };
-        let result = tokio::task::spawn_blocking(move || execute(operation, None)).await;
+        let result = tokio::task::spawn_blocking(move || execute(operation, None, None)).await;
         Ok(match result {
             Ok(Ok(status)) => reply(status),
             Ok(Err(error)) => failure(&error),
             Err(_) => failure(&ServiceError::Worker),
         }
         .into())
+    }
+}
+
+pub(crate) fn access_call(params: &serde_json::Value, books: &Path) -> CallToolResult {
+    let Ok(request) = CallToolRequestParams::deserialize(params) else {
+        return failure(&ServiceError::Arguments);
+    };
+    match ServiceOperation::try_from(request) {
+        Ok(operation @ ServiceOperation::AccessSet(_)) => {
+            match execute(operation, None, Some(books)) {
+                Ok(status) => reply(status),
+                Err(error) => failure(&error),
+            }
+        }
+        Ok(_) => failure(&ServiceError::UnknownTool),
+        Err(error) => failure(&error),
     }
 }
 

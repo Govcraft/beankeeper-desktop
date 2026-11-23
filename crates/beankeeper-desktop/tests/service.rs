@@ -922,3 +922,382 @@ fn assert_stop_clears_stale_runtime(
     assert!(!runtime.exists());
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+struct LegacyService {
+    root: tempfile::TempDir,
+    books: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl LegacyService {
+    fn new() -> TestResult<Self> {
+        use beankeeper_desktop::setup::keychain::{restrict_directory, restrict_file};
+        use std::fs;
+
+        let root = tempfile::tempdir()?;
+        let books = root.path().join("data/books.db");
+        let fixture = Self { root, books };
+        let root = fixture.root.path();
+        let home = root.join("home");
+        let state = root.join("state");
+        let definition = root.join("config/systemd/user/beankeeper-desktop.service");
+        let data = root.join("data");
+        fs::create_dir_all(&data)?;
+        restrict_directory(&data)?;
+        fs::create_dir_all(&home)?;
+        fs::create_dir_all(&state)?;
+        fs::create_dir_all(definition.parent().ok_or("service definition parent")?)?;
+        let output = fixture
+            .command()
+            .arg("--db")
+            .arg(&fixture.books)
+            .args([
+                "setup",
+                "--preset",
+                "read-only",
+                "--non-interactive",
+                "--no-start",
+                "--no-open",
+                "--secret-store-file",
+            ])
+            .arg(fixture.books.with_extension("passphrase"))
+            .output()?;
+        assert!(output.status.success(), "cannot provision upgrade fixture");
+
+        // rc.12 issued the same read-only Desktop bootstrap grant and used
+        // this registration format. It had no per-credential provenance file.
+        fs::remove_file(fixture.books.with_extension("agent-access.json"))?;
+        let config = state.join("service.json");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "books": fixture.books,
+                "port": 8750,
+                "executable": env!("CARGO_BIN_EXE_bk"),
+            }))?,
+        )?;
+        restrict_file(&config)?;
+        fs::write(&definition, "fixture managed registration")?;
+        Ok(fixture)
+    }
+
+    fn command(&self) -> std::process::Command {
+        let root = self.root.path();
+        let mut command = without_session(root);
+        command
+            .env("HOME", root.join("home"))
+            .env("CODEX_HOME", root.join("home/codex"))
+            .env("XDG_CONFIG_HOME", root.join("config"));
+        command
+    }
+
+    fn host(&self) -> TestResult<common::Server> {
+        let mut command = self.command();
+        command.args(["service", "run"]);
+        common::Server::launch(command)
+    }
+
+    fn bridge(&self) -> std::process::Command {
+        let mut command = self.command();
+        command.args(["mcp", "bridge", "--service"]);
+        command
+    }
+
+    fn secret(&self, extension: &str) -> TestResult<secrecy::SecretString> {
+        Ok(std::fs::read_to_string(self.books.with_extension(extension))?.into())
+    }
+
+    fn db(&self) -> TestResult<beankeeper_cli::db::Db> {
+        Ok(beankeeper_cli::db::Db::open_existing(
+            &self.books,
+            Some(&self.secret("passphrase")?),
+        )?)
+    }
+
+    fn service_access(&self, arguments: &[&str]) -> TestResult<Value> {
+        let output = self.command().arg("service").args(arguments).output()?;
+        assert!(output.status.success(), "service access command failed");
+        Ok(serde_json::from_slice(&output.stdout)?)
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_managed_access_migrates_and_updates_an_open_stdio_session() -> TestResult {
+    use beankeeper_cli::{db::audit, identity};
+    use secrecy::ExposeSecret;
+
+    let fixture = LegacyService::new()?;
+    let prior = fixture.secret("agent-token")?;
+    let db = fixture.db()?;
+    let prior_id = identity::verify(db.read(), prior.expose_secret())?
+        .jti()
+        .to_owned();
+    let owner_id = identity::verify(db.read(), fixture.secret("owner-token")?.expose_secret())?
+        .jti()
+        .to_owned();
+    let host = fixture.host()?;
+    let access = fixture.service_access(&["status", "--json"])?;
+    let access = &access["agent_access"];
+    assert_eq!(access["preset"], "bookkeeper");
+    assert_eq!(access["write_mode"], "direct");
+    assert_eq!(access["migrated"], true);
+    assert!(
+        access["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("make me read-only"))
+    );
+    assert_eq!(
+        stdio_tool(fixture.bridge(), "setup_status", &json!({}))?["agent_access"],
+        *access
+    );
+    let replacement = fixture.secret("agent-token")?;
+    let replacement_id = identity::verify(db.read(), replacement.expose_secret())?
+        .jti()
+        .to_owned();
+    assert!(identity::verify(db.read(), prior.expose_secret()).is_err());
+    let audit = audit::list_audit(db.read(), &common::audit_query())?;
+    for (action, id) in [
+        (audit::AuditAction::TokenIssue, replacement_id),
+        (audit::AuditAction::TokenRevoke, prior_id),
+    ] {
+        let row = audit
+            .iter()
+            .find(|row| row.action == action && row.entity_id == id)
+            .ok_or("rotation is missing its audit row")?;
+        assert_eq!(row.actor, "desktop-owner");
+        assert_eq!(row.token_jti.as_deref(), Some(owner_id.as_str()));
+    }
+    assert_managed_access_pipe(&fixture)?;
+    let status = fixture.service_access(&[
+        "access-set",
+        "--preset",
+        "bookkeeper",
+        "--write-mode",
+        "propose-only",
+        "--json",
+    ])?;
+    let mcp = stdio_tool(
+        fixture.bridge(),
+        "access_set",
+        &json!({
+            "preset": "bookkeeper", "write_mode": "propose-only"
+        }),
+    )?;
+    assert_eq!(status["agent_access"], mcp["agent_access"]);
+    assert_eq!(mcp["agent_access"]["write_mode"], "propose-only");
+    assert!(mcp["agent_access"]["migrated"].is_null());
+
+    let mut explicit_bridge = fixture.command();
+    explicit_bridge
+        .args([
+            "mcp",
+            "bridge",
+            "--url",
+            &format!("{}/mcp", host.base),
+            "--token-file",
+        ])
+        .arg(fixture.books.with_extension("agent-token"));
+    let rejected = stdio_tool_response(
+        explicit_bridge,
+        "access_set",
+        &json!({"preset":"bookkeeper"}),
+    )?;
+    assert!(rejected.is_null() || rejected["isError"] == true);
+    drop(host);
+    let _host = fixture.host()?;
+    let restarted = fixture.service_access(&["status", "--json"])?;
+    assert_eq!(restarted["agent_access"], mcp["agent_access"]);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_managed_access_pipe(fixture: &LegacyService) -> TestResult {
+    let mut child = fixture
+        .bridge()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().ok_or("bridge input")?;
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"access-test","version":"1"}
+        }}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"access_set","arguments":{"preset":"read-only","write_mode":"propose-only"}
+        }}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"access_set","arguments":{"preset":"read-only"}
+        }}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"setup_status"}}),
+    ] {
+        writeln!(input, "{request}")?;
+    }
+    drop(input);
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    let frames: Vec<Value> = std::str::from_utf8(&output.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let result = |id| -> TestResult<&Value> {
+        frames
+            .iter()
+            .find(|frame| frame["id"] == id)
+            .map(|frame| &frame["result"])
+            .ok_or_else(|| format!("missing MCP result {id}").into())
+    };
+    let tools = |id| -> TestResult<&Vec<Value>> {
+        result(id)?["tools"]
+            .as_array()
+            .ok_or_else(|| "missing MCP tool list".into())
+    };
+    assert_eq!(result(1)?["capabilities"]["tools"]["listChanged"], true);
+    assert!(tools(2)?.iter().any(|tool| tool["name"] == "access_set"));
+    assert!(tools(2)?.iter().any(|tool| tool["name"] == "txn_post"));
+    assert_eq!(result(3)?["structuredContent"]["code"], "SERVICE_ARGUMENTS");
+    assert_eq!(
+        result(4)?["structuredContent"]["agent_access"]["preset"],
+        "read-only"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["method"] == "notifications/tools/list_changed")
+    );
+    assert!(tools(5)?.iter().all(|tool| tool["name"] != "txn_post"));
+    assert_eq!(
+        result(6)?["structuredContent"]["agent_access"]["preset"],
+        "read-only"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recorded_read_only_choice_survives_service_start_and_resume() -> TestResult {
+    use beankeeper_cli::{db::audit, identity};
+    use secrecy::ExposeSecret;
+
+    let fixture = LegacyService::new()?;
+    let original = fixture.secret("agent-token")?;
+    let status = fixture.service_access(&["access-set", "--preset", "read-only", "--json"])?;
+    assert_eq!(status["agent_access"]["preset"], "read-only");
+    let resume = fixture
+        .command()
+        .args(["setup", "--resume", "--non-interactive"])
+        .output()?;
+    assert!(resume.status.success(), "cannot resume managed setup");
+    let _host = fixture.host()?;
+    let status = fixture.service_access(&["status", "--json"])?;
+    assert_eq!(status["agent_access"]["preset"], "read-only");
+    let db = fixture.db()?;
+    assert!(identity::verify(db.read(), original.expose_secret()).is_ok());
+    let audit = audit::list_audit(db.read(), &common::audit_query())?;
+    assert!(
+        audit
+            .iter()
+            .all(|row| row.action != audit::AuditAction::TokenRevoke)
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_resume_honors_books_selected_by_flag_or_environment() -> TestResult {
+    use secrecy::ExposeSecret;
+
+    let fixture = LegacyService::new()?;
+    let managed_grant = fixture.secret("agent-token")?;
+    for source in ["flag", "environment"] {
+        let books = fixture.books.with_file_name(format!("{source}.db"));
+        let mut command = fixture.command();
+        if source == "flag" {
+            command.arg("--db").arg(&books);
+        } else {
+            command.env("BEANKEEPER_DB", &books);
+        }
+        let output = command
+            .args([
+                "setup",
+                "--force",
+                "--non-interactive",
+                "--no-start",
+                "--no-open",
+                "--config-home",
+            ])
+            .arg(fixture.root.path().join(source))
+            .arg("--secret-store-file")
+            .arg(books.with_extension("passphrase"))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "setup with books from {source}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(books.is_file());
+    }
+    assert!(
+        fixture.secret("agent-token")?.expose_secret() == managed_grant.expose_secret(),
+        "resuming explicitly selected books rotated the managed credential"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_resume_finishes_an_interrupted_audited_rotation() -> TestResult {
+    use beankeeper_cli::{db::Actor, identity};
+    use secrecy::ExposeSecret;
+    use std::fs;
+
+    let fixture = LegacyService::new()?;
+    let db = fixture.db()?;
+    let old = fixture.secret("agent-token")?;
+    let old_id = identity::verify(db.read(), old.expose_secret())?
+        .jti()
+        .to_owned();
+    let owner = identity::verify(db.read(), fixture.secret("owner-token")?.expose_secret())?;
+    let actor = Actor::new("desktop-owner".parse()?).with_identity(owner);
+    let replacement = issue_sign_off_grant(&db, &actor)?;
+    let state = fixture.books.with_extension("agent-access.json");
+    fs::write(
+        &state,
+        serde_json::to_vec(&json!({
+            "Pending": {
+                "before": null,
+                "old": old_id,
+                "after": {"token": replacement.token_jti, "origin": "owner-choice"}
+            }
+        }))?,
+    )?;
+    beankeeper_desktop::setup::keychain::restrict_file(&state)?;
+    fs::write(
+        fixture.books.with_extension("agent-token"),
+        replacement.token().expose_secret(),
+    )?;
+
+    let result = fixture
+        .command()
+        .args(["setup", "--resume", "--non-interactive"])
+        .output()?;
+    assert!(
+        result.status.success(),
+        "could not finish interrupted rotation"
+    );
+    assert!(identity::verify(db.read(), old.expose_secret()).is_err());
+    assert_eq!(
+        identity::verify(db.read(), replacement.token().expose_secret())?.jti(),
+        replacement.token_jti.as_str()
+    );
+    let rows = beankeeper_cli::db::audit::list_audit(db.read(), &common::audit_query())?;
+    assert!(rows.iter().any(|row| row.action
+        == beankeeper_cli::db::audit::AuditAction::TokenRevoke
+        && row.entity_id == old_id
+        && row.actor == "desktop-owner"));
+    Ok(())
+}

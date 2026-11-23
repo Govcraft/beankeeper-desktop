@@ -17,7 +17,7 @@ use clap::Args;
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, Response},
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
@@ -32,7 +32,7 @@ use crate::{
 };
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
-const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask for missing setup facts. After a direct post, tell the owner what was recorded and give them the book and transaction ID for undo. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
+const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask for missing setup facts. After a direct post, tell the owner what was recorded and give them the book and transaction ID for undo. If setup_status reports migrated access, tell the owner they can now ask you to record transactions or say “make me read-only” to undo. Use access_set when the owner asks to change access. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
 
 fn exceeds_message_limit(bytes: usize) -> bool {
     u64::try_from(bytes).map_or(true, |length| length > MAX_MESSAGE_BYTES)
@@ -137,7 +137,12 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
             ServiceError::NotInstalled => ServiceError::NotReady,
             error => error,
         })?;
-        run_connected(endpoint.url().clone(), endpoint.token_file(), None)
+        run_connected(
+            endpoint.url().clone(),
+            endpoint.token_file(),
+            None,
+            Some(endpoint.books()),
+        )
     } else {
         run_connected(
             local_url(&options.url)?,
@@ -145,6 +150,7 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
                 .token_file
                 .as_deref()
                 .ok_or(BridgeError::InvalidToken)?,
+            None,
             None,
         )
     }
@@ -160,6 +166,7 @@ pub fn run_extension() -> Result<(), BridgeError> {
         endpoint.url().clone(),
         endpoint.token_file(),
         Some(EXTENSION_INSTRUCTIONS),
+        Some(endpoint.books()),
     )
 }
 
@@ -167,9 +174,15 @@ fn run_connected(
     url: Url,
     token_file: &Path,
     instructions: Option<&'static str>,
+    managed_books: Option<&Path>,
 ) -> Result<(), BridgeError> {
     let mut transport =
         connected_transport(url, token_file, instructions, Duration::from_secs(120))?;
+    transport.managed = managed_books.map(|books| ManagedConnection {
+        books: books.into(),
+        token_file: token_file.into(),
+        initialize: None,
+    });
     let result = transport.forward(io::stdin().lock(), &mut io::stdout().lock());
     transport.close();
     result
@@ -204,6 +217,24 @@ fn connected_transport(
     instructions: Option<&'static str>,
     timeout: Duration,
 ) -> Result<Transport, BridgeError> {
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(timeout)
+        .build()?;
+    Ok(Transport {
+        client,
+        url,
+        authorization: authorization(token_file)?,
+        session: None,
+        protocol: None,
+        managed: None,
+        instructions,
+    })
+}
+
+fn authorization(token_file: &Path) -> Result<HeaderValue, BridgeError> {
     let secret = PrivateFile::open(token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
@@ -214,22 +245,7 @@ fn connected_transport(
     let value = Zeroizing::new(format!("Bearer {token}"));
     let mut authorization = HeaderValue::from_str(&value).map_err(|_| BridgeError::InvalidToken)?;
     authorization.set_sensitive(true);
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, authorization);
-    let client = Client::builder()
-        .no_proxy()
-        .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(timeout)
-        .default_headers(headers)
-        .build()?;
-    Ok(Transport {
-        client,
-        url,
-        session: None,
-        protocol: None,
-        instructions,
-    })
+    Ok(authorization)
 }
 
 fn local_url(input: &str) -> Result<Url, BridgeError> {
@@ -248,9 +264,17 @@ fn local_url(input: &str) -> Result<Url, BridgeError> {
     Ok(url)
 }
 
+struct ManagedConnection {
+    books: PathBuf,
+    token_file: PathBuf,
+    initialize: Option<Value>,
+}
+
 struct Transport {
     client: Client,
     url: Url,
+    authorization: HeaderValue,
+    managed: Option<ManagedConnection>,
     session: Option<HeaderValue>,
     protocol: Option<String>,
     instructions: Option<&'static str>,
@@ -279,8 +303,91 @@ impl Transport {
             {
                 return Err(BridgeError::Protocol);
             }
-            self.exchange(&message, output)?;
+            self.forward_message(&message, output)?;
         }
+    }
+
+    fn forward_message(
+        &mut self,
+        message: &Value,
+        output: &mut impl Write,
+    ) -> Result<(), BridgeError> {
+        self.refresh_access(output)?;
+        if let Some(managed) = &self.managed
+            && self.protocol.is_some()
+            && message["method"] == "tools/call"
+            && message["params"]["name"] == service::ACCESS_TOOL
+            && let Some(id) = message.get("id")
+        {
+            let result = service::access_call(&message["params"], &managed.books);
+            write_message(
+                output,
+                &json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            )?;
+            self.refresh_access(output)?;
+            return Ok(());
+        }
+        match self.exchange(message, output) {
+            Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
+                if self.refresh_access(output)? =>
+            {
+                self.exchange(message, output)?;
+            }
+            Err(error) if self.managed.is_some() && lost_session(&error) => {
+                self.reconnect()?;
+                self.exchange(message, output)?;
+            }
+            result => {
+                result?;
+            }
+        }
+        if message["method"] == "initialize"
+            && let Some(managed) = &mut self.managed
+        {
+            managed.initialize = Some(message.clone());
+        }
+        Ok(())
+    }
+
+    fn refresh_access(&mut self, output: &mut impl Write) -> Result<bool, BridgeError> {
+        let Some(managed) = &self.managed else {
+            return Ok(false);
+        };
+        let current = authorization(&managed.token_file)?;
+        if self.authorization == current {
+            return Ok(false);
+        }
+        self.authorization = current;
+        if self.protocol.is_some() {
+            write_message(
+                output,
+                &json!({"jsonrpc": "2.0", "method":"notifications/tools/list_changed"}),
+            )?;
+        }
+        Ok(true)
+    }
+
+    // Retry only after an explicit missing-session response or a failed connection.
+    // A request that may have reached a ledger is never replayed.
+    fn reconnect(&mut self) -> Result<(), BridgeError> {
+        let managed = self.managed.as_ref().ok_or(BridgeError::Protocol)?;
+        let endpoint = service::connection()?;
+        if endpoint.books() != managed.books {
+            return Err(BridgeError::Protocol);
+        }
+        self.url = endpoint.url().clone();
+        self.authorization = authorization(endpoint.token_file())?;
+        self.session = None;
+        self.protocol = None;
+        if let Some(initialize) = managed.initialize.clone() {
+            let mut sink = io::sink();
+            self.exchange(&initialize, &mut sink)?;
+            self.exchange(
+                &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                &mut sink,
+            )?;
+        }
+        Ok(())
     }
 
     fn exchange(
@@ -291,6 +398,7 @@ impl Transport {
         let mut request = self
             .client
             .post(self.url.clone())
+            .header(AUTHORIZATION, self.authorization.clone())
             .header("Accept", "application/json, text/event-stream")
             .json(message);
         if let Some(session) = &self.session {
@@ -310,6 +418,8 @@ impl Transport {
         let relay = ReplyContext {
             request_id: message.get("id"),
             instructions: if initial { self.instructions } else { None },
+            managed_initialize: initial && self.managed.is_some(),
+            managed_tools: message["method"] == "tools/list" && self.managed.is_some(),
         };
         let replies = relay_response(response, relay, output)?;
         if initial {
@@ -384,6 +494,7 @@ impl Transport {
             let mut request = self
                 .client
                 .delete(self.url.clone())
+                .header(AUTHORIZATION, self.authorization.clone())
                 .header("Mcp-Session-Id", session)
                 .timeout(Duration::from_secs(2));
             if let Some(protocol) = &self.protocol {
@@ -394,10 +505,20 @@ impl Transport {
     }
 }
 
-#[derive(Clone, Copy)]
+fn lost_session(error: &BridgeError) -> bool {
+    match error {
+        BridgeError::Rejected(StatusCode::NOT_FOUND) => true,
+        BridgeError::Http(error) => error.is_connect(),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
 struct ReplyContext<'a> {
     request_id: Option<&'a Value>,
     instructions: Option<&'static str>,
+    managed_initialize: bool,
+    managed_tools: bool,
 }
 
 fn relay_response(
@@ -455,10 +576,36 @@ fn emit(
         }
         existing.push_str(instructions);
     }
-    serde_json::to_writer(&mut *output, &message).map_err(|_| BridgeError::Protocol)?;
+    if context
+        .request_id
+        .is_some_and(|id| message.get("id") == Some(id))
+        && let Some(result) = message.get_mut("result")
+    {
+        if context.managed_initialize
+            && let Some(tools) = result
+                .get_mut("capabilities")
+                .and_then(|capabilities| capabilities.get_mut("tools"))
+                .and_then(Value::as_object_mut)
+        {
+            tools.insert("listChanged".into(), json!(true));
+        }
+        if context.managed_tools
+            && result.get("nextCursor").is_none_or(Value::is_null)
+            && let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut)
+            && let Some(tool) = service::access_tool()
+        {
+            tools.push(serde_json::to_value(tool).map_err(|_| BridgeError::Protocol)?);
+        }
+    }
+    write_message(output, &message)?;
+    Ok(message)
+}
+
+fn write_message(output: &mut impl Write, message: &Value) -> Result<(), BridgeError> {
+    serde_json::to_writer(&mut *output, message).map_err(|_| BridgeError::Protocol)?;
     output.write_all(b"\n")?;
     output.flush()?;
-    Ok(message)
+    Ok(())
 }
 
 fn relay_sse(
@@ -518,7 +665,7 @@ mod tests {
     fn reply(request_id: Option<&Value>) -> ReplyContext<'_> {
         ReplyContext {
             request_id,
-            instructions: None,
+            ..ReplyContext::default()
         }
     }
 
@@ -631,15 +778,14 @@ mod tests {
         });
         let mut authorization = HeaderValue::from_static("Bearer test-secret");
         authorization.set_sensitive(true);
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, authorization);
         let mut transport = Transport {
             client: Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(5))
-                .default_headers(headers)
                 .build()?,
             url,
+            authorization,
+            managed: None,
             session: None,
             protocol: None,
             instructions: None,

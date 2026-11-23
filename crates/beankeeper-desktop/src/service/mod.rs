@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use beankeeper_cli::cli::Cli;
+use beankeeper_cli::{cli::Cli, db::Db, passphrase};
 use clap::{Args, Subcommand};
 use reqwest::Url;
 use secrecy::ExposeSecret;
@@ -26,13 +26,18 @@ use crate::{
     bridge,
     instance::{self, BooksPath, Health, InstanceId, ListenerAddress, LiveListener},
     private_file::PrivateFile,
-    setup::{self, AgentAccess, ClientRegistration, ServiceSecretStorage, keychain},
+    setup::{
+        self, AccessOptions, AgentAccess, ClientRegistration, ServiceSecretStorage, keychain,
+        managed::AccessChange,
+    },
 };
 
 pub use crate::instance::PortWarning;
 pub(crate) use extension::connection as extension_connection;
+pub(crate) use mcp::access_call;
 pub use operation::InstallOptions;
 use operation::ServiceOperation;
+pub(crate) use operation::{ACCESS_TOOL, access_tool};
 use session::UserSessionEnv;
 
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -62,6 +67,15 @@ pub enum ServiceCommand {
     /// Report authenticated health, running version, endpoint and paths.
     Status {
         /// Emit structured JSON, including when stopped or not installed.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change the managed agent's access with the local owner's authority.
+    AccessSet {
+        /// Requested agent access.
+        #[command(flatten)]
+        access: AccessOptions,
+        /// Emit structured service status after the change.
         #[arg(long)]
         json: bool,
     },
@@ -279,6 +293,22 @@ impl Config {
     }
 }
 
+/// Find the installed service's registered books, if any.
+///
+/// # Errors
+/// Returns invalid service path or registration errors.
+pub fn managed_books() -> Result<Option<PathBuf>, ServiceError> {
+    let paths = Paths::discover()?;
+    Ok(Config::load(&paths)?
+        .filter(|_| paths.definition.is_file())
+        .map(|config| config.books))
+}
+
+pub(crate) fn managed_books_match(books: &Path) -> Result<bool, ServiceError> {
+    Ok(managed_books()?
+        .is_some_and(|managed| fs::canonicalize(books).is_ok_and(|books| books == managed)))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Runtime {
@@ -406,6 +436,7 @@ pub(crate) fn port_warning() -> Option<PortWarning> {
 pub(crate) struct Endpoint {
     address: LiveListener,
     url: Url,
+    books: PathBuf,
     token_file: PathBuf,
     version: String,
     pid: u32,
@@ -414,6 +445,10 @@ pub(crate) struct Endpoint {
 impl Endpoint {
     pub(crate) fn url(&self) -> &Url {
         &self.url
+    }
+
+    pub(crate) fn books(&self) -> &Path {
+        &self.books
     }
 
     pub(crate) fn token_file(&self) -> &Path {
@@ -446,6 +481,7 @@ fn endpoint_at(paths: &Paths, books: &Path) -> Result<Option<Endpoint>, ServiceE
     Ok(Some(Endpoint {
         address,
         url: runtime.bind.url("/mcp")?,
+        books: runtime.books.as_ref().into(),
         token_file: runtime.books.as_ref().with_extension("agent-token"),
         version: health.version,
         pid: runtime.pid.get(),
@@ -572,14 +608,16 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         _ => {}
     }
     let operation = ServiceOperation::try_from(options.command)?;
-    let status = execute(operation, Some((cli, explicit_db)))?;
+    let status = execute(operation, Some((cli, explicit_db)), None)?;
     match options.command {
-        ServiceCommand::Status { json: true } => println!(
-            "{}",
-            serde_json::to_string(&status)
-                .map_err(|_| ServiceError::Configuration("cannot serialize service status"))?
-        ),
-        ServiceCommand::Status { json: false } => {
+        ServiceCommand::Status { json: true } | ServiceCommand::AccessSet { json: true, .. } => {
+            println!(
+                "{}",
+                serde_json::to_string(&status)
+                    .map_err(|_| ServiceError::Configuration("cannot serialize service status"))?
+            );
+        }
+        ServiceCommand::Status { json: false } | ServiceCommand::AccessSet { json: false, .. } => {
             println!(
                 "{}\nBooks: {}\nLog: {}",
                 status.plain_text(),
@@ -614,6 +652,7 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
 fn execute(
     operation: ServiceOperation,
     ledger: Option<(Cli, bool)>,
+    expected_books: Option<&Path>,
 ) -> Result<Status, ServiceError> {
     let paths = Paths::discover()?;
     if matches!(operation, ServiceOperation::Status) {
@@ -657,6 +696,23 @@ fn execute(
                 remove_if_exists(&paths.config())?;
                 remove_if_exists(&paths.runtime())?;
             }
+        }
+        ServiceOperation::AccessSet(access) => {
+            let config = previous.as_ref().ok_or(ServiceError::NotInstalled)?;
+            if expected_books.is_some_and(|books| books != config.books)
+                || matches!(ledger, Some((cli, true)) if fs::canonicalize(&cli.db)? != config.books)
+            {
+                return Err(ServiceError::Configuration(
+                    "access-set applies to the installed service's books",
+                ));
+            }
+            let mut cli = service_ledger_options()?;
+            cli.db.clone_from(&config.books);
+            let _passphrase = setup::stored_passphrase(&mut cli)?;
+            change_access(&cli, AccessChange::Set(access))?;
+            let mut status = status_at(&paths)?;
+            status.agent_access.get_or_insert_with(|| access.into());
+            return Ok(status);
         }
         ServiceOperation::Status => {}
     }
@@ -721,6 +777,7 @@ fn install(
     let executable = std::env::current_exe()?;
     let previous_executable = previous.map_or(executable.as_path(), |config| &config.executable);
     let registration = mode.registration(previous_executable);
+    let adopting = previous.is_none() && cli.db.try_exists()?;
     let port = previous.map_or_else(
         || SocketAddr::from(ListenerAddress::default()).port(),
         |config| config.port,
@@ -732,6 +789,11 @@ fn install(
         registration,
         mode.storage(),
     )?;
+    if adopting && cli.db.with_extension("agent-token").try_exists()? {
+        cli.passphrase.passphrase_file = None;
+        let _passphrase = setup::stored_passphrase(&mut cli)?;
+        change_access(&cli, AccessChange::Preserve)?;
+    }
     let config = Config {
         executable,
         books: fs::canonicalize(&cli.db)?,
@@ -747,6 +809,38 @@ fn install(
 fn service_ledger_options() -> Result<Cli, ServiceError> {
     <Cli as clap::Parser>::try_parse_from(["bk", "mcp", "serve"])
         .map_err(|_| ServiceError::Configuration("cannot construct service ledger options"))
+}
+
+fn change_access(cli: &Cli, change: AccessChange) -> Result<(), ServiceError> {
+    let passphrase = passphrase::resolve_passphrase(
+        cli.passphrase.passphrase_fd,
+        cli.passphrase.passphrase_file.as_deref(),
+        false,
+    )
+    .map_err(setup::SetupError::from)?;
+    let db = Db::open_existing(&cli.db, passphrase.as_ref()).map_err(setup::SetupError::from)?;
+    setup::managed::reconcile(&db, &cli.db, change)?;
+    Ok(())
+}
+
+/// Restart the running managed service after replacing its own executable.
+/// # Errors
+/// Returns service registration, manager or readiness errors.
+pub fn restart_updated(executable: &Path) -> Result<bool, ServiceError> {
+    let paths = Paths::discover()?;
+    let Some(config) = Config::load(&paths)? else {
+        return Ok(false);
+    };
+    if config.executable != executable || endpoint_at(&paths, &config.books)?.is_none() {
+        return Ok(false);
+    }
+    let _lock = lock(&paths.state.join("service-operation.lock"))?;
+    let session = UserSessionEnv::discover()?;
+    manager::stop(&paths, &session)?;
+    remove_if_exists(&paths.runtime())?;
+    manager::start(&paths, &session)?;
+    wait_ready(&paths, &config.books)?;
+    Ok(true)
 }
 
 fn wait_ready(paths: &Paths, books: &Path) -> Result<(), ServiceError> {
@@ -785,6 +879,7 @@ fn host(paths: &Paths) -> Result<(), ServiceError> {
     let mut cli = service_ledger_options()?;
     cli.db.clone_from(&config.books);
     let _passphrase = setup::stored_passphrase(&mut cli)?;
+    change_access(&cli, AccessChange::Migrate)?;
     if bound.port() != config.port {
         config.port = bound.port();
         private_json(&paths.config(), &config)?;
@@ -803,7 +898,7 @@ fn bind_listener(preferred: u16) -> io::Result<TcpListener> {
         Err(error) => Err(error),
     }
 }
-fn lock(path: &Path) -> Result<fs::File, ServiceError> {
+pub(crate) fn lock(path: &Path) -> Result<fs::File, ServiceError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)

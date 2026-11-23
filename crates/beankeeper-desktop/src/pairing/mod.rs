@@ -12,6 +12,8 @@ pub use agent_key::AgentKey;
 pub use browser_session_id::BrowserSessionId;
 pub(crate) use routes::{human_guard, human_post};
 pub(crate) use routes::{mcp_guard, router};
+#[cfg(test)]
+pub(crate) use tests::authenticated_browser;
 
 use std::{
     collections::HashMap,
@@ -22,6 +24,7 @@ use std::{
 };
 
 use axum::http::{HeaderMap, header};
+use beankeeper_cli::{commands::summary::OwnerSummaryReader, db::Db, error::CliError};
 use secret::Secret;
 
 use crate::boundary::SameOrigin;
@@ -114,6 +117,14 @@ impl fmt::Debug for HumanSession {
 impl HumanSession {
     pub(crate) fn id(&self) -> &BrowserSessionId {
         &self.session.id
+    }
+
+    pub(crate) fn summary_reader<'a>(
+        &'a self,
+        db: &'a Db,
+    ) -> Result<OwnerSummaryReader<'a>, CliError> {
+        let actor = format!("desktop-local-human/{}", self.id()).parse()?;
+        Ok(OwnerSummaryReader::from_authenticated_owner(db, actor))
     }
 
     pub(crate) fn csrf_token(&self) -> &str {
@@ -522,6 +533,13 @@ mod tests {
             HeaderValue::from_static("http://127.0.0.1:8750"),
         );
         verified_origin(&headers)
+    }
+
+    pub(crate) fn authenticated_browser() -> Result<HumanSession, Box<dyn Error>> {
+        let (state, url) = PairingState::new("127.0.0.1:8750".parse()?)?;
+        let now = Instant::now();
+        let cookie = state.redeem(capability(&url)?, &origin()?, now)?;
+        Ok(state.session(&headers(&cookie)?, now)?)
     }
 
     #[test]

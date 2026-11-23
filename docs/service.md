@@ -30,10 +30,11 @@ passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-
 
 | Command | Result |
 | --- | --- |
-| `bk service install` | Create books on first use; register and start hosting. Reinstall updates the executable registration and preserves books, credentials, recovery kit and agent grants. |
+| `bk service install` | Create books on first use; register and start hosting. Reinstall updates the executable registration, keeps the books and recovery kit, and checks the managed grant for the one-time legacy migration. |
 | `bk service start` | Enable login startup and start installed hosting. |
 | `bk service stop` | Stop hosting and disable login startup and automatic restarts until `start`. |
 | `bk service status --json` | Report installed/running state, running Desktop version, PID, MCP endpoint, optional Desktop URL, books and log paths, and the running agent's preset and write mode. |
+| `bk service access-set --preset read-only --json` | Change the managed agent’s grant under the local owner’s authority. See the write modes below. |
 | `bk service uninstall` | Stop and remove hosting. Preserve all books, secrets, recovery material and MCP configuration. |
 | `bk service mcp` | Serve local lifecycle tools over stdio, including while the HTTP service is stopped. |
 
@@ -71,24 +72,27 @@ install. The internal `install-extension` command is reserved for the native
 bundle's first launch, when the bundle owns client registration and uses the
 OS keychain.
 
-This separate local stdio connection can restart a stopped HTTP server. It grants service
-management, without ledger approval or administration capabilities. Only
-configure it in agents the owner trusts to manage local hosting. The HTTP ledger
-endpoint retains the existing upstream capability checks and browser pairing.
+This separate local stdio connection can restart a stopped HTTP server and
+change the managed agent’s access. Configure the local stdio connections in
+agents the owner trusts with these operations. The HTTP ledger endpoint
+uses the agent’s verified capabilities and browser pairing.
 Restart agent clients once after installation to load the new connections.
 
 Hosting always binds IPv4 `127.0.0.1`. A fresh installation prefers port 8750.
 When the configured port is occupied, the service saves an available fallback
 port in `service.json` for future starts. The bound socket stays reserved through
 server startup. A private runtime descriptor publishes the actual port for
-status checks, `bk ui link` and each `bridge --service` connection. Restart or reconnect the
-ledger MCP client after service replacement. Explicit bridge `--url` and
-`--token-file` options still work for manual servers.
+status checks, `bk ui link` and each `bridge --service` connection. The managed
+bridge reloads rotated credentials in the existing client session and signals
+that the tool list changed. A bridge process from a release that loaded its
+credential only at startup may need one MCP reconnect after upgrading.
+Use explicit bridge `--url` and `--token-file` for manual servers.
 
 Status verifies Desktop's launch identity and PID before using the private agent
 credential to open a short MCP session. It reads the version from the responding
 server and retrieves the verified `agent_access` from `setup_status`. The
-plain-language `note` is derived from the reported preset and signed write mode.
+plain-language `note` describes the verified access and explains how to undo
+the legacy migration when `agent_access.migrated` is true.
 Status reports `agent_access: null` when it cannot verify access with the
 running service. The bridge and status check work from the published endpoint
 even when the calling agent has no connection to the OS service manager.
@@ -115,32 +119,26 @@ session with `bk --db BOOKS --company COMPANY txn reverse ID` or use
 `txn_reverse` on an owner-controlled connection that holds `ledger/reverse`.
 That appends a linked reversal and records both actions in audit history.
 
-To opt in to sign-off, use the upstream agent commands in your own terminal.
-Use the `books` path from `bk service status --json` and supply your owner
-credential privately through `BK_AGENT_TOKEN` for the issuance and revocation
-commands. List the existing grants with `bk --db BOOKS --json agent list` and
-identify the current managed grant's token ID.
+Ask your connected local agent to change its access. It uses `access_set` on
+the managed ledger connection or the local service connection. Both use the
+owner’s private local authority. The CLI offers the same operation.
 
-```sh
-bk --db BOOKS --json agent issue --name desktop_agent --generate-key \
-  --caps ledger/read,ledger/post,ledger/propose --write-mode propose-only --ttl 30d
-```
+| What to ask for | MCP arguments | CLI |
+| --- | --- | --- |
+| Let my agent post. | `{"preset":"bookkeeper","write_mode":"direct"}` | `bk service access-set --preset bookkeeper` |
+| Switch to propose-only. | `{"preset":"bookkeeper","write_mode":"propose-only"}` | `bk service access-set --preset bookkeeper --write-mode propose-only` |
+| Make my agent read-only. | `{"preset":"read-only"}` | `bk service access-set --preset read-only` |
 
-Direct the issuance output to a new owner-only file before running the command.
-It contains both the replacement bearer (`data.token`) and a generated private
-key. Replace the contents of the sibling `books.agent-token` file with just the
-new bearer, keeping the file owner-only. Reload the agent's MCP connection and
-verify `agent_access.write_mode` with `bk service status --json`. Revoke the
-previous token with `bk --db BOOKS agent revoke OLD_TOKEN_ID`, and remove the
-temporary issuance output when finished. Keep the owner token in its own file.
+Add `--json` for structured CLI status. Each changed grant is issued and the
+previous credential is revoked under the verified owner’s identity. The
+credential and private key material stay out of tool responses. Access applies
+across companies in the selected ledger. Under `propose-only`, posting returns
+a pending proposal that a separate approving credential can resolve.
 
-The grant applies across companies in the selected ledger. To use a different
-grant policy for a book, keep that book in its own ledger. For occasional
-sign-off within one ledger, ask the agent to use `txn_propose` for that entry.
-`txn_post` under a `propose-only` grant returns a pending proposal that a
-separate approving credential can resolve. For an existing read-only grant,
-use the same replacement steps with `--write-mode direct` to enable direct
-posting. Reinstall preserves the existing grant.
+On startup or managed setup resume, Desktop moves the original legacy
+read-only default to bookkeeper with direct posting. It preserves recorded
+owner choices and recognized replacement grants. The next access status explains
+the change and tells the owner that “make me read-only” undoes it in chat.
 
 ## Platform behavior and files
 
@@ -202,7 +200,9 @@ and [Windows task restart settings](https://learn.microsoft.com/en-us/powershell
 The shell installer defaults to `~/.local/bin`; PowerShell defaults to
 `%LOCALAPPDATA%\Programs\Beankeeper Desktop`. Both register hosting after verifying
 and installing the binary. Reinstalling stops previous managed hosting before
-replacement and runs service installation again. Books and credentials survive.
+replacement and runs service installation again. A self-update also restarts a
+running service when it replaces that service’s executable. The managed access
+migration runs when the updated service starts.
 
 Skip background setup with `install.sh --no-service`, `install.ps1 -NoService`,
 or `BK_NO_SERVICE=1`. The Windows EXE also accepts `/NOSERVICE=1` or an unchecked

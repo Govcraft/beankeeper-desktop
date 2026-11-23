@@ -292,10 +292,6 @@ impl AccountSelection {
         }
     }
 
-    pub(crate) fn codes(&self) -> Vec<String> {
-        self.as_slice().iter().map(ToString::to_string).collect()
-    }
-
     pub(crate) fn ledger_codes(&self) -> Vec<LedgerAccountCode> {
         self.as_slice().iter().map(|code| code.0.clone()).collect()
     }
@@ -420,7 +416,6 @@ macro_rules! ledger_string {
     };
 }
 
-ledger_string!(Currency, LedgerCurrency, "Choose a valid currency code.");
 ledger_string!(
     AccountCode,
     LedgerAccountCode,
@@ -431,6 +426,29 @@ ledger_string!(
     ClearanceStatus,
     "Clearance must be uncleared, cleared or reconciled."
 );
+
+/// A canonical uppercase ISO currency code for a Desktop link.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct Currency(LedgerCurrency);
+
+impl FromStr for Currency {
+    type Err = LinkError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        LedgerCurrency::from_code(value)
+            .map(Self::from)
+            .map_err(|_| LinkError("Choose a valid currency code."))
+    }
+}
+
+impl fmt::Display for Currency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+string_wire!(Currency);
 
 impl From<LedgerCurrency> for Currency {
     fn from(currency: LedgerCurrency) -> Self {

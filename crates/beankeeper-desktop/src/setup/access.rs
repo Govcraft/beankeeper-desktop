@@ -4,12 +4,15 @@ use beankeeper_cli::{
     capability::Capability,
     identity::{VerifiedAgent, WriteMode},
 };
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_with::{As, DisplayFromStr};
 
 /// Least-privilege grants for the owner's MCP client.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, ValueEnum, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Preset {
     /// Read reports and ledger data. The standalone setup default.
@@ -20,8 +23,6 @@ pub enum Preset {
 }
 
 impl Preset {
-    pub(super) const MANAGED: Self = Self::Bookkeeper;
-
     pub(super) fn capabilities(self) -> &'static [Capability] {
         match self {
             Self::ReadOnly => &[Capability::Read],
@@ -46,6 +47,80 @@ impl Preset {
     }
 }
 
+/// Access settings accepted by both the local CLI and MCP.
+#[derive(Args, Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessOptions {
+    /// Choose read-only or bookkeeper access.
+    #[arg(long, value_enum)]
+    preset: Preset,
+    /// Choose direct posting or proposals (bookkeeper only for proposals).
+    #[arg(long)]
+    #[serde(
+        default,
+        deserialize_with = "As::<Option<DisplayFromStr>>::deserialize"
+    )]
+    #[schemars(schema_with = "write_mode_schema")]
+    write_mode: Option<WriteMode>,
+}
+
+// Upstream owns the parser. This only describes the accepted wire values.
+fn write_mode_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "enum": [WriteMode::Direct, WriteMode::ProposeOnly, null] })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedAccess {
+    ReadOnly,
+    Bookkeeper(WriteMode),
+}
+
+impl Default for ManagedAccess {
+    fn default() -> Self {
+        Self::Bookkeeper(WriteMode::default())
+    }
+}
+
+impl From<Preset> for ManagedAccess {
+    fn from(preset: Preset) -> Self {
+        match preset {
+            Preset::ReadOnly => Self::ReadOnly,
+            Preset::Bookkeeper => Self::default(),
+        }
+    }
+}
+
+impl TryFrom<AccessOptions> for ManagedAccess {
+    type Error = UnrecognizedPreset;
+
+    fn try_from(options: AccessOptions) -> Result<Self, Self::Error> {
+        match (options.preset, options.write_mode) {
+            (Preset::ReadOnly, Some(WriteMode::ProposeOnly)) => Err(UnrecognizedPreset),
+            (Preset::Bookkeeper, Some(mode)) => Ok(Self::Bookkeeper(mode)),
+            (preset, _) => Ok(Self::from(preset)),
+        }
+    }
+}
+
+impl ManagedAccess {
+    pub(super) const fn selection(self) -> (Preset, WriteMode) {
+        match self {
+            Self::ReadOnly => (Preset::ReadOnly, WriteMode::Direct),
+            Self::Bookkeeper(mode) => (Preset::Bookkeeper, mode),
+        }
+    }
+
+    pub(super) fn grants(self) -> (&'static [Capability], WriteMode) {
+        let (preset, mode) = self.selection();
+        (preset.capabilities(), mode)
+    }
+
+    pub(super) fn matches(self, agent: &VerifiedAgent) -> bool {
+        let (preset, mode) = self.selection();
+        agent.write_mode() == mode && Preset::try_from(agent) == Ok(preset)
+    }
+}
+
 /// A verified grant that does not match either Desktop preset.
 #[derive(Debug, PartialEq, Eq)]
 pub struct UnrecognizedPreset;
@@ -67,6 +142,8 @@ pub struct AgentAccess {
     preset: Option<Preset>,
     #[serde(deserialize_with = "As::<DisplayFromStr>::deserialize")]
     write_mode: WriteMode,
+    #[serde(default)]
+    migrated: bool,
 }
 
 impl From<&VerifiedAgent> for AgentAccess {
@@ -74,26 +151,48 @@ impl From<&VerifiedAgent> for AgentAccess {
         Self {
             preset: Preset::try_from(agent).ok(),
             write_mode: agent.write_mode(),
+            migrated: false,
+        }
+    }
+}
+
+impl From<ManagedAccess> for AgentAccess {
+    fn from(access: ManagedAccess) -> Self {
+        let (preset, write_mode) = access.selection();
+        Self {
+            preset: Some(preset),
+            write_mode,
+            migrated: false,
         }
     }
 }
 
 impl Serialize for AgentAccess {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut access = serializer.serialize_struct("AgentAccess", 3)?;
+        let mut access =
+            serializer.serialize_struct("AgentAccess", 3 + usize::from(self.migrated))?;
         access.serialize_field("preset", &self.preset)?;
         access.serialize_field("write_mode", &self.write_mode)?;
         access.serialize_field("note", self.note())?;
+        if self.migrated {
+            access.serialize_field("migrated", &true)?;
+        }
         access.end()
     }
 }
 
 impl AgentAccess {
+    pub(crate) const fn with_migration_notice(mut self) -> Self {
+        self.migrated = true;
+        self
+    }
+
     pub(crate) const fn note(&self) -> &'static str {
+        if self.migrated {
+            return "I can now record transactions for you. Say ‘make me read-only’ to undo.";
+        }
         match (self.preset, self.write_mode) {
-            (Some(Preset::ReadOnly), _) => {
-                "This agent can read the books. The owner can issue a bookkeeper credential to enable posting."
-            }
+            (Some(Preset::ReadOnly), _) => "This agent can read the books.",
             (Some(Preset::Bookkeeper), WriteMode::Direct) => {
                 "This agent records transactions directly. After a post, tell the owner what was recorded and give them the transaction ID for undo."
             }

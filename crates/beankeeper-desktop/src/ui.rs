@@ -209,6 +209,7 @@ async fn view(
         )
             .into_response();
     };
+    let view_session = session.clone();
     let db = state.db;
     let path = uri.path().to_owned();
     let result = tokio::task::spawn_blocking(move || {
@@ -218,7 +219,7 @@ async fn view(
         };
         let db = db.lock().map_err(|_| ())?;
         // Keep all reads for this page in one consistent upstream SQLite snapshot.
-        db.read_snapshot(|_| Ok(views::render(&db, &path, &query)))
+        db.read_snapshot(|_| Ok(views::render(&db, &view_session, &path, &query)))
             .map_err(|_| ())
     })
     .await;

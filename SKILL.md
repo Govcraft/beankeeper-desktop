@@ -126,18 +126,17 @@ Installers normally configure encrypted local books and background hosting.
 Use `service_status` on the separate `beankeeper-service` MCP connection to check
 readiness. `service_start`, `service_stop`, `service_install` and
 `service_uninstall` manage the per-user host, even when its HTTP server is stopped.
-These local tools have OS-user service authority, separate from ledger grants;
-use them only when the owner's request authorizes that lifecycle action.
-They accept no arguments and return named errors or structured status with a
+These local tools use OS-user service authority. Call them when the owner asks
+for the corresponding action. They return named errors or structured status with a
 plain-language message, running version, MCP endpoint and optional Desktop link.
 When running, `service_status` also reports the managed credential's
 `agent_access`, including its `preset`, `write_mode` and a plain-language note.
 Answer in plain words first. Offer the Desktop view only when useful.
 
 The ledger MCP entry runs `bk mcp bridge --service`, discovering the current
-loopback port and using the private agent-token file. If unavailable, use
-`service_status` to diagnose and `service_start` when authorized. Reconnect the
-ledger MCP client after restarting hosting. CLI equivalents are
+loopback port and reloading the private agent credential when it changes. If
+unavailable, use `service_status` to diagnose and `service_start` when authorized.
+CLI equivalents are
 `bk service install | uninstall | start | stop | status --json`.
 Pass `file_store: true` to `service_install` to use a private passphrase file
 for new books, or `no_agents: true` to leave client configurations alone.
@@ -227,17 +226,18 @@ If the owner wants to undo a posting, give them
 `ledger/reverse`. Upstream appends an offsetting transaction linked to the
 original and records the owner's action in the audit trail.
 
-For ongoing sign-off, the owner can choose `ProposeOnly` for a grant. Ask them
-to follow the [owner credential steps](docs/service.md#choose-a-write-mode)
-from their own terminal. The replacement grant applies across companies in
-that ledger. Use a separate ledger for a book that needs its own grant policy,
-or use `txn_propose` (`bk txn propose`) for individual entries the owner wants
-to sign off within a shared ledger. A `propose-only` post returns a pending
-proposal ID. Report it as pending and give the owner its optional review link.
+When the owner asks to change managed access, call `access_set` on the local
+ledger or lifecycle connection. Use `{"preset":"read-only"}` to turn off posting,
+`{"preset":"bookkeeper","write_mode":"direct"}` to enable direct posting, or
+`{"preset":"bookkeeper","write_mode":"propose-only"}` for ongoing sign-off.
+The CLI is `bk service access-set --preset PRESET [--write-mode MODE] --json`.
+Use the returned access to tell the owner what changed. For a proposal, report
+it as pending and give the owner its optional review link.
 
-Reinstall preserves existing grants, including older read-only credentials.
-If `agent_access.preset` is `read-only` and the owner wants the agent to post,
-point them to the owner credential steps for issuing a direct bookkeeper grant.
+When `setup_status` or `service_status` reports `agent_access.migrated: true`,
+tell the owner that you can now record transactions for them and they can say
+“make me read-only” to undo the change. The access change in chat uses the
+local owner’s authority and takes effect in the running managed connection.
 
 ## Guide the owner through book setup
 

@@ -9,7 +9,7 @@ use beankeeper_cli::{
 };
 
 use crate::{
-    links::values::{BudgetWindow, Date},
+    links::values::BudgetWindow,
     markup::{Markup, markup, write_markup},
     money,
     views::{
@@ -64,10 +64,7 @@ pub(super) fn read_budget(
 }
 
 pub(super) fn income_dates(statement: &IncomeStatement) -> Result<DateBounds, ViewError> {
-    let dates = statement.dates();
-    let date =
-        |date: chrono::NaiveDate| Date::try_from(date).map_err(|error| ViewError::Invalid(error.0));
-    DateBounds::new(Some(date(dates.from())?), Some(date(dates.to())?))
+    statement.dates().try_into()
 }
 
 pub(super) fn income_context(

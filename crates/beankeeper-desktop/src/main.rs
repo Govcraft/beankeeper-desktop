@@ -123,7 +123,13 @@ fn main() -> ExitCode {
         }
         DesktopCommand::Setup(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            setup::run(&mut ledger, &options).map_err(|error| DesktopError::Setup(Box::new(error)))
+            setup::SetupBooks::try_from((ledger.db.as_path(), matches.value_source("db"), &options))
+                .map_err(|error| DesktopError::Service(Box::new(error)))
+                .and_then(|books| {
+                    ledger.db = books.into();
+                    setup::run(&mut ledger, &options)
+                        .map_err(|error| DesktopError::Setup(Box::new(error)))
+                })
         }
         DesktopCommand::Bridge(options) => bridge::run(&options).map_err(DesktopError::Bridge),
         DesktopCommand::Extension => bridge::run_extension().map_err(DesktopError::Bridge),
@@ -157,6 +163,7 @@ fn check_updates() -> Result<(), DesktopError> {
 }
 
 fn install_update() -> Result<(), DesktopError> {
+    let executable = std::env::current_exe()?;
     product::state_dir()
         .and_then(|dir| {
             if product::update_checks() == updates::UpdateChecks::Disabled {
@@ -169,11 +176,20 @@ fn install_update() -> Result<(), DesktopError> {
                 updates::UpdateChecks::Enabled,
                 updates::now(),
             )?;
-            updates::self_update(&dir.join("updates.json"), &std::env::current_exe()?)?;
-            println!("Desktop updated. Restart bk serve to use the installed version.");
+            updates::self_update(&dir.join("updates.json"), &executable)?;
             Ok(())
         })
-        .map_err(DesktopError::Product)
+        .map_err(DesktopError::Product)?;
+    if service::restart_updated(&executable)
+        .map_err(|error| DesktopError::Service(Box::new(error)))?
+    {
+        println!("Desktop updated and the local service restarted.");
+    } else {
+        println!(
+            "Desktop updated. Restart any running bk serve command to use the installed version."
+        );
+    }
+    Ok(())
 }
 
 fn upstream(matches: &clap::ArgMatches) -> ExitCode {

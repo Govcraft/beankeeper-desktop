@@ -96,9 +96,10 @@ a fallback when port 8750 is occupied. On Linux, lifecycle commands can find the
 owner's session bus when Claude Desktop, an IDE, tmux or SSH launches `bk`
 without the login environment. Status verifies the live service directly.
 Recovery material stays in a private file under the owner's control.
-Fresh managed installs give the agent a bookkeeper credential that posts
-transactions directly and attributes each write to that agent. The owner can
-undo with an audited reversal or opt in to sign-off for a grant.
+Managed installs default to a bookkeeper credential that posts directly and
+attributes each write to the agent. An original managed read-only default
+moves to bookkeeper during upgrade. Ask your agent to switch to read-only or
+propose-only any time. To undo a posted transaction, use an audited reversal.
 See [background hosting](docs/service.md) for OS paths, credential storage,
 Linux lingering, upgrades and how to change the agent's write mode.
 

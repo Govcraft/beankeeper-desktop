@@ -8,7 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, de::DeserializeOwned};
 
 use super::{ServiceCommand, ServiceError};
-use crate::setup::{ClientRegistration, ServiceSecretStorage};
+use crate::setup::{AccessOptions, ClientRegistration, ManagedAccess, ServiceSecretStorage};
+
+pub(crate) const ACCESS_TOOL: &str = "access_set";
 
 /// Options shared by the CLI and the `service_install` tool.
 #[derive(Args, Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
@@ -49,6 +51,7 @@ pub(super) enum ServiceOperation {
     Start,
     Stop,
     Status,
+    AccessSet(ManagedAccess),
     InstallExtension,
 }
 
@@ -68,13 +71,14 @@ enum Exposure {
 }
 
 impl ServiceOperation {
-    pub(super) fn all() -> [Self; 6] {
+    pub(super) fn all() -> [Self; 7] {
         [
             Self::Install(InstallOptions::default()),
             Self::Uninstall,
             Self::Start,
             Self::Stop,
             Self::Status,
+            Self::AccessSet(ManagedAccess::default()),
             Self::InstallExtension,
         ]
     }
@@ -83,7 +87,7 @@ impl ServiceOperation {
         match self {
             Self::Install(_) => Exposure::Mcp {
                 name: "service_install",
-                description: "Install and start per-user Beankeeper hosting. Creates encrypted local books on first use, a private owner recovery kit, and a bookkeeper credential that posts directly. Reinstall preserves books and grants.",
+                description: "Install and start per-user Beankeeper hosting. Creates encrypted local books on first use, a private owner recovery kit, and a bookkeeper credential that posts directly. Reinstall preserves books and explicit access choices.",
             },
             Self::Uninstall => Exposure::Mcp {
                 name: "service_uninstall",
@@ -101,6 +105,10 @@ impl ServiceOperation {
                 name: "service_status",
                 description: "Report authenticated running status, version, the agent's grant and write mode, local MCP endpoint, books path and optional Desktop link. No secrets are returned.",
             },
+            Self::AccessSet(_) => Exposure::Mcp {
+                name: ACCESS_TOOL,
+                description: "Change the managed agent’s access at the owner’s request. Use read-only to undo posting access, or bookkeeper with direct or propose-only writes. Tell the owner the resulting access in plain words. No secrets are returned.",
+            },
             Self::InstallExtension => Exposure::CliOnly(CliOnlyReason::BundleFirstLaunch),
         }
     }
@@ -110,6 +118,7 @@ impl ServiceOperation {
             Exposure::Mcp { name, description } => {
                 let schema = match self {
                     Self::Install(_) => schemars::schema_for!(InstallOptions),
+                    Self::AccessSet(_) => schemars::schema_for!(AccessOptions),
                     _ => schemars::schema_for!(NoArguments),
                 };
                 Some(Tool::new(
@@ -133,6 +142,9 @@ impl TryFrom<ServiceCommand> for ServiceOperation {
             ServiceCommand::Start => Self::Start,
             ServiceCommand::Stop => Self::Stop,
             ServiceCommand::Status { .. } => Self::Status,
+            ServiceCommand::AccessSet { access, .. } => ManagedAccess::try_from(access)
+                .map(Self::AccessSet)
+                .map_err(|_| ServiceError::Arguments)?,
             ServiceCommand::InstallExtension => Self::InstallExtension,
             ServiceCommand::Mcp | ServiceCommand::Run => {
                 return Err(ServiceError::Configuration(
@@ -164,13 +176,21 @@ impl TryFrom<CallToolRequestParams> for ServiceOperation {
     fn try_from(request: CallToolRequestParams) -> Result<Self, Self::Error> {
         let operation = request.name.parse()?;
         let arguments = serde_json::Value::Object(request.arguments.unwrap_or_default());
-        if let Self::Install(_) = operation {
-            decode(arguments).map(Self::Install)
-        } else {
-            decode::<NoArguments>(arguments)?;
-            Ok(operation)
+        match operation {
+            Self::Install(_) => decode(arguments).map(Self::Install),
+            Self::AccessSet(_) => ManagedAccess::try_from(decode::<AccessOptions>(arguments)?)
+                .map(Self::AccessSet)
+                .map_err(|_| ServiceError::Arguments),
+            _ => {
+                decode::<NoArguments>(arguments)?;
+                Ok(operation)
+            }
         }
     }
+}
+
+pub(crate) fn access_tool() -> Option<Tool> {
+    ServiceOperation::AccessSet(ManagedAccess::default()).tool()
 }
 
 fn decode<T: DeserializeOwned>(arguments: serde_json::Value) -> Result<T, ServiceError> {
@@ -197,9 +217,11 @@ mod tests {
         let mut operations = ServiceOperation::all().to_vec();
         for subcommand in service.get_subcommands() {
             let name = subcommand.get_name();
-            let matches = command
-                .clone()
-                .try_get_matches_from(["bk", "service", name])?;
+            let mut arguments = vec!["bk", "service", name];
+            if name == "access-set" {
+                arguments.extend(["--preset", "read-only"]);
+            }
+            let matches = command.clone().try_get_matches_from(arguments)?;
             let options = super::super::ServiceOptions::from_arg_matches(
                 matches
                     .subcommand_matches("service")
