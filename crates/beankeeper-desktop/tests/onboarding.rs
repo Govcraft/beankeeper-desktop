@@ -207,6 +207,153 @@ fn create_fixture_account(
     Ok(())
 }
 
+#[test]
+fn direct_bookkeeper_saves_and_restores_interview_settings() -> TestResult {
+    use db::audit::AuditAction::{BookkeepingPolicySet, InformPreferenceSet};
+
+    let ledger = Ledger::new()?;
+    let writer = token(&ledger.writer)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(writer))?;
+    let call = |name, arguments| setup_result(&server, writer, name, arguments);
+    let cli = |args: &[&str]| interview_cli(&ledger, writer, args);
+    let company = json!({"company": "acme"});
+    let initial_policies = call("bookkeeping_policy_show", company.clone())?;
+    let initial_inform = call("inform_preference_show", company.clone())?;
+    let set_policy = |kind, value| {
+        call(
+            "bookkeeping_policy_set",
+            json!({"company": "acme", "policy": {"kind": kind, "value": value}}),
+        )
+    };
+
+    set_policy("sales-tax", "track-liability")?;
+    let policies = set_policy("processor-fees", "separate-expense")?;
+    assert_eq!(
+        policies,
+        json!({"sales_tax": "track-liability", "processor_fees": "separate-expense"})
+    );
+    assert_eq!(policies, cli(&["bookkeeping-policy", "show"])?);
+
+    let inform = call(
+        "inform_preference_set",
+        json!({"company": "acme", "preference": "daily-digest"}),
+    )?;
+    assert_eq!(inform, json!({"preference": "daily-digest"}));
+    assert_eq!(inform, cli(&["inform-preference", "show"])?);
+
+    assert_eq!(
+        cli(&["bookkeeping-policy", "set", "processor-fees=unset"])?["processor_fees"],
+        initial_policies["processor_fees"]
+    );
+    let prior = initial_inform["preference"].as_str().ok_or("preference")?;
+    cli(&["inform-preference", "set", prior])?;
+    assert_eq!(call("inform_preference_show", company)?, initial_inform);
+
+    let db = ledger.db()?;
+    let actor = identity::verify(db.read(), writer)?;
+    let audit = db::audit::list_audit(db.read(), &common::audit_query())?;
+    for (action, count) in [(BookkeepingPolicySet, 3), (InformPreferenceSet, 2)] {
+        let changes: Vec<_> = audit.iter().filter(|row| row.action == action).collect();
+        assert_eq!(changes.len(), count);
+        assert!(changes.iter().all(|row| {
+            row.agent_uri.as_deref() == Some(actor.uri())
+                && row.before.is_some()
+                && row.after.is_some()
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn interview_rules_can_be_amended_and_an_unmatched_post_can_be_flagged() -> TestResult {
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    create_fixture_account(&db, ledger.owner(), "1000", "Checking", AccountType::Asset)?;
+    create_fixture_account(
+        &db,
+        ledger.owner(),
+        "5000",
+        "Supplies",
+        AccountType::Expense,
+    )?;
+    let writer = token(&ledger.writer)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(writer))?;
+    let call = |name, arguments| setup_result(&server, writer, name, arguments);
+    let cli = |args: &[&str]| interview_cli(&ledger, writer, args);
+
+    let rule = call(
+        "rule_create",
+        json!({"company": "acme", "contains": "Paper Store", "account": "5000"}),
+    )?;
+    assert_eq!(rule, cli(&["rule", "list"])?);
+    let candidate = json!({"company": "acme", "description": "PAPER STORE 23"});
+    assert_eq!(
+        call("rule_match", candidate.clone())?,
+        json!({"outcome": "match", "rule": rule[0]})
+    );
+    let id = rule[0]["id"].as_str().ok_or("rule ID")?;
+    let amended = cli(&[
+        "rule",
+        "amend",
+        id,
+        "--contains",
+        "stationery shop",
+        "--account",
+        "5000",
+    ])?;
+    assert_eq!(amended[0]["supersedes"], id);
+    assert_eq!(call("rule_list", json!({"company": "acme"}))?, amended);
+    assert_eq!(
+        call("rule_match", candidate)?,
+        json!({"outcome": "no_match"})
+    );
+
+    let post = call(
+        "txn_post",
+        json!({
+            "company": "acme", "description": "PAPER STORE 23", "currency": "USD",
+            "date": "2026-11-20",
+            "debits": [{"account": "5000", "amount": "12.00"}],
+            "credits": [{"account": "1000", "amount": "12.00"}],
+            "meta": {"categorization_confidence": "low"}
+        }),
+    )?;
+    assert_eq!(post["created"], true);
+    let postings = cli(&[
+        "txn",
+        "list",
+        "--filter-metadata",
+        "categorization_confidence=low",
+    ])?;
+    assert_eq!(postings[0]["id"], post["id"]);
+    assert_eq!(
+        call(
+            "txn_list",
+            json!({"company": "acme", "meta": ["categorization_confidence=low"]}),
+        )?,
+        postings
+    );
+    Ok(())
+}
+
+fn interview_cli(ledger: &Ledger, writer: &str, args: &[&str]) -> TestResult<Value> {
+    let output = ledger
+        .command()
+        .env("BK_AGENT_TOKEN", writer)
+        .args(["--company", "acme", "--json"])
+        .args(args)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut response: Value = serde_json::from_slice(&output.stdout)?;
+    Ok(response["data"].take())
+}
+
 fn assert_navigation_cannot_read_setup_status(
     db: &Db,
     owner: &Actor,

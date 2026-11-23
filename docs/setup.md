@@ -6,6 +6,21 @@ For managed books, the agent uses `access_set` to change access. Say **Make me
 read-only** to keep posting off. Restarting cannot grant posting access.
 [Background hosting and managed access](service.md#choose-a-write-mode)
 
+## Bookkeeping interview
+
+Once a book exists, your agent asks which accounts you use,
+how to categorize recurring payees, how to handle sales tax and payment
+processor fees, and when to tell you about changes. Choose updates after each
+change, daily or weekly. The agent explains which updates its chat client can
+deliver.
+
+The agent saves clear answers directly and tells you what it recorded. You
+can skip a question, ask what is saved, or change an answer later in chat.
+Ask the agent to undo a policy or preference change to restore the previous
+value with a new audit entry. When the agent posts using a best guess for a
+category, it flags the guess in the next update so you can correct it.
+[Agent interview and tool reference](../SKILL.md#ask-how-to-keep-the-books)
+
 ## Advanced manual setup
 
 Run `bk setup` to create an encrypted ledger, save its passphrase in the OS

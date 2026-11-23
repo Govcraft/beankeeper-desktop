@@ -38,6 +38,12 @@ The agent uses your existing installation when it supports setup. For a new
 install, it selects the newest release with signature bundles for your platform
 and verifies both signatures and SHA-256 before running the downloaded binary.
 
+Once your books exist, your agent asks how you want recurring
+payees, sales tax and processor fees recorded, and how often you want updates.
+It saves your answers as standing instructions and tells you what it saved.
+Ask in chat any time to see or change those instructions.
+[Bookkeeping interview](docs/setup.md#bookkeeping-interview)
+
 ## Claude Desktop extension
 
 Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,

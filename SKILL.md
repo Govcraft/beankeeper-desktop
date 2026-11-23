@@ -215,11 +215,12 @@ under the owner's control.
 ## Tell the owner what changed and offer undo
 
 Fresh managed installs give the agent the bookkeeper preset with
-`write_mode: direct`. Record transactions with `txn_post` or `bk txn post`
-using the agent credential. Follow the owner's inform preference when one
-is available. If they have given no preference, report changes in the same
-conversation after completing the requested work. Also report when asked
-what changed.
+`write_mode: direct`. When asked to record a transaction, first check the
+[standing instructions](#apply-the-standing-instructions). Record transactions
+with `txn_post` or `bk txn post` using the agent credential. Follow the owner's
+inform preference when one is available. If they have given no preference,
+report changes in the same conversation after completing the requested work.
+Also report when asked what changed.
 
 1. Call `changes_since` with the book's `company`. With CLI access, run
    `bk --db BOOKS --company COMPANY --json audit since`. Use `receipts`
@@ -325,20 +326,129 @@ before asking questions the owner may already have answered.
    settings and import history unconfirmed.
 
 Summarize what is already recorded, what the owner has confirmed, and what
-still needs an answer or a statement. Begin a setup session when the installed
-version supports the next confirmed step. On a local shell, `bk setup --help`
-lists the available setup commands without opening a session.
+still needs an answer or a statement. Run the
+[bookkeeping interview](#ask-how-to-keep-the-books) as soon as the intended
+book exists. Use the setup operations below for outstanding structural work.
+Tax, fee and update preferences can be saved while accounts, opening balances
+or statement imports are pending.
 
-The owner can authorize a session through `ledger_setup_begin` or `bk setup
-begin`, using their own `ledger/admin` access on the selected encrypted ledger.
-For the CLI, reuse the same `--db BOOKS` path. Give the owner the setup agent's
-Ed25519 public key and ask them to deliver the short-lived `ledger/setup`
-credential through their local secret store. Keep the agent's private key and
-bearer token out of chat and logs.
-Use a separate MCP connection for the setup credential. For a local stdio
-client, read `mcp_endpoint` from `bk service status --json` and run
-`bk mcp bridge --url ENDPOINT --token-file PRIVATE_FILE`. Point `PRIVATE_FILE`
-at the private setup-token file and keep the regular ledger connection.
+### Ask how to keep the books
+
+After setup or when the owner asks to finish onboarding, read the book's
+current profile and account codes with `ledger_setup_book_show` or
+`bk --db BOOKS setup book-show COMPANY --json`. Read
+`rule_list`, `bookkeeping_policy_show` and `inform_preference_show` for the
+same company. Use those answers to pick the questions still worth asking.
+If the owner keeps several books, handle each one in its own context.
+
+Ask a few questions at a time in chat. Use the owner's answers as standing
+instructions only when they describe what should happen on future entries.
+
+1. What kind of business or household are these books for, and which bank,
+   card, cash or payment accounts do you actually use? Start from the saved
+   profile and chart. Use their answers to identify the book and accounts for
+   the following settings. Use their business type to make examples relevant.
+   Record book or account additions through the existing setup operations
+   when available.
+2. Which payees or statement descriptions recur, and where should each go?
+   For example, ask what a recurring Venmo description actually represents
+   before making it a rule. Use a distinctive literal substring and an account
+   code from this book. Defer rules whose account is still pending. Skip
+   ambiguous descriptions that cover several uses.
+3. Do you collect sales tax yourself, does a marketplace collect and send it
+   in for you, or does it not apply? Do you record card processor fees as a
+   separate expense or subtract them from sales? Leave uncertain or mixed
+   treatments open and apply instructions only to entries they describe.
+4. How often would you like to hear about work already done: after each
+   change, in a daily digest or in a weekly digest? Use the preference from the
+   ledger when the owner leaves the choice open. An installed tool may return
+   the default even if the owner has never answered, so offer the choice on
+   the first interview.
+
+With direct write access, save each clear answer as soon as you have it. Use
+the installed tool schema and the returned account and rule IDs. Keep an
+existing rule if its terms already match. Amend the active rule by ID if the
+owner changes it. If a create or amend returns an uncertain result, list the
+rules again before retrying to avoid a duplicate. Skip unanswered settings
+and use the ledger as the durable record when you resume the interview.
+
+| Use | MCP | CLI after `bk --db BOOKS --company COMPANY --json` |
+| --- | --- | --- |
+| Read active rules | `rule_list` | `rule list` |
+| Save a new rule | `rule_create` with `contains` and `account` | `rule create --contains TEXT --account CODE` |
+| Amend a rule | `rule_amend` with active `id`, `contains`, `account` and existing `priority` unless changing it | `rule amend ID --contains TEXT --account CODE --priority N` |
+| Find a match | `rule_match` with `description` | `rule match --description TEXT` |
+| Read standing policies | `bookkeeping_policy_show` | `bookkeeping-policy show` |
+| Set a policy | `bookkeeping_policy_set` with `policy: {kind, value}` | `bookkeeping-policy set KIND=VALUE` |
+| Read the update preference | `inform_preference_show` | `inform-preference show` |
+| Save the update preference | `inform_preference_set` with `preference` | `inform-preference set VALUE` |
+
+Send `company` to each MCP tool. For `sales-tax`, use the values
+`track-liability`, `marketplace-remitted` or `not-applicable` for the choices
+above. For `processor-fees`, use `separate-expense` or `net-from-revenue`.
+`unset` clears the corresponding policy. The update values are `per-change`,
+`daily-digest` and `weekly-digest`. Use the same book and authenticated agent
+when falling back to the CLI. If a tool is missing, check the installed binary
+for its equivalent command. If both are unavailable, say which answer could
+not be saved and offer to check for a newer signed release. If access is
+read-only, report it and [keep access changes in chat](#change-managed-access-in-chat).
+
+Tell the owner, in plain words, what each successful write saved and what is
+still open. If the owner asks “What are my bookkeeping rules?” or gives a new
+standing instruction later, read the same configuration and save any clear
+amendment the same way. Keep a record of the previous values in the change
+summary so the owner can say “Undo the last fee change” or “Undo the change
+to the rent rule.” Use the audit history to identify the exact change when
+needed. Restore the prior setting with another audited set operation or the
+prior rule terms by amending its current successor. If a newer change has
+since replaced the reported value, explain that before making a correction.
+
+When available, use `changes_since` (`audit since` on the CLI) to find the
+audit receipts and offer any returned `undo_url` or `desktop_url` as an
+optional detail link. Offer undo only for changes with a supported reversal.
+If a new rule has no supported audited reversal, say so and offer to amend it
+in chat. Use the tool results for structured details. Acknowledge only
+delivered pages with `changes_mark_seen` (`audit mark-seen --through CURSOR`
+on the CLI). If the receipt tools are missing, use the write results and
+`audit_log` (`audit log --company COMPANY` on the CLI) to explain what was saved.
+
+### Apply the standing instructions
+
+For a transaction the owner asked you to record, read the book's standing
+policies and call `rule_match` with the transaction description. On
+`outcome: match`, use `rule.account_code` for the categorization. On
+`outcome: no_match`, use the best supported category from the book and post
+directly when the posting facts are known. Mark the guess with
+`meta: {"categorization_confidence":"low"}` on `txn_post`, or
+`--meta categorization_confidence=low` on `txn post`. Use the saved tax and
+fee policies where applicable. Never invent a tax or fee amount, an account or
+other posting facts. Create rules only for standing instructions from the owner.
+If the installed version has neither matching operation, use the instructions
+you can read and flag any categorization guess the same way.
+
+Flag low-confidence postings in the next update, with their dates, amounts,
+chosen categories and transaction IDs. When resuming, find them for the
+update's date range with `txn_list` and
+`meta: ["categorization_confidence=low"]`, or
+`txn list --filter-metadata categorization_confidence=low` on the CLI.
+Explain how the owner can ask for a correction or
+[undo the posting](#tell-the-owner-what-changed-and-offer-undo). Use the saved
+cadence when the client can deliver later updates. When it cannot, tell the
+owner what you can deliver in chat and offer a summary on request. Use the
+structured transaction data when a chart helps and offer the matching Desktop
+transaction link when available.
+
+### Advanced manual book setup
+
+Use these operations when an already configured owner session supports the
+structural setup step. On a local shell, `bk setup --help` lists the available
+setup commands. If the owner session is unavailable, explain which structural
+step is pending and continue the interview for books and accounts that exist.
+
+The existing `ledger_setup_begin` / `bk setup begin` operation requires the
+owner's live `ledger/admin` access. Use the scoped setup connection for the
+session and the regular bookkeeper connection for interview writes. Keep
+credentials out of chat and logs.
 
 Use `ledger_setup_book_show` to confirm the current profile and accounts for
 each existing book. Use `ledger_setup_book_initialize` to save the first
@@ -394,12 +504,14 @@ if they want to cancel access. Both actions deactivate the setup grant. Use
 normal ledger reversals to correct posted entries. For an unused account or an
 empty book created by mistake, the owner can use the audited admin controls.
 See the
-[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/04e0c68e42be7a6c12f8997b6fbe5a2a3630beec/docs/beankeeper/references/commands.md#setup-sessions)
+[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/main/docs/beankeeper/references/commands.md#setup-sessions)
 for the CLI flags and MCP arguments.
 
-Setup opens the UI origin. Ask the human to open the one-time pairing URL from
-the private `.desktop.log`, or run `bk serve` in the foreground to see it in the
-terminal, then select **Pair this browser** on that page within five minutes.
+## Offer Desktop views
+
+When the owner wants to open a view, offer the browser pairing page if needed.
+The agent can obtain the one-time pairing URL from the running server when
+authorized. The owner selects **Pair this browser** within five minutes.
 Opening or refreshing the page leaves the link usable; only the confirmation
 POST consumes it. A paired browser can browse the financial snapshot, accounts, transactions,
 financial reports, tax summaries and read-only reconciliation. Use the stable
@@ -448,8 +560,7 @@ Example after answering an October spending question:
 Each running Desktop listener serves one books file. Use the ledger connection
 for the books being discussed. A browser paired with that listener can open its
 detail links for the life of the session. A separate listener needs an initial
-pairing. If the browser is unpaired, the human opens the terminal's one-time pairing URL
-in that same browser and confirms pairing. Desktop then restores the requested
+pairing. After the owner pairs the browser, Desktop restores the requested
 view. Keep pairing and bearer credentials out of shared detail URLs. A saved
 view URL conveys no authority. Use `ui_show_view` only when the owner wants you
 to change their connected tab, with the separate navigation connection described
