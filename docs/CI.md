@@ -17,11 +17,13 @@ CI runs only the checks a change can affect, restores compiler caches that only
 
 `scripts/ci/plan.py` classifies every changed path with an ordered rule table and
 takes the union of what they require. The planning job always runs the Python
-helper tests (`scripts/tests` and `scripts/ci/tests`). Examples:
+helper tests (`scripts/tests` and `scripts/ci/tests`). On pull requests it also
+checks the workspace version against the first release section in the changelog.
+See the [release PR flow](RELEASE.md#preparing-a-release-pr).
 
 | Change | Checks |
 | --- | --- |
-| `docs/`, `README.md`, `CHANGELOG.md` | none beyond the Python helper tests |
+| `docs/`, `README.md`, `CHANGELOG.md` | planning job only |
 | `crates/`, `ui/`, `Cargo.lock` | stable, MSRV, latest Beankeeper main and native service checks |
 | `install.ps1`, `packaging/windows.iss` | Windows packaging only |
 | `scripts/tests/service-lifecycle.py` | service checks and one package per OS |

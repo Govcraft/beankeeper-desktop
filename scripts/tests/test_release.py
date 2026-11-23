@@ -29,24 +29,59 @@ class PackagingTests(unittest.TestCase):
         self.output = self.root / "dist"
         self.output.mkdir()
 
-    def test_tag_must_match_desktop_version(self):
-        value = release.version()
-        self.assertEqual(release.version(f"beankeeper-desktop-v{value}"), value)
-        for tag in ("v0.1.0", "beankeeper-cli-v99.0.0", "main"):
-            with self.assertRaises(ValueError):
-                release.version(tag)
+    def test_pr_keeps_version_and_adds_unreleased_notes(self):
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.3"\n')
+        changelog = self.root / "CHANGELOG.md"
+        previous = "## [1.2.3] - 2026-11-22\n\n- A shipped change.\n"
+        with patch.object(release, "ROOT", self.root):
+            for notes in ("", "- A change for the next release.\n\n"):
+                with self.subTest(notes=notes):
+                    changelog.write_text(f"# Changelog\n\n## [Unreleased]\n\n{notes}{previous}")
+                    self.assertEqual(release.version(check_changelog=True), "1.2.3")
 
+    def test_release_pr_and_tag_use_the_same_version_section(self):
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.3.0-rc.1"\n')
+        changelog = self.root / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n## [Unreleased]\n\n"
+            "## [1.3.0-rc.1] - 2026-11-23\n\n- A change for the release.\n\n"
+            "## [1.2.3] - 2026-11-22\n"
+        )
+        with patch.object(release, "ROOT", self.root):
+            self.assertEqual(release.version(check_changelog=True), "1.3.0-rc.1")
+            self.assertEqual(release.version("beankeeper-desktop-v1.3.0-rc.1"), "1.3.0-rc.1")
+            for tag in ("beankeeper-desktop-v1.3.0", "v1.3.0-rc.1", "beankeeper-cli-v1.3.0-rc.1", "main"):
+                with self.subTest(tag=tag), self.assertRaisesRegex(
+                    ValueError, r"tag must be beankeeper-desktop-v1\.3\.0-rc\.1"
+                ):
+                    release.version(tag)
 
-    def test_rc_tag_matches_and_debian_version_uses_tilde(self):
+    def test_pr_and_tag_reject_missing_or_stale_changelog_headings(self):
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.3"\n')
+        changelog = self.root / "CHANGELOG.md"
+        for headings, error in (
+            ("## [1.2.3]\n## [Unreleased]", r"must begin its sections with ## \[Unreleased\]"),
+            ("## [Unreleased]\n", r"must have ## \[1.2.3\] directly below Unreleased"),
+            (
+                "## [Unreleased]\n## [1.2.4]\n## [1.2.3]",
+                r"must have ## \[1.2.3\] directly below Unreleased",
+            ),
+            ("## [Unreleased]\n## [1.2.30]", r"must have ## \[1.2.3\] directly below Unreleased"),
+        ):
+            changelog.write_text(f"# Changelog\n\n{headings}\n")
+            with self.subTest(headings=headings), patch.object(release, "ROOT", self.root):
+                with self.assertRaisesRegex(ValueError, error):
+                    release.version(check_changelog=True)
+                with self.assertRaisesRegex(ValueError, error):
+                    release.version("beankeeper-desktop-v1.2.3")
+                self.assertEqual(release.version(), "1.2.3")
+
+    def test_debian_prerelease_version_uses_tilde(self):
         self.assertTrue(release.valid_version("0.1.0-rc.1"))
         self.assertTrue(release.is_prerelease("0.1.0-rc.1"))
         self.assertFalse(release.is_prerelease("0.1.0"))
         self.assertEqual(release.debian_upstream_version("0.1.0-rc.1"), "0.1.0~rc.1")
         self.assertEqual(release.debian_upstream_version("0.1.0"), "0.1.0")
-        value = release.version()
-        with self.assertRaises(ValueError):
-            release.version(f"beankeeper-desktop-v{value}-mismatch")
-        self.assertEqual(release.version(f"beankeeper-desktop-v{value}"), value)
         directory = release.stage(self.binary, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", self.root / "work")
         deb = self.output / "bk-0.1.0-rc.1-x86_64-unknown-linux-gnu.deb"
         release.debian(directory, "0.1.0-rc.1", "x86_64-unknown-linux-gnu", deb)

@@ -21,7 +21,6 @@ Desktop uses its own workspace version. Keep the tag convention
 `beankeeper-desktop-vVERSION` and
 archive layout `bk-VERSION-TARGET/bk` (`bk.exe` on Windows), so release consumers
 can use the same naming rules with **Govcraft/beankeeper-desktop** as the repo.
-A tag must exactly match `[workspace.package].version` in `Cargo.toml`.
 Prerelease tags use a Cargo version such as `0.1.0-rc.1` and the git tag
 `beankeeper-desktop-v0.1.0-rc.1`. The release job marks `-rc.N` tags as
 GitHub prereleases and does not set them as latest. Debian packages use the
@@ -115,10 +114,20 @@ incompatible Perl when compiling vendored OpenSSL. See
 [OpenSSL's Perl requirements](https://github.com/openssl/openssl/blob/master/NOTES-PERL.md).
 No Node toolchain is used.
 
-Actual release publication is reserved for an authorized push of a matching
-`beankeeper-desktop-vVERSION` tag. This implementation PR does not create such a tag.
-The tag job uses GitHub OIDC for Sigstore and provenance, without stored signing
-keys. Invalid tags fail preflight before any package builds or publication.
+## Preparing a release PR
+
+1. In an ordinary PR, summarize the user-facing change in one line under
+   `## [Unreleased]` in `CHANGELOG.md`. Leave the workspace and package versions
+   as they are.
+2. In the PM's release PR, bump `[workspace.package].version` in `Cargo.toml`
+   and update the workspace package entries in `Cargo.lock`. Move the accumulated
+   notes into a dated `## [VERSION] - YYYY-MM-DD` section directly below a fresh
+   `## [Unreleased]` section. PR CI checks that the first release section matches
+   the workspace version.
+3. After the release PR merges, publish from its merge commit by pushing
+   `beankeeper-desktop-vVERSION`. Tag preflight checks that the tag, workspace
+   version, and first release section agree before any package builds or
+   publication. The release job uses GitHub OIDC for Sigstore and provenance.
 
 ## Optional Apple hook, disabled by default
 
@@ -252,8 +261,7 @@ from Git metadata by the release workflow. This signed timestamp supplies the
 inclusive license update-window comparison. It is independent of the client
 clock. The artifacts map covers the available archive targets from the matrix;
 archive names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. OS installers are not
-self-update inputs. Increment the workspace version before an actual release;
-keep its changelog entry in sync.
+self-update inputs.
 
 Stable clients discover GitHub's latest stable release. RC clients select the
 highest stable or `-rc.N` semantic version among the 100 most recent release
