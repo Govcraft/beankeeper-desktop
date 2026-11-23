@@ -1,8 +1,9 @@
 # Desktop setup command reference
 
 For quiet login startup, automatic crash recovery and lifecycle MCP tools, use
-[`bk service install`](service.md). The commands below remain available for
-manual onboarding and foreground hosting.
+[`bk service install`](service.md). New managed installs issue a direct
+bookkeeper grant. The commands below cover manual onboarding and foreground
+hosting.
 
 Run `bk setup` to create an encrypted ledger, save its passphrase in the OS
 keychain, prepare a private recovery kit, configure three MCP clients, start the
@@ -26,9 +27,7 @@ An explicit upstream `--passphrase-file`, `--passphrase-fd`, or
 | --- | --- |
 | `--non-interactive` | Suppress prompting and terminal secret display; required without a terminal. |
 | `--preset read-only` | Default. Issue only `ledger/read`. |
-| `--preset bookkeeper` | Issue `ledger/read`, `ledger/post`, `ledger/propose`. No approval or admin grants. |
-| `--max-post N` | Bookkeeper per-post cap, USD cents; default 10000 ($100). |
-| `--daily-limit N` | Bookkeeper per-day cap, USD cents; default 50000 ($500). |
+| `--preset bookkeeper` | Issue `ledger/read`, `ledger/post` and `ledger/propose` in Direct mode without spend caps. |
 | `--demo` | Use upstream demo initialization with its three sample companies. |
 | `--force` | Resume an existing encrypted ledger. Preserve its data, root and valid setup token. |
 | `--recovery-kit PATH` | Override the default private recovery kit path. |
@@ -38,20 +37,15 @@ An explicit upstream `--passphrase-file`, `--passphrase-fd`, or
 | `--no-start` | Skip server startup. |
 | `--no-open` | Skip browser launch. Use with `--no-start` in CI. |
 
-Spend limits apply separately to every initial company, in USD. Other currencies
-in those companies require an explicit owner-configured bucket. New companies
-need owner-configured limits before giving the agent access: upstream interprets
-an absent company bucket as unrestricted. Resuming setup preserves the existing
-preset and limits; it does not apply new limit options or rotate credentials.
-Use upstream agent issuance/revocation and spend-limit commands for changes.
-Tokens expire after one year. Setup presets do not grant `ui/navigate`; issue a
-separate UI token as described below.
+The bookkeeper reports what it posted and gives the owner the company and
+transaction ID for [audited undo](service.md#choose-a-write-mode). Resuming setup
+preserves the existing credential and ledger policy. Tokens expire after one
+year. Use upstream agent issuance and revocation to change credentials.
 
-The bookkeeper agent cannot approve proposals or change its own spend limits.
-Setup enables upstream capability enforcement. A separate owner token includes
-approval and administration grants for human CLI management. That token is never
-referenced by any MCP client config. Human browser approval arrives with the
-separate browser review work; do not give your agent the owner token.
+Setup enables upstream capability enforcement. Only the separate owner
+credential includes approval, reversal and administration grants. Keep it
+private. MCP clients reference the agent credential. For `ui/navigate`, issue a
+separate UI credential as described below.
 
 ## Native keychain and recovery
 

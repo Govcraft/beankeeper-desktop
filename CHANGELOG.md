@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.19] - 2026-11-22
+
+### Changed
+
+- Fresh managed installs and standalone setup with `--preset bookkeeper` issue
+  direct-posting credentials without spend caps. Standalone setup removes
+  `--max-post` and `--daily-limit`.
+- Setup and service status derive their plain-language guidance from the
+  verified preset and signed write mode.
+- Document optional sign-off and owner undo through audited reversal.
+
 ## [0.1.0-rc.18] - 2026-11-22
 
 ### Fixed

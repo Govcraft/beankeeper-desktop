@@ -36,7 +36,7 @@ use crate::{
     setup,
 };
 
-const STATUS_TOOL: &str = "setup_status";
+pub(crate) const STATUS_TOOL: &str = "setup_status";
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -172,10 +172,11 @@ struct SetupReport {
     ledger: LedgerSnapshot,
     next_step: NextStep,
     summary: String,
+    agent_access: Option<setup::AgentAccess>,
 }
 
 impl SetupReport {
-    fn from_snapshot(ledger: LedgerSnapshot) -> Self {
+    fn from_snapshot(ledger: LedgerSnapshot, agent: Option<&VerifiedAgent>) -> Self {
         let next_step = match &ledger {
             LedgerSnapshot::MissingLedger => NextStep::InstallLedger,
             LedgerSnapshot::Installed { books } if books.is_empty() => NextStep::ChooseBooks,
@@ -218,6 +219,14 @@ impl SetupReport {
             ledger,
             next_step,
             summary,
+            agent_access: agent.map(setup::AgentAccess::from),
+        }
+    }
+
+    fn plain_text(&self) -> String {
+        match &self.agent_access {
+            Some(access) => format!("{}\n{}", self.summary, access.note()),
+            None => self.summary.clone(),
         }
     }
 }
@@ -279,7 +288,7 @@ impl LedgerSnapshot {
 fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), CliError> {
     if !cli.db.try_exists()? {
         return Ok((
-            SetupReport::from_snapshot(LedgerSnapshot::MissingLedger),
+            SetupReport::from_snapshot(LedgerSnapshot::MissingLedger, None),
             None,
         ));
     }
@@ -300,7 +309,7 @@ fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), Cl
             cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
             Capability::Read,
         )?;
-        let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?);
+        let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?, agent.as_ref());
         Ok((report, agent))
     })
 }
@@ -331,7 +340,7 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
                 })?
             );
         } else {
-            println!("{}", report.summary);
+            println!("{}", report.plain_text());
         }
         Ok(())
     });
@@ -377,7 +386,7 @@ impl HostToolHandler for DesktopTools {
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
-                "Call this first when the owner asks to set up their books. Read the current books, account inventory, and recommended next setup step. Never creates or changes the books.",
+                "Call this first when the owner asks to set up their books. Read the current books, account inventory, recommended next step, and your verified grant and write mode.",
                 schemars::schema_for!(StatusInput).to_value().as_object().cloned().unwrap_or_default(),
             ),
             capability: Capability::Read,
@@ -413,13 +422,17 @@ impl HostToolHandler for DesktopTools {
             let db = status_db
                 .lock()
                 .map_err(|_| CliError::Database("setup status connection is unavailable".into()))?;
-            let report =
-                db.read_snapshot(|_| LedgerSnapshot::read(&db).map(SetupReport::from_snapshot))?;
+            let report = db.read_snapshot(|_| {
+                Ok(SetupReport::from_snapshot(
+                    LedgerSnapshot::read(&db)?,
+                    Some(&identity),
+                ))
+            })?;
             let value = serde_json::to_value(&report).map_err(|error| {
                 CliError::General(format!("cannot encode setup status: {error}"))
             })?;
             let mut result = CallToolResult::structured(value);
-            result.content = vec![ContentBlock::text(report.summary)];
+            result.content = vec![ContentBlock::text(report.plain_text())];
             Ok::<_, CliError>(result)
         })
         .await;

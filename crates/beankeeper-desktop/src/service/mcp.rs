@@ -38,7 +38,7 @@ impl Operation {
 const TOOLS: [(&str, &str, Option<Operation>); 5] = [
     (
         "service_install",
-        "Install and start per-user Beankeeper hosting. Creates encrypted local books on first use, a private owner recovery kit, and read-only ledger MCP configuration. Reinstall preserves books.",
+        "Install and start per-user Beankeeper hosting. Creates encrypted local books on first use, a private owner recovery kit, and a bookkeeper credential that posts directly. Reinstall preserves books and grants.",
         Some(Operation::Install),
     ),
     (
@@ -58,7 +58,7 @@ const TOOLS: [(&str, &str, Option<Operation>); 5] = [
     ),
     (
         "service_status",
-        "Report authenticated running status, version, local MCP endpoint, books path and optional Desktop link. No secrets are returned.",
+        "Report authenticated running status, version, the agent's grant and write mode, local MCP endpoint, books path and optional Desktop link. No secrets are returned.",
         None,
     ),
 ];
@@ -147,7 +147,7 @@ fn execute(operation: Option<Operation>) -> Result<Status, ServiceError> {
     super::status()
 }
 fn reply(status: Status) -> CallToolResult {
-    let mut message = status.message.clone();
+    let mut message = status.plain_text();
     if let Some(warning) = &status.warning {
         message.push('\n');
         message.push_str(warning.message());

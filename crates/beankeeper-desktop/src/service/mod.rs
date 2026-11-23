@@ -25,7 +25,7 @@ use crate::{
     bridge,
     instance::{self, BooksPath, Health, InstanceId, ListenerAddress, LiveListener},
     private_file::PrivateFile,
-    setup::{self, ClientRegistration, ServiceSecretStorage, keychain},
+    setup::{self, AgentAccess, ClientRegistration, ServiceSecretStorage, keychain},
 };
 
 pub use crate::instance::PortWarning;
@@ -306,6 +306,17 @@ pub struct Status {
     pub warning: Option<PortWarning>,
     /// Plain-language status.
     pub message: String,
+    /// Verified grants of the credential used by the managed bridge, when available.
+    pub agent_access: Option<AgentAccess>,
+}
+
+impl Status {
+    fn plain_text(&self) -> String {
+        match &self.agent_access {
+            Some(access) => format!("{}\n{}", self.message, access.note()),
+            None => self.message.clone(),
+        }
+    }
 }
 
 /// Read the runtime endpoint and authenticate the expected ledger before reporting health.
@@ -330,21 +341,23 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         error_code: None,
         warning: None,
         message: ServiceError::NotInstalled.to_string(),
+        agent_access: None,
     };
     let endpoint = if result.installed {
-        authenticated_endpoint(paths, &result.books)
+        authenticated_endpoint(paths, &result.books, bridge::Probe::AgentAccess)
     } else {
         Ok(None)
     };
     let mut address = None;
     match endpoint {
-        Ok(Some(AuthenticatedEndpoint(endpoint))) => {
+        Ok(Some(AuthenticatedEndpoint { endpoint, access })) => {
             address = Some(endpoint.address.into());
             result.running = true;
             result.desktop_url = Some(endpoint.desktop_url().into());
             result.mcp_endpoint = Some(endpoint.url.into());
             result.version = Some(endpoint.version);
             result.pid = Some(endpoint.pid);
+            result.agent_access = access;
             result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
         }
         Ok(None) if result.installed => {
@@ -497,17 +510,21 @@ pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
     }
 }
 
-struct AuthenticatedEndpoint(Endpoint);
+struct AuthenticatedEndpoint {
+    endpoint: Endpoint,
+    access: Option<AgentAccess>,
+}
 
 fn authenticated_endpoint(
     paths: &Paths,
     books: &Path,
+    probe: bridge::Probe,
 ) -> Result<Option<AuthenticatedEndpoint>, ServiceError> {
     endpoint_at(paths, books)?
         .map(|endpoint| {
-            bridge::probe_service(&endpoint, bridge::Probe::Authentication)
+            let access = bridge::probe_service(&endpoint, probe)
                 .map_err(|error| ServiceError::EndpointMcp(Box::new(error)))?;
-            Ok(AuthenticatedEndpoint(endpoint))
+            Ok(AuthenticatedEndpoint { endpoint, access })
         })
         .transpose()
 }
@@ -554,7 +571,7 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
         } else {
             println!(
                 "{}\nBooks: {}\nLog: {}",
-                status.message,
+                status.plain_text(),
                 status.books.display(),
                 status.log.display()
             );
@@ -719,7 +736,7 @@ fn wait_ready(paths: &Paths, books: &Path) -> Result<(), ServiceError> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = ServiceError::NotReady;
     while Instant::now() < deadline {
-        match authenticated_endpoint(paths, books) {
+        match authenticated_endpoint(paths, books, bridge::Probe::Authentication) {
             Ok(Some(_)) => return Ok(()),
             Ok(None) => {}
             Err(error @ (ServiceError::EndpointConnect | ServiceError::EndpointIdentity)) => {

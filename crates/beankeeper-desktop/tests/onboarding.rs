@@ -106,6 +106,8 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     };
     let empty = status("setup_status")?;
     assert_eq!(empty["state"], "installed");
+    assert_eq!(empty["agent_access"]["preset"], "read-only");
+    assert_eq!(empty["agent_access"]["write_mode"], "direct");
     assert_eq!(empty["next_step"], "list_accounts");
     assert_eq!(empty["books"][0]["accounts"], json!([]));
     assert_eq!(

@@ -25,12 +25,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    onboarding::STATUS_TOOL,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
     service::{self, Endpoint, ServiceError},
+    setup::AgentAccess,
 };
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
-const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask the owner for decisions before changing the books. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
+const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask for missing setup facts. After a direct post, tell the owner what was recorded and give them the book and transaction ID for undo. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
 
 fn exceeds_message_limit(bytes: usize) -> bool {
     u64::try_from(bytes).map_or(true, |length| length > MAX_MESSAGE_BYTES)
@@ -178,9 +180,13 @@ fn run_connected(
 pub(crate) enum Probe {
     Authentication,
     ReadOnlyTool,
+    AgentAccess,
 }
 
-pub(crate) fn probe_service(endpoint: &Endpoint, probe: Probe) -> Result<(), BridgeError> {
+pub(crate) fn probe_service(
+    endpoint: &Endpoint,
+    probe: Probe,
+) -> Result<Option<AgentAccess>, BridgeError> {
     let mut transport = connected_transport(
         endpoint.url().clone(),
         endpoint.token_file(),
@@ -318,7 +324,7 @@ impl Transport {
         Ok(replies)
     }
 
-    fn probe(&mut self, probe: Probe) -> Result<(), BridgeError> {
+    fn probe(&mut self, probe: Probe) -> Result<Option<AgentAccess>, BridgeError> {
         let mut output = io::sink();
         self.exchange(
             &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -331,16 +337,18 @@ impl Transport {
         if self.session.is_none() || self.protocol.is_none() {
             return Err(BridgeError::Protocol);
         }
-        if matches!(probe, Probe::Authentication) {
-            return Ok(());
-        }
+        let tool = match probe {
+            Probe::Authentication => return Ok(None),
+            Probe::ReadOnlyTool => "company_list",
+            Probe::AgentAccess => STATUS_TOOL,
+        };
         self.exchange(
             &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             &mut output,
         )?;
         let replies = self.exchange(
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":"company_list", "arguments":{}
+                "name":tool, "arguments":{}
             }}),
             &mut output,
         )?;
@@ -351,14 +359,24 @@ impl Transport {
         let result = reply.get("result").ok_or(BridgeError::ToolFailed)?;
         let result =
             rmcp::model::CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)?;
-        // Array-shaped results can travel as text in some MCP versions.
-        if result.is_error != Some(true)
-            && (result.structured_content.is_some() || !result.content.is_empty())
-        {
-            Ok(())
-        } else {
-            Err(BridgeError::ToolFailed)
+        if result.is_error == Some(true) {
+            return Err(BridgeError::ToolFailed);
         }
+        if matches!(probe, Probe::AgentAccess) {
+            #[derive(Deserialize)]
+            struct SetupAccess {
+                agent_access: Option<AgentAccess>,
+            }
+            let payload = result.structured_content.ok_or(BridgeError::Protocol)?;
+            return serde_json::from_value::<SetupAccess>(payload)
+                .map(|status| status.agent_access)
+                .map_err(|_| BridgeError::Protocol);
+        }
+        // Array-shaped company lists can travel as text in some MCP versions.
+        if result.structured_content.is_none() && result.content.is_empty() {
+            return Err(BridgeError::ToolFailed);
+        }
+        Ok(None)
     }
 
     fn close(&self) {
