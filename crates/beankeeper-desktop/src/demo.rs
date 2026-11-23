@@ -377,7 +377,7 @@ fn remove_if_present(result: io::Result<()>) -> Result<(), DemoError> {
 }
 
 /// Run a demo tool over the managed endpoint with its existing credential.
-#[must_use]
+#[must_use = "return this status to the CLI caller"]
 pub fn run(options: &DemoOptions, json_output: bool) -> ExitCode {
     let result = match crate::bridge::call_demo(options.operation) {
         Ok(result) => result,
