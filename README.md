@@ -31,9 +31,13 @@ platform. If none qualifies, it picks the newest signed release candidate.
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
-For agent-led setup, use [the Desktop skill](SKILL.md). It finds the highest
-published stable or release-candidate version with signature bundles for your
-platform and requires both signatures before running the downloaded binary.
+From an agent that can run commands on your computer, ask:
+
+> Set up Beankeeper from https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/SKILL.md
+
+The agent uses your existing installation when it supports setup. For a new
+install, it selects the newest release with signature bundles for your platform
+and verifies both signatures and SHA-256 before running the downloaded binary.
 
 ## Claude Desktop extension
 
