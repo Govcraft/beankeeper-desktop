@@ -42,7 +42,7 @@ operation to look up a known import batch.
 | `--preset read-only` | Default. Issue only `ledger/read`. |
 | `--preset bookkeeper` | Issue `ledger/read`, `ledger/post` and `ledger/propose` in Direct mode without spend caps. |
 | `--demo` | Use upstream demo initialization with its three sample companies. |
-| `--force` | Resume an existing encrypted ledger. Preserve its data, root and valid setup token. |
+| `--force` or `--resume` | Resume an existing encrypted ledger. With no ledger selection, prefer the installed managed service’s books. |
 | `--recovery-kit PATH` | Override the default private recovery kit path. |
 | `--config-home PATH` | Use this home directory when locating all three client configs. |
 | `--secret-store-file PATH` | Explicit private-file headless alternative to native keychain storage. |
@@ -51,9 +51,12 @@ operation to look up a known import batch.
 | `--no-open` | Skip browser launch. Use with `--no-start` in CI. |
 
 The bookkeeper reports what it posted and gives the owner the company and
-transaction ID for [audited undo](service.md#choose-a-write-mode). Resuming setup
-preserves the existing credential and ledger policy. Tokens expire after one
-year. Use upstream agent issuance and revocation to change credentials.
+transaction ID for [audited undo](service.md#choose-a-write-mode). Resuming
+standalone setup preserves the existing credential and ledger policy. For the
+installed managed books, resume also checks for the one-time legacy access
+migration. An explicit `--preset` on managed resume records the owner’s choice.
+The owner can also change managed access [in chat](service.md#choose-a-write-mode).
+Tokens expire after one year.
 
 Setup enables upstream capability enforcement. Only the separate owner
 credential includes approval, reversal and administration grants. Keep it
