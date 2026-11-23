@@ -132,6 +132,10 @@ loopback port and using the private agent-token file. If unavailable, use
 `service_status` to diagnose and `service_start` when authorized. Reconnect the
 ledger MCP client after restarting hosting. CLI equivalents are
 `bk service install | uninstall | start | stop | status --json`.
+Pass `file_store: true` to `service_install` to use a private passphrase file
+for new books, or `no_agents: true` to leave client configurations alone.
+If status reports `SERVICE_NOT_RUNNING`, use `service_start`. If starting
+returns `SERVICE_NOT_INSTALLED`, use `service_install`.
 On Linux, Beankeeper discovers the owner's session bus for lifecycle commands
 when Claude Desktop or another launcher omits it. `service_status` checks the
 live local endpoint directly.

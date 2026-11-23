@@ -58,10 +58,14 @@ fn stopped_service_status_is_structured_and_has_no_side_effects() -> TestResult 
 #[test]
 fn local_lifecycle_mcp_lists_all_commands_and_reports_named_errors_when_stopped() -> TestResult {
     let root = tempfile::tempdir()?;
-    check_lifecycle(isolated(root.path()), "SERVICE_MANAGER")
+    check_lifecycle(isolated(root.path()), "SERVICE_NOT_INSTALLED", false)
 }
 
-fn check_lifecycle(mut command: std::process::Command, start_error: &str) -> TestResult {
+fn check_lifecycle(
+    mut command: std::process::Command,
+    start_error: &str,
+    installed: bool,
+) -> TestResult {
     let mut child = command
         .args(["service", "mcp"])
         .stdin(Stdio::piped())
@@ -101,7 +105,7 @@ fn check_lifecycle(mut command: std::process::Command, start_error: &str) -> Tes
             json!({"jsonrpc":"2.0","method":"notifications/initialized"})
         )?;
         input.flush()?;
-        check_lifecycle_tools(&mut input, &receive, start_error)?;
+        check_lifecycle_tools(&mut input, &receive, start_error, installed)?;
         drop(input);
         Ok(())
     })();
@@ -115,6 +119,7 @@ fn check_lifecycle_tools(
     input: &mut impl Write,
     receive: &mpsc::Receiver<std::io::Result<String>>,
     start_error: &str,
+    installed: bool,
 ) -> TestResult {
     for (id, method, params) in [
         (2, "tools/list", json!({})),
@@ -133,6 +138,11 @@ fn check_lifecycle_tools(
             "tools/call",
             json!({"name":"service_status","arguments":{"unexpected":true}}),
         ),
+        (
+            6,
+            "tools/call",
+            json!({"name":"service_install","arguments":{"file_store":"yes"}}),
+        ),
     ] {
         writeln!(
             input,
@@ -144,28 +154,31 @@ fn check_lifecycle_tools(
         assert_eq!(reply["id"], id);
         match id {
             2 => {
-                let names: Vec<_> = reply["result"]["tools"]
-                    .as_array()
-                    .ok_or("missing tools")?
+                let tools = reply["result"]["tools"].as_array().ok_or("missing tools")?;
+                let install = tools
                     .iter()
-                    .map(|t| t["name"].as_str().unwrap_or_default())
-                    .collect();
-                for name in [
-                    "service_install",
-                    "service_uninstall",
-                    "service_start",
-                    "service_stop",
-                    "service_status",
-                ] {
-                    assert!(names.contains(&name));
+                    .find(|tool| tool["name"] == "service_install")
+                    .ok_or("missing install schema")?;
+                let schema = &install["inputSchema"];
+                assert_eq!(schema["additionalProperties"], false);
+                for name in ["file_store", "no_agents"] {
+                    assert_eq!(schema["properties"][name]["type"], "boolean");
+                    assert_eq!(schema["properties"][name]["default"], false);
                 }
             }
-            3 => assert_eq!(reply["result"]["structuredContent"]["running"], false),
+            3 => {
+                let status = &reply["result"]["structuredContent"];
+                assert_eq!(status["installed"], installed);
+                assert_eq!(status["running"], false);
+                if installed {
+                    assert_eq!(status["error_code"], "SERVICE_NOT_RUNNING");
+                }
+            }
             4 => {
                 assert_eq!(reply["result"]["isError"], true);
                 assert_eq!(reply["result"]["structuredContent"]["code"], start_error);
             }
-            5 => {
+            5 | 6 => {
                 assert_eq!(reply["result"]["isError"], true);
                 assert_eq!(
                     reply["result"]["structuredContent"]["code"],
@@ -226,12 +239,7 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
     };
     // Let the real install provision the ledger, then take over from the stub manager.
     write_stub_manager(&bin)?;
-    let output = configured()
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/stub-systemd-bus")
-        .args(["service", "install", "--file-store", "--no-agents"])
-        .output()?;
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("OS service manager refused"));
+    provision_through_lifecycle_mcp(configured(), &home, &books)?;
     let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let service_config = state.join("service.json");
     let mut registration: Value = serde_json::from_slice(&fs::read(&service_config)?)?;
@@ -283,6 +291,33 @@ fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity()
         serde_json::from_slice::<Value>(&output.stdout)?["running"],
         false
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn provision_through_lifecycle_mcp(
+    mut command: std::process::Command,
+    home: &std::path::Path,
+    books: &std::path::Path,
+) -> TestResult {
+    command
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/stub-systemd-bus")
+        .env("CODEX_HOME", home.join("codex"))
+        .args(["service", "mcp"]);
+    let install = stdio_tool_response(
+        command,
+        "service_install",
+        &json!({"file_store":true,"no_agents":true}),
+    )?;
+    assert_eq!(install["isError"], true, "{install}");
+    assert_eq!(install["structuredContent"]["code"], "SERVICE_MANAGER");
+    assert!(
+        install["structuredContent"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("OS service manager refused"))
+    );
+    assert!(books.with_extension("passphrase").is_file());
+    assert_eq!(std::fs::read_dir(home)?.count(), 0);
     Ok(())
 }
 
@@ -585,12 +620,7 @@ fn assert_managed_write_modes(
         proposed["proposer_uri"],
         proposal_credential.agent_uri.as_str()
     );
-    let count = || {
-        db.read()
-            .query_row("SELECT COUNT(*) FROM transactions", [], |row| {
-                row.get::<_, i64>(0)
-            })
-    };
+    let count = || beankeeper_cli::commands::setup::status(&db).map(|status| status.transactions);
     assert_eq!(count()?, 1);
 
     fs::rename(saved_owner_file, owner_file)?;
@@ -694,19 +724,37 @@ fn assert_transaction_actor(
     id: i64,
     agent: &beankeeper_cli::identity::VerifiedAgent,
 ) -> TestResult {
-    let (uri, jti): (String, String) = db.read().query_row(
-        "SELECT agent_uri, token_jti FROM audit_log
-         WHERE company_slug = 'personal' AND entity = 'transaction' AND action = 'create' AND entity_id = ?",
-        [id.to_string()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+    use beankeeper_cli::db::audit::{AuditAction, AuditEntity, ListAuditParams, list_audit};
+    let rows = list_audit(
+        db.read(),
+        &ListAuditParams {
+            company_slug: Some(&"personal".parse()?),
+            entity: Some(AuditEntity::Transaction),
+            action: Some(AuditAction::Create),
+            ..common::audit_query()
+        },
     )?;
-    assert_eq!(uri, agent.uri());
-    assert_eq!(jti, agent.jti());
+    let id = id.to_string();
+    let row = rows
+        .iter()
+        .find(|row| row.entity_id == id)
+        .ok_or("posting audit row")?;
+    assert_eq!(row.agent_uri.as_deref(), Some(agent.uri()));
+    assert_eq!(row.token_jti.as_deref(), Some(agent.jti()));
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn stdio_tool(
+fn stdio_tool(command: std::process::Command, name: &str, arguments: &Value) -> TestResult<Value> {
+    let mut reply = stdio_tool_response(command, name, arguments)?;
+    assert_ne!(reply["isError"], true, "{reply}");
+    let data = reply["structuredContent"].take();
+    assert!(!data.is_null(), "{reply}");
+    Ok(data)
+}
+
+#[cfg(target_os = "linux")]
+fn stdio_tool_response(
     mut command: std::process::Command,
     name: &str,
     arguments: &Value,
@@ -767,10 +815,7 @@ fn stdio_tool(
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(reply["id"], 2, "{reply}");
-    assert_ne!(reply["result"]["isError"], true, "{reply}");
-    let data = reply["result"]["structuredContent"].take();
-    assert!(!data.is_null(), "{reply}");
-    Ok(data)
+    Ok(reply["result"].take())
 }
 
 #[cfg(target_os = "linux")]
@@ -848,7 +893,7 @@ fn unusable_session_is_reported_before_managing_services_and_after_agent_registr
     let bridge = command().args(["mcp", "bridge", "--service"]).output()?;
     assert!(!bridge.status.success());
     assert!(String::from_utf8(bridge.stderr)?.contains("SESSION_ENV_UNAVAILABLE"));
-    check_lifecycle(command(), "SESSION_ENV_UNAVAILABLE")?;
+    check_lifecycle(command(), "SESSION_ENV_UNAVAILABLE", true)?;
     fs::create_dir(&runtime)?;
     let _bus = UnixListener::bind(runtime.join("bus"))?;
     assert_stop_clears_stale_runtime(&command, &state)?;

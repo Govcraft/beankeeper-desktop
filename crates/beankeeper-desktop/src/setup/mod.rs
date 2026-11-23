@@ -169,9 +169,10 @@ pub(crate) enum ClientRegistration<'a> {
 }
 
 /// Passphrase storage for fresh service ledgers. Existing ledgers keep their store.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) enum ServiceSecretStorage {
     PrivateFile,
+    #[default]
     NativeWithFileFallback,
     NativeRequired,
 }
@@ -370,7 +371,7 @@ fn run_with_store(
     cli.passphrase.passphrase_fd = None;
     cli.passphrase.passphrase_file = Some(temporary.path().into());
     if matches!(mode, SetupMode::Fresh) {
-        initialize_ledger(cli, options.demo)?;
+        initialize_ledger(cli, &secret, options.demo)?;
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
     provision(&db, provisioning, &token_file, &owner_file)?;
@@ -383,6 +384,15 @@ fn run_with_store(
         Some(plan) => plan.write()?,
         None => Vec::new(),
     };
+    // The service CLI renders its result separately. Managed provisioning
+    // also runs on stdio MCP, where stdout belongs to the transport.
+    if storage.is_none() {
+        println!(
+            "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
+            cli.db.display(),
+            paths.kit.display(),
+        );
+    }
     finish_setup(cli, options, &paths, configs, &secret, &temporary, mode)
 }
 
@@ -478,11 +488,6 @@ fn finish_setup(
     temporary: &tempfile::NamedTempFile,
     mode: SetupMode,
 ) -> Result<(), SetupError> {
-    println!(
-        "Encrypted ledger: {}\nRecovery kit: {}\nKeep a separate offline copy of the recovery kit. Losing both it and the keychain means losing access.",
-        cli.db.display(),
-        paths.kit.display()
-    );
     eprintln!(
         "Agent token is a secret: {}. Owner credential stays separate: {}.",
         paths.token_file.display(),
@@ -547,7 +552,7 @@ fn validate_distinct_outputs<'a>(
     Ok(())
 }
 
-fn initialize_ledger(cli: &Cli, demo: bool) -> Result<(), SetupError> {
+fn initialize_ledger(cli: &Cli, secret: &SecretString, demo: bool) -> Result<(), SetupError> {
     // SQLCipher and demo writes stay inside an owner-only staging directory.
     let parent = cli
         .db
@@ -562,7 +567,15 @@ fn initialize_ledger(cli: &Cli, demo: bool) -> Result<(), SetupError> {
     let staging = staging_builder.tempdir_in(parent)?;
     keychain::restrict_directory(staging.path())?;
     let staged = staging.path().join("books.db");
-    beankeeper_cli::commands::init::run(cli, true, Some(&staged), false, demo)?;
+    if demo {
+        beankeeper_cli::commands::init::create_demo_ledger(
+            &staged,
+            Some(secret),
+            &cli.principal(),
+        )?;
+    } else {
+        Db::open(&staged, Some(secret))?;
+    }
     set_private(&staged)?;
     // An atomic no-clobber link also protects against a concurrent setup.
     fs::hard_link(&staged, &cli.db)?;
