@@ -67,3 +67,12 @@ summary { cursor: pointer; font-weight: 650; }
 @media (max-width: 640px) { .report-results dl { grid-template-columns: 1fr; } }
 
 .agent-highlight { outline: 3px solid #985700; outline-offset: 4px; background-color: #fff0c2; color: #242019; }
+
+.change-receipt {
+  overflow-wrap: anywhere;
+}
+
+.change-receipt:target {
+  outline: 2px solid currentColor;
+  outline-offset: .25rem;
+}

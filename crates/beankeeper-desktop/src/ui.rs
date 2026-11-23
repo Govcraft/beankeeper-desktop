@@ -33,6 +33,7 @@ pub(crate) fn page(title: &str, description: &str, path: &str, content: &Markup)
         ("/transactions", "Transactions"),
         ("/reports", "Reports"),
         ("/reconciliation", "Reconciliation"),
+        (crate::changes::PATH, "Changes"),
         ("/review", "Review queue"),
         ("/settings", "License and updates"),
     ] {

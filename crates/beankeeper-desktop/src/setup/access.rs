@@ -206,7 +206,7 @@ impl AgentAccess {
         match (self.preset, self.write_mode) {
             (Some(Preset::ReadOnly), _) => &READ_ONLY_NOTE,
             (Some(Preset::Bookkeeper), WriteMode::Direct) => {
-                "This agent records transactions directly. After a post, tell the owner what was recorded and give them the transaction ID for undo."
+                "This agent records transactions directly. Use changes_since when available to tell the owner what changed and offer receipt links for undo."
             }
             (Some(Preset::Bookkeeper), WriteMode::ProposeOnly) => {
                 "This agent submits transactions for sign-off. A separate credential with approval access can post them."
@@ -232,8 +232,15 @@ impl AgentAccess {
                  owner they can now ask you to record transactions and can say “make me read-only” \
                  to undo the access change. \
                  With preset bookkeeper and write_mode direct, use txn_post when asked to record \
-                 a transaction. Tell the owner what was recorded and give the book, transaction ID, \
-                 and audited undo path: txn_reverse with company and id on an owner-controlled \
+                 a transaction. Follow the owner's inform preference after recording changes. By \
+                 default, report them in the same conversation after the work is complete. Also \
+                 report when asked what changed. When listed, use changes_since on the ledger \
+                 connection to explain the changes in plain words and offer the returned Desktop \
+                 and undo links. The paired owner can select Undo to apply it immediately. After \
+                 delivering each page, pass its company and through to changes_mark_seen if \
+                 listed. If changes_since is unavailable after a post, tell the owner what was \
+                 recorded and give the book, transaction ID, and audited undo path: \
+                 txn_reverse with company and id on an owner-controlled \
                  connection with ledger/reverse. With write_mode propose-only, report the proposal \
                  ID as pending for an authorized approver. If preset is null, the grant is custom. \
                  Use the listed tools within its signed write mode. If agent_access itself is null, \

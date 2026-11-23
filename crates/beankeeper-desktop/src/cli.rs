@@ -40,6 +40,16 @@ pub(crate) fn loopback_address(value: &str) -> Result<SocketAddr, String> {
 #[must_use]
 pub fn command() -> Command {
     with_desktop_setup(Cli::command())
+        .mut_subcommand("audit", |audit| {
+            audit
+                .subcommand(
+                    Command::new("since")
+                        .about("Read grouped changes since the owner was last informed"),
+                )
+                .subcommand(crate::changes::MarkSeen::augment_args(
+                    Command::new("mark-seen").about("Record that a page of changes was delivered"),
+                ))
+        })
         .version(env!("CARGO_PKG_VERSION"))
         .about("Beankeeper Desktop: local UI and agent-driven accounting")
         .subcommand(crate::agents::AgentOptions::augment_args(
