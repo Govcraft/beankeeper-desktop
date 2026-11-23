@@ -1478,6 +1478,8 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
     let tools = list["tools"].as_array().ok_or("missing list")?;
     assert!(tools.iter().any(|tool| tool["name"] == "demo_remove"));
     assert!(tools.iter().all(|tool| tool["name"] != "setup_status"));
+    assert!(tools.iter().all(|tool| tool["name"] != "changes_since"));
+    assert!(tools.iter().all(|tool| tool["name"] != "changes_mark_seen"));
     let listed = pipe.tool("company_list", &json!({}))?;
     assert_eq!(&listed["_meta"][LEDGER_TARGET_META_KEY], target);
     assert_eq!(
@@ -1510,6 +1512,9 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
     let real = pipe.tool("txn_list", &json!({"company":"personal"}))?;
     assert_eq!(demo_payload(&real)?, json!([]));
     assert!(real["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    let receipts = pipe.tool("changes_since", &json!({"company":"personal"}))?;
+    assert_eq!(receipts["structuredContent"]["company"], "personal");
+    assert!(receipts["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
     Ok(())
 }
 
