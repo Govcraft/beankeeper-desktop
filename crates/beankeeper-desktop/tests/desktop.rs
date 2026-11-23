@@ -356,25 +356,35 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
 
 #[test]
 fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> TestResult {
-    let ledger = Ledger::new()?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    let passphrase_file = dir.path().join("passphrase");
+    let passphrase = "migration-fixture-passphrase";
+    std::fs::write(&passphrase_file, passphrase)?;
     {
-        let db = ledger.db()?;
-        // Undo the two setup migrations to reproduce the prior ledger schema.
-        ledger.fixture_sql()?.execute_batch(
-            "BEGIN;
-             DROP TABLE setup_statement_batches;
-             DROP TABLE setup_requests;
-             DROP TABLE setup_book_profiles;
-             DELETE FROM schema_version WHERE version IN (22, 23);
-             COMMIT;",
-        )?;
-        assert_eq!(get_schema_version(db.read())?, 21);
+        let fixture = rusqlite::Connection::open(&path)?;
+        fixture.pragma_update(None, "key", passphrase)?;
+        fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
     }
+    let passphrase = passphrase.into();
+    assert!(matches!(
+        Db::open_snapshot(&path, Some(&passphrase)),
+        Err(beankeeper_cli::error::CliError::Database(_))
+    ));
 
-    let mut server = Server::start(&ledger, &["serve", "--read-only"], None)?;
-    let passphrase = std::fs::read_to_string(&ledger.secret)?.into();
-    let migrated = Db::open_snapshot(&ledger.path, Some(&passphrase))?;
-    assert_eq!(get_schema_version(migrated.read())?, 23);
+    let current = Db::open_in_memory()?;
+    let expected_version = get_schema_version(current.read())?;
+    let mut command = clean_command();
+    command
+        .arg("--db")
+        .arg(&path)
+        .arg("--passphrase-file")
+        .arg(&passphrase_file)
+        .args(["serve", "--read-only", "--bind", "127.0.0.1:0"]);
+    let mut server = Server::launch(command)?;
+
+    let migrated = Db::open_snapshot(&path, Some(&passphrase))?;
+    assert_eq!(get_schema_version(migrated.read())?, expected_version);
     let setup_tables: u32 = migrated.read().query_row(
         "SELECT COUNT(*) FROM sqlite_schema
          WHERE type = 'table' AND name IN (
@@ -384,9 +394,14 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
         |row| row.get(0),
     )?;
     assert_eq!(setup_tables, 3);
-    server.initialize(Some(token(&ledger.reader)?))?;
     server.pair()?;
-    assert_eq!(server.client.get(&server.base).send()?.status(), 200);
+    let accounts = server
+        .client
+        .get(format!("{}/accounts?company=acme", server.base))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(accounts.contains("Legacy Checking"));
     Ok(())
 }
 
