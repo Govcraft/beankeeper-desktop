@@ -29,11 +29,14 @@ use beankeeper_cli::{
     identity::{self, Admin, Granted, IssueRequest, IssuedCredential, VerifiedAgent, WriteMode},
     passphrase,
 };
-use clap::Args;
+use clap::{Args, parser::ValueSource};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::IgnoredAny;
 
-use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
+use crate::{
+    private_file::{BEARER_FILE_LIMIT, PrivateFile},
+    service::{self, ServiceError},
+};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
 
 const AGENT_NAME: &str = "desktop_agent";
@@ -80,6 +83,31 @@ pub struct SetupOptions {
     /// Local Desktop address; requires a nonzero port.
     #[arg(long, default_value = "127.0.0.1:8750")]
     pub bind: SocketAddr,
+}
+
+/// Books selected for setup after applying the managed resume default.
+pub struct SetupBooks(PathBuf);
+
+impl TryFrom<(&Path, Option<ValueSource>, &SetupOptions)> for SetupBooks {
+    type Error = ServiceError;
+
+    fn try_from(
+        (path, source, options): (&Path, Option<ValueSource>, &SetupOptions),
+    ) -> Result<Self, Self::Error> {
+        if options.force && source == Some(ValueSource::DefaultValue) {
+            Ok(Self(
+                service::managed_books()?.unwrap_or_else(|| path.into()),
+            ))
+        } else {
+            Ok(Self(path.into()))
+        }
+    }
+}
+
+impl From<SetupBooks> for PathBuf {
+    fn from(books: SetupBooks) -> Self {
+        books.0
+    }
 }
 
 /// Options controlling how setup opens the local Desktop workspace.

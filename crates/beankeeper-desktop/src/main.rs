@@ -123,18 +123,13 @@ fn main() -> ExitCode {
         }
         DesktopCommand::Setup(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            let selected = (options.force
-                && matches.value_source("db") == Some(ValueSource::DefaultValue))
-            .then(service::managed_books)
-            .transpose()
-            .map_err(|error| DesktopError::Service(Box::new(error)));
-            selected.and_then(|books| {
-                if let Some(books) = books.flatten() {
-                    ledger.db = books;
-                }
-                setup::run(&mut ledger, &options)
-                    .map_err(|error| DesktopError::Setup(Box::new(error)))
-            })
+            setup::SetupBooks::try_from((ledger.db.as_path(), matches.value_source("db"), &options))
+                .map_err(|error| DesktopError::Service(Box::new(error)))
+                .and_then(|books| {
+                    ledger.db = books.into();
+                    setup::run(&mut ledger, &options)
+                        .map_err(|error| DesktopError::Setup(Box::new(error)))
+                })
         }
         DesktopCommand::Bridge(options) => bridge::run(&options).map_err(DesktopError::Bridge),
         DesktopCommand::Extension => bridge::run_extension().map_err(DesktopError::Bridge),

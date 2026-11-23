@@ -1208,6 +1208,48 @@ fn recorded_read_only_choice_survives_service_start_and_resume() -> TestResult {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn setup_resume_honors_books_selected_by_flag_or_environment() -> TestResult {
+    use secrecy::ExposeSecret;
+
+    let fixture = LegacyService::new()?;
+    let managed_grant = fixture.secret("agent-token")?;
+    for source in ["flag", "environment"] {
+        let books = fixture.books.with_file_name(format!("{source}.db"));
+        let mut command = fixture.command();
+        if source == "flag" {
+            command.arg("--db").arg(&books);
+        } else {
+            command.env("BEANKEEPER_DB", &books);
+        }
+        let output = command
+            .args([
+                "setup",
+                "--force",
+                "--non-interactive",
+                "--no-start",
+                "--no-open",
+                "--config-home",
+            ])
+            .arg(fixture.root.path().join(source))
+            .arg("--secret-store-file")
+            .arg(books.with_extension("passphrase"))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "setup with books from {source}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(books.is_file());
+    }
+    assert!(
+        fixture.secret("agent-token")?.expose_secret() == managed_grant.expose_secret(),
+        "resuming explicitly selected books rotated the managed credential"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn managed_resume_finishes_an_interrupted_audited_rotation() -> TestResult {
     use beankeeper_cli::{db::Actor, identity};
     use secrecy::ExposeSecret;
