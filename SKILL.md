@@ -22,31 +22,36 @@ session. Choose the setup path for your client first.
   Grok Build or another supported local client. Grok Bot's Command MCP runs
   on its cloud computer.
   [Grok Bot computer access](https://docs.x.ai/grok-bot/computer-and-apps)
-- **Clients without local shell access.** Ask the owner to open a supported
-  local client. If none can run setup, give the owner the signed installation
-  instructions below for their OS.
+- **Clients without local shell access.** If the owner uses Claude Desktop,
+  offer the verified `.mcpb` extension. Otherwise ask them to continue in a
+  supported local client. If they have no local client that can run setup,
+  give them the signed installation instructions below for their OS.
+  [Claude Desktop extension work](https://github.com/Govcraft/beankeeper-desktop/issues/43)
 
 Run `bk service status --json` in the owner's logged-in user session. If
 `bk` is missing from PATH, check the per-user install location first.
 That is `$HOME/.local/bin/bk` on Linux and macOS, and
 `$env:LOCALAPPDATA/Programs/Beankeeper Desktop/bk.exe` on Windows.
-If `running` is true and the Beankeeper MCP tools respond, go straight to
-setup in conversation. If `installed` is true and `running` is false, run
-`bk service start` and check again. For a running service with no agent
-connection, run `bk agents connect --all --json` and reload the client.
-If this installation is missing or predates the service and registration
-commands, install a signed Desktop release for this operating system and
-processor using the commands below.
+Use the installed binary when it supports `bk service install --help` and
+`bk agents connect --help`. If `running` is true and `company_list` responds,
+continue with `setup_status`. If `installed` is true and `running` is false,
+run `bk service start` and check again. If `installed` is false, run
+`bk service install --no-agents` with the installed binary. For a running
+service with no agent connection, run `bk agents connect --all --json` and
+reload the client. If `bk` is missing or lacks the setup commands, use the
+signed installation commands for this operating system and processor below.
+If a supported command fails, report and repair that step before continuing.
 
 Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
 if `cosign` is missing. Install it through the owner's trusted package channel
 or stop and explain what is missing. Guided setup selects the highest published
 version with signature bundles for this machine and checks that it provides
-managed service and agent registration commands. Regular installs prefer a
-signed stable release and fall back to the highest signed release candidate
-for this machine. On Linux and macOS, install `jq` through the owner's trusted
-package channel for automatic selection. To select a specific signed release,
-set `BK_VERSION` without the tag prefix.
+managed service and agent registration commands. On Linux and macOS, install
+`jq` through the owner's trusted package channel for automatic selection.
+If the shell already has `GH_TOKEN` or `GITHUB_TOKEN`, the installers use it
+for the GitHub release listing. If GitHub limits anonymous requests, the
+installer retries when the wait is short. Set `BK_VERSION` to a known signed
+release to bypass discovery if the limit persists.
 
 ### Linux and macOS
 
@@ -106,8 +111,10 @@ resuming installation.
 Explain where the private recovery kit was created on first installation. Ask
 the owner to open the kit directly and keep an offline copy. Only the owner
 handles the key. Use the installed location or restart the agent client when it
-needs to reload its connection. Confirm with the read-only `company_list` MCP
-tool, then call `setup_status` to begin conversational onboarding. Tell
+needs to reload its connection. If MCP tools are temporarily unavailable,
+`bk agents doctor --json` checks the registrations and makes an authenticated
+read-only MCP call. Confirm with `company_list` in the connected client, then
+call `setup_status` to begin conversational onboarding. Tell
 the owner that the books are encrypted locally, give the exact books path from
 `bk service status --json`, and explain that `bk agents disconnect` and
 `bk service uninstall` remove the connection and background service while

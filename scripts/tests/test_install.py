@@ -24,7 +24,7 @@ class ShellInstallerTests(unittest.TestCase):
         self.destination = self.root / "installed"
         self.destination.mkdir()
         self.stage_shell_fixture("0.1.0")
-        for command in ("sh", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep", "jq"):
+        for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep", "jq"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
         self.script("uname", 'print("Linux" if "-s" in sys.argv else "x86_64")')
@@ -34,8 +34,21 @@ from urllib.parse import urlparse
 args = sys.argv[1:]
 url = next(arg for arg in args if arg.startswith("https://"))
 if url == "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100":
-    print(os.environ["FIXTURE_RELEASES"])
+    log = Path(os.environ["FIXTURES"]) / "release-requests"
+    count = len(log.read_text().splitlines()) if log.exists() else 0
+    with log.open("a") as requests:
+        if "-H" in args:
+            assert args[args.index("-H") + 1] == "@-"
+            requests.write(sys.stdin.read())
+        else:
+            requests.write("anonymous\\n")
+    statuses = os.environ.get("RELEASE_STATUSES", "200").split(",")
+    status = statuses[min(count, len(statuses) - 1)]
+    Path(args[args.index("-D") + 1]).write_text(os.environ.get("RELEASE_HEADERS", ""))
+    Path(args[args.index("-o") + 1]).write_text(os.environ["FIXTURE_RELEASES"] if status == "200" else "{}")
+    print(status, end="")
     sys.exit(0)
+assert "-H" not in args, "release downloads must not receive the API token"
 assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"] + "/"), url
 path = Path(os.environ["FIXTURES"]) / Path(urlparse(url).path).name
 if not path.exists():
@@ -47,6 +60,11 @@ if "-w" in args: print("200", end="")
         self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0", "FIXTURE_VERSION": "0.1.0",
                     "BK_INSTALL": str(self.destination), "FIXTURES": str(self.fixtures),
                     "TMPDIR": str(self.root), "BK_TEST_LOG": str(self.root / "service-actions")}
+        self.env.pop("GH_TOKEN", None)
+        self.env.pop("GITHUB_TOKEN", None)
+        self.script("date", 'print("1000")')
+        self.script("sleep", 'with (Path(os.environ["FIXTURES"]) / "release-delays").open("a") as log:\n'
+                             '    print(sys.argv[1], file=log)')
 
     def stage_shell_fixture(self, version):
         target = "x86_64-unknown-linux-gnu"
@@ -223,6 +241,46 @@ sys.exit({1 if fail else 0})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no published release with signature bundles found", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
+
+    def use_discovery(self, **overrides):
+        self.env.pop("BK_VERSION")
+        self.env.update(FIXTURE_RELEASES=json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]),
+                        **overrides)
+
+    def test_authenticates_release_discovery_using_either_token(self):
+        self.use_discovery(GITHUB_TOKEN="fallback", GH_TOKEN="preferred")
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env["GH_TOKEN"] = ""
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.fixtures / "release-requests").read_text().splitlines(),
+                         ["Authorization: Bearer preferred", "Authorization: Bearer fallback"])
+
+    def test_retries_anonymous_403_and_429_with_backoff(self):
+        self.use_discovery(RELEASE_STATUSES="403,429,200", RELEASE_HEADERS="Retry-After: 75\n")
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.fixtures / "release-requests").read_text().splitlines(), ["anonymous"] * 3)
+        self.assertEqual((self.fixtures / "release-delays").read_text().splitlines(), ["75", "120"])
+
+    def test_persistent_rate_limit_suggests_an_explicit_signed_version(self):
+        self.use_discovery(RELEASE_STATUSES="429")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub rate limit (HTTP 429) while listing releases", result.stderr)
+        self.assertIn("Set BK_VERSION to a signed release", result.stderr)
+        self.assertEqual((self.fixtures / "release-delays").read_text().splitlines(), ["60", "120"])
+        self.assertFalse((self.destination / "bk").exists())
+
+    def test_exhausted_quota_fails_without_retrying_before_a_distant_reset(self):
+        self.use_discovery(RELEASE_STATUSES="403", RELEASE_HEADERS="X-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1600\n")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub rate limit (HTTP 403) while listing releases", result.stderr)
+        self.assertIn("BK_VERSION", result.stderr)
+        self.assertEqual((self.fixtures / "release-requests").read_text(), "anonymous\n")
+        self.assertFalse((self.fixtures / "release-delays").exists())
 
     def assert_regular_release_selection(self, version, releases):
         self.stage_shell_fixture(version)

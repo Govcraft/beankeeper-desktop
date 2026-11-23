@@ -140,6 +140,11 @@ RULES: tuple[tuple[str, Checks, str], ...] = (
         Checks(tooling=True),
         "cache maintenance workflow",
     ),
+    (
+        ".github/workflows/live-install.yml",
+        Checks(tooling=True),
+        "published installation workflow",
+    ),
     ("scripts/ci/tests/", Checks(tooling=True), "CI helper tests"),
     ("scripts/ci/", CI_TOOLING, "CI planning, gate and cache identity"),
     (".github/actions/", CI_TOOLING, "shared CI action"),

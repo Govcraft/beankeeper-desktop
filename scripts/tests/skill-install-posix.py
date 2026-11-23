@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the POSIX skill guide with fixture downloads and native managed hosting."""
+"""Execute the POSIX skill guide with fixture or published downloads."""
 
 import argparse
 from collections import Counter
@@ -38,10 +38,12 @@ def fixture_tool(mode, arguments):
         if url == INSTALLER_URL:
             source = ROOT / "install.sh"
         elif url == RELEASES_URL:
-            print(json.dumps([{
+            assert "-H" not in arguments, "fixture release discovery must be anonymous"
+            Path(arguments[arguments.index("-o") + 1]).write_text(json.dumps([{
                 "tag_name": f"beankeeper-desktop-v{version}", "draft": False,
                 "prerelease": "-rc." in version, "assets": [{"name": name} for name in release_files],
-            }]))
+            }]), encoding="utf-8")
+            print("200", end="")
             return
         else:
             base = f"https://github.com/{PROJECT}/releases/download/beankeeper-desktop-v{version}/"
@@ -130,7 +132,7 @@ def native_config(env, sandbox):
 def fixture_path(sandbox, original_path):
     directory = sandbox / "commands"
     directory.mkdir()
-    required = ("sh", "uname", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
+    required = ("sh", "uname", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
     manager = "launchctl" if sys.platform == "darwin" else "systemctl"
     for name in (*required, manager):
         path = shutil.which(name, path=original_path)
@@ -150,11 +152,29 @@ def fixture_path(sandbox, original_path):
     return directory
 
 
-def exercise(target, artifacts):
+def prepare_fixture(target, artifacts, sandbox, env):
     version = subprocess.check_output(
         [sys.executable, str(ROOT / "scripts/release.py"), "version"], text=True,
     ).strip()
     archive = f"bk-{version}-{target}.tar.gz"
+    fixtures = sandbox / "fixtures"
+    fixtures.mkdir()
+    staged_archive = fixtures / archive
+    shutil.copyfile(artifacts / archive, staged_archive)
+    with staged_archive.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    (fixtures / "checksums-sha256.txt").write_text(f"{digest}  {archive}\n", encoding="utf-8")
+    for name in (archive, "checksums-sha256.txt"):
+        (fixtures / f"{name}.sigstore").write_text("fixture bundle\n", encoding="utf-8")
+    env.update(
+        PATH=str(fixture_path(sandbox, env.get("PATH", os.defpath))),
+        BK_SKILL_TEST_VERSION=version, BK_SKILL_TEST_ARCHIVE=archive, BK_SKILL_TEST_FIXTURES=str(fixtures),
+        BK_SKILL_TEST_PYTHON=sys.executable, BK_SKILL_TEST_DRIVER=str(Path(__file__).resolve()),
+    )
+    return version, archive, fixtures
+
+
+def exercise(target, artifacts, published):
     block = re.search(r"```sh\n(.*?)```", (ROOT / "SKILL.md").read_text(encoding="utf-8"), re.DOTALL)
     if block is None:
         raise RuntimeError("missing the Linux and macOS installation block in SKILL.md")
@@ -165,56 +185,70 @@ def exercise(target, artifacts):
         codex = home / ".codex"
         codex.mkdir(parents=True)
         (home / ".claude").mkdir()
-        fixtures = sandbox / "fixtures"
-        fixtures.mkdir()
-        staged_archive = fixtures / archive
-        shutil.copyfile(artifacts / archive, staged_archive)
-        with staged_archive.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
-        (fixtures / "checksums-sha256.txt").write_text(f"{digest}  {archive}\n", encoding="utf-8")
-        for name in (archive, "checksums-sha256.txt"):
-            (fixtures / f"{name}.sigstore").write_text("fixture bundle\n", encoding="utf-8")
-
         env = dict(os.environ)
         config = native_config(env, sandbox)
         for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN", "BK_VERSION"):
             env.pop(name, None)
         env.update(
             HOME=str(home), XDG_CONFIG_HOME=str(config), XDG_DATA_HOME=str(sandbox / "xdg-data"),
-            PATH=str(fixture_path(sandbox, env.get("PATH", os.defpath))),
             CODEX_HOME=str(codex), CLAUDE_CONFIG_DIR=str(home / ".claude"),
             COPILOT_HOME=str(home / ".copilot"), GROK_HOME=str(home / ".grok"),
             BEANKEEPER_SERVICE_DATA_DIR=str(sandbox / "data"),
             BEANKEEPER_DESKTOP_STATE_DIR=str(sandbox / "state"),
             BEANKEEPER_SERVICE_LOG_DIR=str(sandbox / "logs"), BEANKEEPER_NO_UPDATE_CHECK="1",
-            BK_SKILL_TEST_VERSION=version, BK_SKILL_TEST_ARCHIVE=archive, BK_SKILL_TEST_FIXTURES=str(fixtures),
-            BK_SKILL_TEST_PYTHON=sys.executable, BK_SKILL_TEST_DRIVER=str(Path(__file__).resolve()),
         )
+        if not published:
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_TOKEN", None)
+            version, archive, fixtures = prepare_fixture(target, artifacts, sandbox, env)
         script = sandbox / "guide.sh"
-        script.write_text(block.group(1), encoding="utf-8")
+        guide = block.group(1)
+        if published:
+            # Exercise the checkout before it reaches the guide's public bootstrap URL.
+            # The installer runs in a child shell with real curl and cosign.
+            env.update(BK_SKILL_TEST_INSTALLER_URL=INSTALLER_URL, BK_SKILL_TEST_INSTALLER=str(ROOT / "install.sh"))
+            guide = '''\
+curl() {
+    if [ "$#" -eq 4 ] && [ "$1" = -fsSL ] &&
+        [ "$2" = "$BK_SKILL_TEST_INSTALLER_URL" ] && [ "$3" = -o ]; then
+        cp "$BK_SKILL_TEST_INSTALLER" "$4"
+    else
+        command curl "$@"
+    fi
+}
+''' + guide
+        script.write_text(guide, encoding="utf-8")
         binary = home / ".local/bin/bk"
+        books = sandbox / "data/books.db"
+        recovery = books.with_suffix(".recovery.txt")
         try:
             result = command(["/bin/sh", script], env)
-            if result.stdout.count("Encrypted ledger: ") != 1:
-                raise RuntimeError("the guide must provision the service once")
-            verified = (fixtures / "verified.txt").read_text(encoding="utf-8").splitlines()
-            if Counter(verified) != Counter([archive, "checksums-sha256.txt"]):
-                raise RuntimeError("the guide did not verify both artifact identities exactly once")
+            if published:
+                version = command([binary, "--version"], env).stdout.strip().removeprefix("bk ")
+            else:
+                if result.stdout.count("Encrypted ledger: ") != 1:
+                    raise RuntimeError("the guide must provision the service once")
+                verified = (fixtures / "verified.txt").read_text(encoding="utf-8").splitlines()
+                if Counter(verified) != Counter([archive, "checksums-sha256.txt"]):
+                    raise RuntimeError("the guide did not verify both artifact identities exactly once")
 
             status = json.loads(command([binary, "service", "status", "--json"], env).stdout)
-            books = sandbox / "data/books.db"
             if not (status["installed"] and status["running"] and status["version"] == version):
                 raise RuntimeError("the guide did not start the native service")
-            if Path(status["books"]).resolve() != books.resolve() or not books.with_suffix(".recovery.txt").is_file():
+            if Path(status["books"]).resolve() != books.resolve() or not books.is_file() or not recovery.is_file():
                 raise RuntimeError("the first-run service did not create the isolated books and recovery kit")
+            if recovery.stat().st_mode & 0o077:
+                raise RuntimeError("the recovery kit must be private to the owner")
             doctor = json.loads(command([binary, "agents", "doctor", "codex", "--json"], env).stdout)
             if doctor["data"]["agents"][0]["state"] != "configured" or doctor["data"]["service"]["state"] != "ready":
                 raise RuntimeError("the guide did not configure a usable agent connection")
             check_claude_code_connection(home, binary, env)
-            print("Skill guide installed its fixture release and passed the native MCP check")
         finally:
             if binary.is_file():
                 command([binary, "service", "uninstall"], env)
+        if not (books.is_file() and recovery.is_file()):
+            raise RuntimeError("service uninstall must preserve the books and recovery kit")
+        print(f"Skill guide installed bk {version} for {target} and passed the native MCP check")
 
 
 def main():
@@ -223,7 +257,9 @@ def main():
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--artifacts", type=Path, default=ROOT / "dist")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--artifacts", type=Path, default=ROOT / "dist")
+    source.add_argument("--published", action="store_true", help="use real downloads and Sigstore verification")
     args = parser.parse_args()
     runner_os = {"linux": "Linux", "darwin": "macOS"}.get(sys.platform)
     if os.environ.get("GITHUB_ACTIONS") != "true" or not runner_os or os.environ.get("RUNNER_OS") != runner_os:
@@ -231,8 +267,8 @@ def main():
     machine = {"x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(platform.machine())
     os_target = "apple-darwin" if sys.platform == "darwin" else "unknown-linux-gnu"
     if args.target != f"{machine}-{os_target}":
-        parser.error("the staged release target must match the native runner")
-    exercise(args.target, args.artifacts)
+        parser.error("the release target must match the native runner")
+    exercise(args.target, args.artifacts, args.published)
 
 
 if __name__ == "__main__":
