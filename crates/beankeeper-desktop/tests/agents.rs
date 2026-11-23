@@ -5,7 +5,16 @@ use std::{fs, path::Path, process::Command};
 use serde_json::Value;
 
 fn bk(home: &Path, args: &[&str]) -> Result<(bool, Value), Box<dyn std::error::Error>> {
-    let output = Command::new(env!("CARGO_BIN_EXE_bk"))
+    let output = bk_command(home).args(args).output()?;
+    Ok((
+        output.status.success(),
+        serde_json::from_slice(&output.stdout)?,
+    ))
+}
+
+fn bk_command(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bk"));
+    command
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("WINDOWS_USERPROFILE", home)
@@ -16,15 +25,11 @@ fn bk(home: &Path, args: &[&str]) -> Result<(bool, Value), Box<dyn std::error::E
         .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("CODEX_HOME", home.join(".codex"))
         .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CLAUDE_USER_DATA_DIR", home.join("claude-desktop"))
         .env("COPILOT_HOME", home.join(".copilot"))
         .env("GROK_HOME", home.join("fixture-grok"))
-        .env("PATH", "")
-        .args(args)
-        .output()?;
-    Ok((
-        output.status.success(),
-        serde_json::from_slice(&output.stdout)?,
-    ))
+        .env("PATH", "");
+    command
 }
 
 #[test]
@@ -173,5 +178,94 @@ fn claude_code_connect_adopts_stdio_defaults_and_reports_custom_env_consistently
         remaining["mcpServers"],
         serde_json::json!({"other": original["mcpServers"]["other"]})
     );
+    Ok(())
+}
+
+#[test]
+fn enabled_claude_extension_and_managed_code_connections_report_overlap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let home = home.path();
+    let profile = home.join("claude-desktop");
+    let settings_dir = profile.join("Claude Extensions Settings");
+    fs::create_dir_all(&settings_dir)?;
+    let id = "local.mcpb.govcraft.beankeeper";
+    let registry = serde_json::json!({"extensions": {id: {
+        "id": id,
+        "manifest": {"name": "beankeeper", "server": {"mcp_config": {
+            "command": "${__dirname}/server/bk", "args": ["mcp", "extension"]
+        }}}
+    }}});
+    let registry_file = profile.join("extensions-installations.json");
+    fs::write(&registry_file, registry.to_string())?;
+    let settings = settings_dir.join(format!("{id}.json"));
+    let enabled = r#"{"isEnabled":true}"#;
+    fs::write(&settings, enabled)?;
+
+    let (_, before) = bk(home, &["agents", "detect", "--json"])?;
+    assert!(before["data"].get("claude_overlap").is_none());
+
+    let (success, connect) = bk(home, &["agents", "connect", "claude-code", "--json"])?;
+    assert!(success, "{connect}");
+    let notice = connect["data"]["claude_overlap"]
+        .as_str()
+        .ok_or("missing overlap on connect")?;
+    assert!(notice.contains("Claude Code") && notice.contains("Local dev"));
+    assert!(notice.contains("you only need the Beankeeper extension"));
+
+    let config = home.join(".claude.json");
+    let original = fs::read_to_string(&config)?;
+    let mut code: Value = serde_json::from_str(&original)?;
+    assert!(code["mcpServers"]["beankeeper"].is_object());
+    assert!(code["mcpServers"]["beankeeper-service"].is_object());
+
+    let (success, detect) = bk(home, &["agents", "detect", "--json"])?;
+    assert!(success, "{detect}");
+    assert_eq!(detect["data"]["claude_overlap"], notice);
+    let text = bk_command(home).args(["agents", "detect"]).output()?;
+    assert!(text.status.success());
+    assert!(String::from_utf8(text.stdout)?.contains(notice));
+
+    for (client, state) in [
+        ("claude-desktop", "extension_managed"),
+        ("claude-code", "configured"),
+    ] {
+        let (success, doctor) = bk(home, &["agents", "doctor", client, "--json"])?;
+        assert!(!success);
+        let agents = doctor["data"]["agents"]
+            .as_array()
+            .ok_or("missing agents")?;
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["state"], state);
+        assert!(agents[0].get("error").is_none());
+        assert_eq!(doctor["data"]["claude_overlap"], notice);
+        assert_eq!(
+            doctor["data"]["service"]["error"]["code"],
+            "SERVICE_NOT_INSTALLED"
+        );
+    }
+    assert_eq!(fs::read_to_string(&config)?, original);
+    assert_eq!(fs::read_to_string(&settings)?, enabled);
+    assert_eq!(fs::read_to_string(&registry_file)?, registry.to_string());
+    assert!(!profile.join("claude_desktop_config.json").exists());
+
+    code["mcpServers"]
+        .as_object_mut()
+        .ok_or("missing Claude Code servers")?
+        .remove("beankeeper");
+    fs::write(&config, code.to_string())?;
+    let (success, partial) = bk(home, &["agents", "detect", "--json"])?;
+    assert!(success, "{partial}");
+    assert_eq!(partial["data"]["claude_overlap"], notice);
+
+    for inactive in [
+        r#"{"isEnabled":false}"#,
+        r#"{"isEnabled":true,"orgBlockedReason":"policy"}"#,
+    ] {
+        fs::write(&settings, inactive)?;
+        let (success, detect) = bk(home, &["agents", "detect", "--json"])?;
+        assert!(success, "{detect}");
+        assert!(detect["data"].get("claude_overlap").is_none());
+    }
     Ok(())
 }

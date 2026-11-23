@@ -5,6 +5,7 @@
 - Collect changes under Unreleased and validate release versions, changelog sections, and tags when cutting a release.
 - Try encrypted fictional books in the existing managed MCP session and discard them in chat or with `bk demo remove`. The CLI also supports `bk demo start`.
 - The Desktop skill interviews owners in chat, saves categorization rules, tax and fee policies, and update preferences through ledger tools, and flags low-confidence categorizations in the next update.
+- Explain which Beankeeper connection to use when Claude Desktop also shows Claude Code's managed connections.
 
 ## [0.1.0-rc.23] - 2026-11-23
 
