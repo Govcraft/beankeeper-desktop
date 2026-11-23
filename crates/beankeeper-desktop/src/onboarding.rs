@@ -244,6 +244,7 @@ pub(crate) struct DesktopTools {
     pub(crate) bound: SocketAddr,
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
+    pub(crate) managed_books: Option<std::path::PathBuf>,
 }
 
 impl HostToolHandler for DesktopTools {
@@ -281,11 +282,17 @@ impl HostToolHandler for DesktopTools {
             Err(error) => return Ok(tool_error(&error)),
         };
         let status_db = Arc::clone(&self.status_db);
+        let managed_books = self.managed_books.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = status_db
                 .lock()
                 .map_err(|_| CliError::Database("setup status connection is unavailable".into()))?;
-            let report = db.read_snapshot(|_| input.read(&db, Some(&identity)))?;
+            let mut report = db.read_snapshot(|_| input.read(&db, Some(&identity)))?;
+            if managed_books.is_some_and(|books| setup::managed::migrated(&books, &identity)) {
+                report.agent_access = report
+                    .agent_access
+                    .map(setup::AgentAccess::with_migration_notice);
+            }
             let value = serde_json::to_value(&report).map_err(|error| {
                 CliError::General(format!("cannot encode setup status: {error}"))
             })?;

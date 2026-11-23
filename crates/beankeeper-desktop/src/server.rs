@@ -87,6 +87,7 @@ pub fn application(
         config,
         pairing,
         InstanceId::default(),
+        None,
     )
 }
 
@@ -97,6 +98,7 @@ fn application_with_id(
     config: StreamableHttpServerConfig,
     pairing: PairingState,
     id: InstanceId,
+    managed_books: Option<std::path::PathBuf>,
 ) -> Result<Router, DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
@@ -121,6 +123,7 @@ fn application_with_id(
             bound,
             navigation: navigation.clone(),
             status_db: Arc::clone(&association_db),
+            managed_books,
         },
     )?;
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
@@ -151,7 +154,7 @@ fn application_with_id(
 /// Returns bind, runtime, passphrase, ledger or server failures.
 pub fn serve(cli: &Cli, bind: ValidatedBind, read_only: bool) -> Result<(), DesktopError> {
     let listener = std::net::TcpListener::bind(bind.address())?;
-    serve_bound(cli, listener, read_only, InstanceId::default())
+    serve_bound(cli, listener, read_only, InstanceId::default(), None)
 }
 
 /// Host an already-bound loopback socket, preserving port fallback without a bind race.
@@ -164,7 +167,7 @@ pub(crate) fn serve_listener(
     id: InstanceId,
 ) -> Result<(), DesktopError> {
     validate_bind(listener.local_addr()?, false)?;
-    serve_bound(cli, listener, false, id)
+    serve_bound(cli, listener, false, id, Some(cli.db.clone()))
 }
 
 fn serve_bound(
@@ -172,6 +175,7 @@ fn serve_bound(
     listener: std::net::TcpListener,
     read_only: bool,
     id: InstanceId,
+    managed_books: Option<std::path::PathBuf>,
 ) -> Result<(), DesktopError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -181,7 +185,15 @@ fn serve_bound(
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
-    let app = application_with_id(cli, read_only, bound, config, pairing, id.clone())?;
+    let app = application_with_id(
+        cli,
+        read_only,
+        bound,
+        config,
+        pairing,
+        id.clone(),
+        managed_books,
+    )?;
     let directory = crate::product::state_dir().map_err(DesktopError::Product)?;
     let serving = RegisteredListener::publish(listener, runtime.handle(), &directory, &cli.db, id)?;
     crate::updates::background(

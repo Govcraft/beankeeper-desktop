@@ -3,8 +3,10 @@
 mod access;
 pub mod config;
 pub mod keychain;
+pub(crate) mod managed;
 
-pub use access::{AgentAccess, Preset};
+pub(crate) use access::ManagedAccess;
+pub use access::{AccessOptions, AgentAccess, Preset};
 
 use std::{
     error::Error,
@@ -34,6 +36,7 @@ use serde::de::IgnoredAny;
 use crate::private_file::{BEARER_FILE_LIMIT, PrivateFile};
 use keychain::{FileSecretStore, OsKeychain, SecretStore};
 
+const AGENT_NAME: &str = "desktop_agent";
 const SETUP_METADATA_LIMIT: usize = 64 * 1024;
 
 const OWNER_CAPABILITIES: &[Capability] = &[
@@ -48,10 +51,10 @@ const OWNER_CAPABILITIES: &[Capability] = &[
 ];
 
 /// One-command setup. All credential inputs are file/descriptor based.
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct SetupOptions {
     /// Resume an existing encrypted ledger; never delete it or rotate its root.
-    #[arg(long)]
+    #[arg(long, alias = "resume")]
     pub force: bool,
     /// Do not prompt or display secrets; recovery kit remains private on disk.
     #[arg(long)]
@@ -80,7 +83,7 @@ pub struct SetupOptions {
 }
 
 /// Options controlling how setup opens the local Desktop workspace.
-#[derive(Args, Debug, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct SetupLaunchOptions {
     /// Do not start a background Desktop server.
     #[arg(long)]
@@ -151,12 +154,25 @@ impl From<crate::DesktopError> for SetupError {
 /// # Errors
 /// Fails closed on existing ledgers, conflicting client configs and secret storage errors.
 pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
-    let store = configured_store(&cli.db, options)?;
+    let mut options = options.clone();
+    let registration = if options.force
+        && crate::service::managed_books_match(&cli.db)
+            .map_err(|_| SetupError::Invalid("cannot read managed service registration"))?
+    {
+        options.launch = SetupLaunchOptions {
+            no_start: true,
+            no_open: true,
+        };
+        ClientRegistration::Skip
+    } else {
+        ClientRegistration::Standalone
+    };
+    let store = configured_store(&cli.db, &options)?;
     run_with_store(
         cli,
-        options,
+        &options,
         store.as_deref().unwrap_or(&OsKeychain),
-        ClientRegistration::Standalone,
+        registration,
         None,
     )
 }
@@ -225,6 +241,13 @@ fn configured_store(
 }
 
 impl SetupOptions {
+    fn managed_access_change(&self) -> managed::AccessChange {
+        self.preset
+            .map_or(managed::AccessChange::Migrate, |preset| {
+                managed::AccessChange::Set(preset.into())
+            })
+    }
+
     fn from_service(home: &Path, bind: SocketAddr) -> Self {
         Self {
             force: true,
@@ -279,10 +302,10 @@ impl From<(Option<Preset>, ClientRegistration<'_>, SetupMode)> for Provisioning 
 }
 
 impl Provisioning {
-    fn preset(self) -> Preset {
+    fn access(self) -> ManagedAccess {
         match self {
-            Self::Standalone(preset) => preset,
-            Self::Managed(_) => Preset::MANAGED,
+            Self::Standalone(preset) => preset.into(),
+            Self::Managed(_) => ManagedAccess::default(),
         }
     }
 }
@@ -375,6 +398,9 @@ fn run_with_store(
     }
     let db = Db::open_existing(&cli.db, Some(&secret))?;
     provision(&db, provisioning, &token_file, &owner_file)?;
+    if storage.is_none() && matches!(registration, ClientRegistration::Skip) {
+        managed::reconcile(&db, &cli.db, options.managed_access_change())?;
+    }
     write_store_marker(
         &cli.db,
         options.secret_store_file.as_deref(),
@@ -536,6 +562,8 @@ fn validate_distinct_outputs<'a>(
         paths.owner_file.to_owned(),
         paths.kit.to_owned(),
         ledger.with_extension("desktop.json"),
+        ledger.with_extension("agent-access.json"),
+        ledger.with_extension("agent-access.lock"),
         ledger.with_extension("desktop.log"),
     ];
     outputs.extend(config_paths.map(Path::to_path_buf));
@@ -691,7 +719,7 @@ fn provision(
         let raw = PrivateFile::open(token_file)?.read_secret(BEARER_FILE_LIMIT)?;
         let agent = identity::verify(conn, raw.expose_secret().trim())?;
         if !matches!(provisioning, Provisioning::Managed(SetupMode::Resume))
-            && Preset::try_from(&agent) != Ok(provisioning.preset())
+            && Preset::try_from(&agent) != Ok(provisioning.access().selection().0)
         {
             return Err(SetupError::Invalid(
                 "existing token has a different preset; use upstream agent issuance for explicit credential changes",
@@ -709,7 +737,13 @@ fn provision(
         Granted::<Admin>::with_db(db, &actor, identity::init_root)?;
     }
     let bootstrap_owner = if actor.identity().is_none() {
-        let issued = issue(db, &actor, "desktop_owner", OWNER_CAPABILITIES)?;
+        let issued = issue(
+            db,
+            &actor,
+            "desktop_owner",
+            OWNER_CAPABILITIES,
+            WriteMode::default(),
+        )?;
         let bearer = issued.token().expose_secret();
         let owner = identity::verify(conn, bearer)?;
         private_create(owner_file, bearer.as_bytes())?;
@@ -723,13 +757,14 @@ fn provision(
             db::create_company(grant, &"personal".parse()?, &"Personal".parse()?, None)
         })?;
     }
-    let issued = issue(
-        db,
-        actor,
-        "desktop_agent",
-        provisioning.preset().capabilities(),
-    )?;
+    let (capabilities, mode) = provisioning.access().grants();
+    let issued = issue(db, actor, AGENT_NAME, capabilities, mode)?;
     Granted::<Admin>::with_db(db, actor, |grant| audit::set_policy(grant, true))?;
+    let origin = match provisioning {
+        Provisioning::Standalone(_) => managed::Origin::OwnerChoice,
+        Provisioning::Managed(_) => managed::Origin::Default,
+    };
+    managed::record(token_file, issued.token_jti.clone(), origin)?;
     private_create(token_file, issued.token().expose_secret().as_bytes())?;
     Ok(())
 }
@@ -739,6 +774,7 @@ fn issue(
     actor: &Actor,
     name: &str,
     capabilities: &[Capability],
+    write_mode: WriteMode,
 ) -> Result<IssuedCredential, SetupError> {
     let capabilities = capabilities
         .iter()
@@ -754,7 +790,7 @@ fn issue(
                 public_key: None,
                 generate_key: true,
             },
-            WriteMode::default(),
+            write_mode,
         )
     })?)
 }
