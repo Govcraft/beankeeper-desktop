@@ -159,6 +159,12 @@ local Codex chat.
 
 For Grok Build, run `bk agents connect grok-build --json` and restart the client.
 
+For Claude Code, run `bk agents connect claude-code --json`. The command can
+adopt entries with the managed command and arguments even if they specify stdio
+transport or an empty environment. If it reports a custom `env`, tell the owner
+which entry needs attention and let them decide whether to remove the overrides
+or keep them by renaming the entry.
+
 Configuration changes leave other server entries in place and keep a private
 `.beankeeper-backup` beside the original.
 `bk agents disconnect <client>` removes the managed entries and skill for that

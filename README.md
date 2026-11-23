@@ -87,6 +87,10 @@ Recovery material stays in a private file under the owner's control.
 See [background hosting](docs/service.md) for OS paths, credential storage,
 Linux lingering, upgrades and installer opt-out flags.
 
+Run `bk agents connect claude-code` to register or refresh the Claude Code
+connection and skill. Existing entries with the managed command and arguments
+can include `"type": "stdio"` and an empty `env`.
+
 ## Build and run
 
 Requires Rust 1.91 or newer and the C build tools needed by upstream's bundled
