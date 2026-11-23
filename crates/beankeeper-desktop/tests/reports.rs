@@ -585,8 +585,7 @@ fn fingerprint(db: &Db) -> TestResult<(i64, i64, i64)> {
             &db::companies::Company::bind(db.read(), "acme".parse()?)?,
             &db::ListTransactionParams::default(),
         )?,
-        db.read()
-            .query_row("SELECT count(*) FROM audit_log", [], |row| row.get(0))?,
+        db::audit::count_audit(db.read(), &common::audit_query())?,
     ))
 }
 

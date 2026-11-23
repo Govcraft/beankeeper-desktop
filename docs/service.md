@@ -62,9 +62,16 @@ conflict and preserve the entry. Remove `env` if the overrides are no longer
 needed, or rename the entry to keep them, then retry.
 
 The lifecycle tools are `service_install`, `service_uninstall`, `service_start`,
-`service_stop` and `service_status`. They accept no arguments and return a
-plain-language answer plus structured status or a named error. This separate
-local stdio connection can restart a stopped HTTP server. It grants service
+`service_stop` and `service_status`. They return a plain-language answer plus
+structured status or a named error. `service_install` accepts optional boolean
+arguments `file_store` and `no_agents`, equivalent to `--file-store` and
+`--no-agents`. Both default to false. MCP installs use the managed books path.
+Use `bk --db BOOKS service install` to select a particular ledger on first
+install. The internal `install-extension` command is reserved for the native
+bundle's first launch, when the bundle owns client registration and uses the
+OS keychain.
+
+This separate local stdio connection can restart a stopped HTTP server. It grants service
 management, without ledger approval or administration capabilities. Only
 configure it in agents the owner trusts to manage local hosting. The HTTP ledger
 endpoint retains the existing upstream capability checks and browser pairing.
@@ -85,8 +92,11 @@ plain-language `note` is derived from the reported preset and signed write mode.
 Status reports `agent_access: null` when it cannot verify access with the
 running service. The bridge and status check work from the published endpoint
 even when the calling agent has no connection to the OS service manager.
-`bk service status --json` includes an `error_code` if the published endpoint
-cannot be reached, its process identity differs, or MCP authentication fails.
+Both status interfaces report `SERVICE_NOT_RUNNING` when an installed service
+is stopped. Starting without an installation returns `SERVICE_NOT_INSTALLED`.
+Lifecycle calls that need a missing Linux session bus return
+`SESSION_ENV_UNAVAILABLE`. Status also reports a named error if the published
+endpoint cannot be reached, its process identity differs, or MCP authentication fails.
 If an agent credential has expired or been revoked, ask the owner to renew it
 using the upstream agent commands.
 

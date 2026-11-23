@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.20] - 2026-11-22
+
+### Changed
+
+- Desktop setup status uses upstream ledger counts and keeps the suggested next
+  step and verified agent access. Book profiles and account details are
+  available through the per-book setup command and tool.
+- Service lifecycle tools and commands use the same typed operations.
+  `service_install` accepts `file_store` and `no_agents`, and lifecycle failures
+  report named errors.
+
 ## [0.1.0-rc.19] - 2026-11-22
 
 ### Changed

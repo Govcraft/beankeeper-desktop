@@ -169,10 +169,8 @@ fn decision(server: &Server, id: &str, action: &str, csrf: &str) -> RequestBuild
         .form(&[("csrf", csrf), ("company", "acme")])
 }
 
-fn transaction_count(db: &Db) -> TestResult<i64> {
-    Ok(db
-        .read()
-        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))?)
+fn transaction_count(db: &Db) -> TestResult<u64> {
+    Ok(beankeeper_cli::commands::setup::status(db)?.transactions)
 }
 
 #[test]
@@ -284,12 +282,19 @@ fn cli_proposals_show_full_posting_and_browser_approval_is_atomic_and_human_attr
     );
     assert_ne!(uri, &proposal.proposer_uri);
     assert_human_posting(&db, *transaction_id, uri, jti, &fixture, &id)?;
-    let actor: String = db.read().query_row(
-        "SELECT actor FROM audit_log WHERE action = 'proposal_approve' AND entity_id = ?1",
-        [&id],
-        |row| row.get(0),
+    let rows = db::audit::list_audit(
+        db.read(),
+        &db::audit::ListAuditParams {
+            company_slug: Some(&"acme".parse()?),
+            action: Some(db::audit::AuditAction::ProposalApprove),
+            ..common::audit_query()
+        },
     )?;
-    assert_eq!(actor, "desktop-local-human");
+    let row = rows
+        .iter()
+        .find(|row| row.entity_id == id)
+        .ok_or("proposal audit row")?;
+    assert_eq!(row.actor, "desktop-local-human");
     assert_eq!(
         decision(&server, &id, "approve", csrf(&html)?)
             .send()?
@@ -504,7 +509,14 @@ fn verification_caches_its_last_result_and_explicit_recheck_detects_tampering() 
     let db = fixture.ledger.db()?;
     // This isolated encrypted temp ledger deliberately simulates an attacker who
     // bypassed the append-only trigger. Never run this against real books.
-    fixture.ledger.fixture_sql()?.execute_batch("DROP TRIGGER protect_audit_update; UPDATE audit_log SET actor = 'tampered' WHERE id = (SELECT MIN(id) FROM audit_log);")?;
+    let connection = fixture.ledger.fixture_sql()?;
+    let rows = db::audit::list_audit(db.read(), &common::audit_query())?;
+    let row = rows.last().ok_or("missing audit row to tamper with")?;
+    connection.execute_batch("DROP TRIGGER protect_audit_update;")?;
+    connection.execute(
+        "UPDATE audit_log SET actor = 'tampered' WHERE id = ?1",
+        [row.id],
+    )?;
     assert!(verify::execute_json(&db).is_err());
     assert_eq!(
         queue(&server)?,
@@ -607,15 +619,22 @@ fn revoking_the_server_human_credential_prevents_browser_approval() -> TestResul
     server.pair()?;
     let html = queue(&server)?;
     let db = fixture.ledger.db()?;
-    let human_jti: String = db.read().query_row(
-        "SELECT t.jti FROM agent_tokens t JOIN audit_log a ON a.entity_id = t.jti
-         WHERE a.action = 'token_issue' AND a.actor = 'desktop-owner'",
-        [],
-        |row| row.get(0),
+    let rows = db::audit::list_audit(
+        db.read(),
+        &db::audit::ListAuditParams {
+            actor: Some(&"desktop-owner".parse()?),
+            entity: Some(db::audit::AuditEntity::Agent),
+            action: Some(db::audit::AuditAction::TokenIssue),
+            ..common::audit_query()
+        },
     )?;
+    let human_jti = &rows
+        .first()
+        .ok_or("missing human token issuance")?
+        .entity_id;
     let owner = Actor::new("fixture-owner".parse()?)
         .with_identity(identity::verify(db.read(), token(&fixture.approver)?)?);
-    Granted::<Admin>::with_db(&db, &owner, |grant| identity::revoke(grant, &human_jti))?;
+    Granted::<Admin>::with_db(&db, &owner, |grant| identity::revoke(grant, human_jti))?;
     assert_eq!(
         decision(&server, &id, "approve", csrf(&html)?)
             .send()?
@@ -658,9 +677,7 @@ fn assert_rejected_insert_is_atomic(
     id: &str,
     csrf_token: &str,
 ) -> TestResult {
-    let before: i64 = db
-        .read()
-        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+    let before = db::audit::count_audit(db.read(), &common::audit_query())?;
     let fixture_db = ledger.fixture_sql()?;
     fixture_db.execute_batch("CREATE TRIGGER fixture_reject_post BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'fixture posting failure'); END;")?;
     assert_eq!(
@@ -672,9 +689,7 @@ fn assert_rejected_insert_is_atomic(
         proposals::get(db.read(), &"acme".parse()?, &id.parse()?)?.state,
         ProposalState::Pending
     );
-    let after: i64 = db
-        .read()
-        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+    let after = db::audit::count_audit(db.read(), &common::audit_query())?;
     assert_eq!(
         before, after,
         "failed posting must not leave a resolution audit"

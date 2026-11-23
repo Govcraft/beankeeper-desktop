@@ -6,15 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use beankeeper::types::Currency;
 use beankeeper_cli::{
     capability::Capability,
     cli::Cli,
-    commands::setup::{
-        BookAccountCode, BookFacts, BookProfile, BookSettings, ProfileRevision,
-        StatementImportSummary, book_facts, statement_import_summary,
-    },
-    db::{self, Db, companies::CompanySlug},
+    commands::setup::{SetupStatus, status},
+    db::Db,
     error::CliError,
     identity::{self, VerifiedAgent},
     mcp::{HostTool, HostToolEffect, HostToolHandler},
@@ -23,11 +19,10 @@ use beankeeper_cli::{
 };
 use rmcp::{
     ErrorData,
-    model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool},
+    model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool},
 };
 use secrecy::ExposeSecret;
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     links::mcp as link_tool,
@@ -40,100 +35,12 @@ pub(crate) const STATUS_TOOL: &str = "setup_status";
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-enum LedgerSnapshot {
+enum LedgerState {
     MissingLedger,
-    Installed { books: Vec<Book> },
-}
-
-#[derive(Serialize)]
-struct Book {
-    id: CompanySlug,
-    name: String,
-    accounts: Vec<Account>,
-    observed_currencies: Vec<CurrencyCode>,
-    #[serde(flatten)]
-    profile: ProfileStatus,
-    #[serde(flatten)]
-    imported_history: ImportHistory,
-}
-
-#[derive(Serialize)]
-struct Account {
-    #[serde(serialize_with = "serialize_account_code")]
-    code: BookAccountCode,
-    name: String,
-}
-
-fn serialize_account_code<S: Serializer>(
-    code: &BookAccountCode,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(code.as_str())
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ProfileStatus {
-    Unavailable {
-        base_currency: SettingState,
-        fiscal_year_start: SettingState,
-    },
-    Recorded {
-        profile_revision: ProfileRevision,
+    Installed {
         #[serde(flatten)]
-        settings: BookSettings,
+        status: SetupStatus,
     },
-}
-
-impl From<Option<BookProfile<'_>>> for ProfileStatus {
-    fn from(profile: Option<BookProfile<'_>>) -> Self {
-        match profile {
-            Some(profile) => Self::Recorded {
-                profile_revision: profile.revision,
-                settings: profile.settings,
-            },
-            None => Self::Unavailable {
-                base_currency: SettingState::Unavailable,
-                fiscal_year_start: SettingState::Unavailable,
-            },
-        }
-    }
-}
-
-struct CurrencyCode(Currency);
-
-impl Serialize for CurrencyCode {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.0.code())
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SettingState {
-    Unavailable,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "imported_history", rename_all = "snake_case")]
-enum ImportHistory {
-    NoTransactions,
-    SourceUnknown,
-    StatementsRecorded {
-        #[serde(serialize_with = "serialize_statement_imports")]
-        statement_imports: StatementImportSummary,
-    },
-}
-
-fn serialize_statement_imports<S: Serializer>(
-    summary: &StatementImportSummary,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let mut counts = serializer.serialize_struct("StatementImportSummary", 3)?;
-    counts.serialize_field("committed_batches", &summary.committed_batches)?;
-    counts.serialize_field("created_transactions", &summary.created_transactions)?;
-    counts.serialize_field("preexisting_matches", &summary.preexisting_matches)?;
-    counts.end()
 }
 
 #[derive(Serialize)]
@@ -153,14 +60,12 @@ impl NextStep {
             Self::ChooseBooks => {
                 "Ask whether these books are for personal finances, a business, or both."
             }
-            Self::ListAccounts => {
-                "Confirm which books to keep, then ask for the names of the accounts the owner uses."
-            }
+            Self::ListAccounts => "Ask for the names of the accounts the owner uses.",
             Self::ReviewOpeningBalances => {
-                "Confirm that the listed accounts match the owner's books. Ask about starting balances and their dates."
+                "Check each book’s accounts and ask about starting balances and their dates."
             }
             Self::ReviewExistingActivity => {
-                "These books already contain transactions. Confirm which statements and opening balances have already been entered before adding anything."
+                "These books already contain transactions. Check each book’s accounts and ask which statements and opening balances are already recorded."
             }
         }
     }
@@ -169,52 +74,52 @@ impl NextStep {
 #[derive(Serialize)]
 struct SetupReport {
     #[serde(flatten)]
-    ledger: LedgerSnapshot,
+    ledger: LedgerState,
     next_step: NextStep,
     summary: String,
     agent_access: Option<setup::AgentAccess>,
 }
 
 impl SetupReport {
-    fn from_snapshot(ledger: LedgerSnapshot, agent: Option<&VerifiedAgent>) -> Self {
-        let next_step = match &ledger {
-            LedgerSnapshot::MissingLedger => NextStep::InstallLedger,
-            LedgerSnapshot::Installed { books } if books.is_empty() => NextStep::ChooseBooks,
-            LedgerSnapshot::Installed { books }
-                if books.iter().any(|book| book.accounts.is_empty()) =>
-            {
-                NextStep::ListAccounts
-            }
-            LedgerSnapshot::Installed { books }
-                if books.iter().all(|book| book.observed_currencies.is_empty()) =>
-            {
-                NextStep::ReviewOpeningBalances
-            }
-            LedgerSnapshot::Installed { .. } => NextStep::ReviewExistingActivity,
-        };
-        let summary = match &ledger {
-            LedgerSnapshot::MissingLedger => {
-                format!("No local ledger exists yet. {}", next_step.summary())
-            }
-            LedgerSnapshot::Installed { books } => {
-                let book_count = books.len();
-                let account_count: usize = books.iter().map(|book| book.accounts.len()).sum();
-                format!(
-                    "The local ledger has {book_count} {} and {account_count} {}. {}",
-                    if book_count == 1 {
-                        "set of books"
-                    } else {
-                        "sets of books"
-                    },
-                    if account_count == 1 {
-                        "account"
-                    } else {
-                        "accounts"
-                    },
-                    next_step.summary()
+    fn new(ledger: LedgerState, agent: Option<&VerifiedAgent>) -> Self {
+        let (next_step, summary) = match &ledger {
+            LedgerState::MissingLedger => (
+                NextStep::InstallLedger,
+                "No local ledger exists yet.".into(),
+            ),
+            LedgerState::Installed { status } => {
+                let next_step = match status {
+                    SetupStatus { companies: 0, .. } => NextStep::ChooseBooks,
+                    SetupStatus { accounts: 0, .. } => NextStep::ListAccounts,
+                    SetupStatus {
+                        transactions: 0, ..
+                    } => NextStep::ReviewOpeningBalances,
+                    _ => NextStep::ReviewExistingActivity,
+                };
+                let SetupStatus {
+                    companies,
+                    accounts,
+                    ..
+                } = status;
+                let books_label = if *companies == 1 {
+                    "set of books"
+                } else {
+                    "sets of books"
+                };
+                let accounts_label = if *accounts == 1 {
+                    "account"
+                } else {
+                    "accounts"
+                };
+                (
+                    next_step,
+                    format!(
+                        "The local ledger has {companies} {books_label} and {accounts} {accounts_label}."
+                    ),
                 )
             }
         };
+        let summary = format!("{summary} {}", next_step.summary());
         Self {
             ledger,
             next_step,
@@ -231,66 +136,9 @@ impl SetupReport {
     }
 }
 
-impl LedgerSnapshot {
-    fn read(db: &Db) -> Result<Self, CliError> {
-        let conn = db.read();
-        let mut currencies = conn.prepare(
-            "SELECT DISTINCT currency FROM transactions WHERE company_slug = ?1 ORDER BY currency",
-        )?;
-        let books = db::list_companies(conn)?
-            .into_iter()
-            .map(|company| {
-                let company_slug = company.slug;
-                let BookFacts {
-                    name,
-                    accounts,
-                    profile,
-                    ..
-                } = book_facts(db, &company_slug)?;
-                let accounts = accounts
-                    .into_iter()
-                    .map(|account| Account {
-                        code: account.code,
-                        name: account.name,
-                    })
-                    .collect();
-                let observed_currencies = currencies
-                    .query_map([&company_slug], |row| row.get::<_, String>(0))?
-                    .map(|code| {
-                        Currency::from_code(&code?).map(CurrencyCode).map_err(|_| {
-                            CliError::Database("a posted currency code is invalid".into())
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let statement_imports = statement_import_summary(db, &company_slug)?;
-                let imported_history = if statement_imports.committed_batches != 0 {
-                    ImportHistory::StatementsRecorded { statement_imports }
-                } else if observed_currencies.is_empty() {
-                    ImportHistory::NoTransactions
-                } else {
-                    ImportHistory::SourceUnknown
-                };
-                let profile = profile.into();
-                Ok(Book {
-                    id: company_slug,
-                    name,
-                    accounts,
-                    observed_currencies,
-                    profile,
-                    imported_history,
-                })
-            })
-            .collect::<Result<_, CliError>>()?;
-        Ok(Self::Installed { books })
-    }
-}
-
 fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), CliError> {
     if !cli.db.try_exists()? {
-        return Ok((
-            SetupReport::from_snapshot(LedgerSnapshot::MissingLedger, None),
-            None,
-        ));
+        return Ok((SetupReport::new(LedgerState::MissingLedger, None), None));
     }
     let _guard = setup::stored_passphrase(cli).map_err(|error| match error {
         setup::SetupError::Io(error) => CliError::Io(error),
@@ -309,7 +157,7 @@ fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), Cl
             cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
             Capability::Read,
         )?;
-        let report = SetupReport::from_snapshot(LedgerSnapshot::read(&db)?, agent.as_ref());
+        let report = StatusInput::default().read(&db, agent.as_ref())?;
         Ok((report, agent))
     })
 }
@@ -369,9 +217,28 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
     }
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StatusInput {}
+
+impl TryFrom<Option<JsonObject>> for StatusInput {
+    type Error = CliError;
+
+    fn try_from(arguments: Option<JsonObject>) -> Result<Self, Self::Error> {
+        serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+            .map_err(|_| CliError::Usage("setup_status takes no arguments".into()))
+    }
+}
+
+impl StatusInput {
+    fn read(self, db: &Db, agent: Option<&VerifiedAgent>) -> Result<SetupReport, CliError> {
+        let Self {} = self;
+        let ledger = LedgerState::Installed {
+            status: status(db)?,
+        };
+        Ok(SetupReport::new(ledger, agent))
+    }
+}
 
 pub(crate) struct DesktopTools {
     pub(crate) bound: SocketAddr,
@@ -386,7 +253,7 @@ impl HostToolHandler for DesktopTools {
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
-                "Call this first when the owner asks to set up their books. Read the current books, account inventory, recommended next step, and your verified grant and write mode.",
+                "Call this first when the owner asks to set up their books. Read the ledger counts, recommended next step, and your verified grant and write mode.",
                 schemars::schema_for!(StatusInput).to_value().as_object().cloned().unwrap_or_default(),
             ),
             capability: Capability::Read,
@@ -409,25 +276,16 @@ impl HostToolHandler for DesktopTools {
         if request.name != STATUS_TOOL {
             return self.navigation.call_tool(request, identity).await;
         }
-        if request
-            .arguments
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return Ok(tool_error(&CliError::Usage(
-                "setup_status takes no arguments".into(),
-            )));
-        }
+        let input = match StatusInput::try_from(request.arguments) {
+            Ok(input) => input,
+            Err(error) => return Ok(tool_error(&error)),
+        };
         let status_db = Arc::clone(&self.status_db);
         let result = tokio::task::spawn_blocking(move || {
             let db = status_db
                 .lock()
                 .map_err(|_| CliError::Database("setup status connection is unavailable".into()))?;
-            let report = db.read_snapshot(|_| {
-                Ok(SetupReport::from_snapshot(
-                    LedgerSnapshot::read(&db)?,
-                    Some(&identity),
-                ))
-            })?;
+            let report = db.read_snapshot(|_| input.read(&db, Some(&identity)))?;
             let value = serde_json::to_value(&report).map_err(|error| {
                 CliError::General(format!("cannot encode setup status: {error}"))
             })?;

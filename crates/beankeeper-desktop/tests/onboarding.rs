@@ -60,7 +60,8 @@ fn setup_status_distinguishes_a_missing_ledger_from_empty_books() -> TestResult 
     );
     let status: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(status["data"]["state"], "installed");
-    assert_eq!(status["data"]["books"], json!([]));
+    assert_eq!(status["data"]["companies"], 0);
+    assert_eq!(status["data"]["owner_key_initialized"], false);
     assert_eq!(status["data"]["next_step"], "choose_books");
     Ok(())
 }
@@ -95,6 +96,9 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     for name in ["setup_status", LEDGER_SETUP_STATUS] {
         assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
     }
+    let invalid = setup_call(&server, reader, "setup_status", json!({"unknown": true}))?;
+    assert_eq!(invalid["result"]["isError"], true, "{invalid}");
+    assert_eq!(invalid["result"]["structuredContent"]["code"], "USAGE");
     let status = |name| -> TestResult<Value> {
         let response = rpc(server.request(
             "tools/call",
@@ -104,38 +108,44 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
         assert_ne!(response["result"]["isError"], true, "{response}");
         Ok(response["result"]["structuredContent"].clone())
     };
-    let empty = status("setup_status")?;
-    assert_eq!(empty["state"], "installed");
-    assert_eq!(empty["agent_access"]["preset"], "read-only");
-    assert_eq!(empty["agent_access"]["write_mode"], "direct");
-    assert_eq!(empty["next_step"], "list_accounts");
-    assert_eq!(empty["books"][0]["accounts"], json!([]));
-    assert_eq!(
-        status(LEDGER_SETUP_STATUS)?,
-        json!({"companies":1,"accounts":0,"transactions":0,"owner_key_initialized":true})
-    );
+    let check_parity = |next_step, accounts, transactions| -> TestResult {
+        let upstream = status(LEDGER_SETUP_STATUS)?;
+        assert_eq!(
+            upstream,
+            json!({
+                "companies":1,"accounts":accounts,"transactions":transactions,
+                "owner_key_initialized":true,
+            })
+        );
+        let desktop = status("setup_status")?;
+        for (field, value) in upstream
+            .as_object()
+            .ok_or("expected upstream status object")?
+        {
+            assert_eq!(&desktop[field], value, "{field}");
+        }
+        assert_eq!(desktop["state"], "installed");
+        assert_eq!(desktop["agent_access"]["preset"], "read-only");
+        assert_eq!(desktop["agent_access"]["write_mode"], "direct");
+        assert_eq!(desktop["next_step"], next_step);
+        let output = ledger
+            .command()
+            .args(["--agent-token", reader, "setup", "status", "--json"])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cli: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(cli["data"], desktop);
+        Ok(())
+    };
+    check_parity("list_accounts", 0, 0)?;
+
     let db = ledger.db()?;
     create_fixture_account(&db, ledger.owner(), "1000", "Checking", AccountType::Asset)?;
-    let active = status("setup_status")?;
-    assert_eq!(active["next_step"], "review_opening_balances");
-    assert_eq!(
-        active["books"][0]["accounts"],
-        json!([{"code":"1000","name":"Checking"}])
-    );
-    assert_eq!(active["books"][0]["base_currency"], "unavailable");
-    assert_eq!(active["books"][0]["fiscal_year_start"], "unavailable");
-    assert_eq!(active["books"][0]["imported_history"], "no_transactions");
-    let output = ledger
-        .command()
-        .args(["--agent-token", reader, "setup", "status", "--json"])
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cli: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(cli["data"], active);
+    check_parity("review_opening_balances", 1, 0)?;
 
     create_fixture_account(
         &db,
@@ -170,17 +180,7 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
         "{}",
         String::from_utf8_lossy(&posting.stderr)
     );
-    let historical = status("setup_status")?;
-    assert_eq!(historical["next_step"], "review_existing_activity");
-    assert_eq!(
-        historical["books"][0]["observed_currencies"],
-        json!(["JPY"])
-    );
-    assert_eq!(historical["books"][0]["imported_history"], "source_unknown");
-    assert_eq!(
-        status(LEDGER_SETUP_STATUS)?,
-        json!({"companies":1,"accounts":2,"transactions":1,"owner_key_initialized":true})
-    );
+    check_parity("review_existing_activity", 2, 1)?;
 
     assert_navigation_cannot_read_setup_status(&db, ledger.owner(), &server)
 }
@@ -479,17 +479,16 @@ fn desktop_guides_a_book_through_profile_chart_and_named_account() -> TestResult
     assert_eq!(added["name"], "Studio Checking");
     assert_eq!(apply("ledger_setup_account_add", account)?, added);
 
-    let status = setup_result(&server, token(&ledger.reader)?, "setup_status", json!({}))?;
-    let studio = status["books"]
-        .as_array()
-        .ok_or("missing books")?
-        .iter()
-        .find(|book| book["id"] == "studio")
-        .ok_or("missing Studio book")?;
-    assert_eq!(studio["purpose"], "business");
-    assert_eq!(studio["base_currency"], "CAD");
-    assert_eq!(studio["fiscal_year_start"], "07-01");
-    assert_eq!(studio["profile_revision"], revised["revision"]);
+    let studio = setup_result(
+        &server,
+        token(&ledger.reader)?,
+        "ledger_setup_book_show",
+        json!({"company":"studio"}),
+    )?;
+    assert_eq!(studio["profile"]["purpose"], "business");
+    assert_eq!(studio["profile"]["base_currency"], "CAD");
+    assert_eq!(studio["profile"]["fiscal_year_start"], "07-01");
+    assert_eq!(studio["profile"]["revision"], revised["revision"]);
     let accounts = studio["accounts"].as_array().ok_or("missing accounts")?;
     assert_eq!(
         accounts
@@ -497,10 +496,6 @@ fn desktop_guides_a_book_through_profile_chart_and_named_account() -> TestResult
             .filter(|account| account["name"] == "Studio Checking")
             .count(),
         1
-    );
-    assert_eq!(
-        setup_cli(&ledger, token(&ledger.reader)?, &["status"])?,
-        status
     );
     let finished = setup_result(
         &server,
@@ -568,11 +563,6 @@ fn desktop_initializes_an_existing_book_without_replacing_its_account() -> TestR
     assert_eq!(configured["accounts"][0]["name"], "Existing Checking");
     assert_eq!(configured["profile"]["base_currency"], "MXN");
     assert_eq!(configured["profile"]["fiscal_year_start"], "01-01");
-    let desktop_status = setup_result(&server, reader, "setup_status", json!({}))?;
-    assert_eq!(
-        desktop_status["books"][0]["accounts"],
-        json!([{"code":"CASH","name":"Existing Checking"}])
-    );
     db::audit::verify_hash_chain(ledger.db()?.read())?;
     Ok(())
 }
@@ -642,14 +632,11 @@ fn desktop_previews_opening_balances_without_reserving_or_posting_them() -> Test
     let ledger = &fixture.ledger;
     let generation = fixture.generation;
     let scoped = fixture.scoped.expose_secret();
-    let db = ledger.db()?;
-    let ledger_state = || -> TestResult<(i64, i64, i64, i64)> {
-        Ok(db.read().query_row(
-            "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM txn_proposals),
-                (SELECT COUNT(*) FROM setup_requests), (SELECT COUNT(*) FROM audit_log)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?)
+    // Compare the same reader before and after external CLI and MCP calls.
+    // Any commit, including to internal setup tables, changes data_version.
+    let observer = ledger.fixture_sql()?;
+    let ledger_state = || -> rusqlite::Result<i64> {
+        observer.pragma_query_value(None, "data_version", |row| row.get(0))
     };
     let before = ledger_state()?;
     let input = fixture.input();

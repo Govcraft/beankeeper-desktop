@@ -130,6 +130,10 @@ spend caps or approval rights. Keep the recovery kit and separate owner
 credential offline. See [the setup reference](docs/setup.md) for flags, exact
 files touched, headless CI usage, recovery and current pairing integration limits.
 
+Use `bk setup status --json` or the `setup_status` MCP tool to check setup
+progress. Both report the ledger counts and suggest the next step. For details
+on a particular book, use `bk setup book-show` or `ledger_setup_book_show`.
+
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
 `BEANKEEPER_PASSPHRASE_CMD`, then the stored credential for setup-enrolled ledgers.

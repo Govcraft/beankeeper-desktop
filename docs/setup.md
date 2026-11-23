@@ -21,6 +21,19 @@ kind of passphrase but only saves it privately; it never displays credentials.
 An explicit upstream `--passphrase-file`, `--passphrase-fd`, or
 `BEANKEEPER_PASSPHRASE_CMD` takes precedence over generation.
 
+## Check setup progress
+
+Run `bk --db BOOKS setup status --json` or call `setup_status` over MCP. Both
+report the upstream counts of books, accounts and posted transactions, whether
+the owner key exists, and Desktop's suggested next step. When you use a
+credential, the response includes its verified access. The CLI reports a
+missing ledger without creating one.
+
+The upstream `ledger_setup_status` MCP tool returns the same counts and owner
+key state. For each book's profile and accounts, call `ledger_setup_book_show`
+or run `bk --db BOOKS setup book-show COMPANY --json`. Use the statement receipt
+operation to look up a known import batch.
+
 ## Options
 
 | Option | Behavior |

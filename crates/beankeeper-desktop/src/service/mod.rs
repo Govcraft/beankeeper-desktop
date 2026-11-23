@@ -3,6 +3,7 @@
 mod extension;
 mod manager;
 mod mcp;
+mod operation;
 mod session;
 
 use std::{
@@ -30,6 +31,8 @@ use crate::{
 
 pub use crate::instance::PortWarning;
 pub(crate) use extension::connection as extension_connection;
+pub use operation::InstallOptions;
+use operation::ServiceOperation;
 use session::UserSessionEnv;
 
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -43,17 +46,10 @@ pub struct ServiceOptions {
 }
 
 /// Available per-user lifecycle operations.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Clone, Copy, Debug)]
 pub enum ServiceCommand {
     /// Create encrypted books if needed, register login startup and start the service.
-    Install {
-        /// Use a private passphrase file instead of the native secret store (headless hosts).
-        #[arg(long)]
-        file_store: bool,
-        /// Leave all MCP client configurations unchanged.
-        #[arg(long)]
-        no_agents: bool,
-    },
+    Install(InstallOptions),
     /// Internal first-launch install for an MCP bundle that manages its own client registration.
     #[command(hide = true)]
     InstallExtension,
@@ -89,6 +85,14 @@ pub enum ServiceError {
     SessionEnvUnavailable,
     /// No managed background service is installed.
     NotInstalled,
+    /// Installed hosting is stopped.
+    NotRunning,
+    /// The local MCP name is outside the lifecycle tool catalog.
+    UnknownTool,
+    /// MCP arguments do not match the selected operation's schema.
+    Arguments,
+    /// A lifecycle worker exited before returning a result.
+    Worker,
     /// The advertised loopback endpoint could not be reached.
     EndpointConnect,
     /// The responding endpoint did not match the service descriptor.
@@ -117,6 +121,10 @@ impl ServiceError {
             Self::Manager(_) => "SERVICE_MANAGER",
             Self::SessionEnvUnavailable => "SESSION_ENV_UNAVAILABLE",
             Self::NotInstalled => "SERVICE_NOT_INSTALLED",
+            Self::NotRunning => "SERVICE_NOT_RUNNING",
+            Self::UnknownTool => "SERVICE_UNKNOWN_TOOL",
+            Self::Arguments => "SERVICE_ARGUMENTS",
+            Self::Worker => "SERVICE_INTERNAL",
             Self::EndpointConnect => "SERVICE_ENDPOINT_UNREACHABLE",
             Self::EndpointIdentity => "SERVICE_ENDPOINT_IDENTITY",
             Self::BooksNotServed(_) => "DESKTOP_BOOKS_NOT_SERVED",
@@ -135,6 +143,10 @@ impl fmt::Display for ServiceError {
             Self::Configuration(message) | Self::Manager(message) => f.write_str(message),
             Self::SessionEnvUnavailable => f.write_str("Cannot find your Linux session bus. Run Beankeeper as the owner from an active login session, or pass that session's XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS to your terminal or agent."),
             Self::NotInstalled => f.write_str("Beankeeper is not installed as a background service. Run bk service install."),
+            Self::NotRunning => f.write_str("Beankeeper is stopped. Run bk service start."),
+            Self::UnknownTool => f.write_str("List the service lifecycle tools to find the supported operation names."),
+            Self::Arguments => f.write_str("Use the arguments listed in the service tool schema."),
+            Self::Worker => f.write_str("Service operation could not complete. Run service_status to inspect the result."),
             Self::EndpointConnect => f.write_str("Cannot connect to the published Desktop endpoint. Run bk service status --json and inspect the private service log."),
             Self::EndpointIdentity => f.write_str("The published endpoint did not identify itself as the expected Beankeeper process. Run bk service status --json and inspect the private service log."),
             Self::BooksNotServed(books) => write!(f, "No matching Desktop instance is serving {}. Each instance serves one books file. Start Desktop for these books, or answer without a detail link.", books.display()),
@@ -361,7 +373,8 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
             result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
         }
         Ok(None) if result.installed => {
-            result.message = "Beankeeper is stopped. Run bk service start.".into();
+            result.error_code = Some(ServiceError::NotRunning.code());
+            result.message = ServiceError::NotRunning.to_string();
         }
         Ok(None) => {}
         Err(
@@ -552,23 +565,21 @@ pub(crate) fn registration_session() -> Result<(), ServiceError> {
 ///
 /// # Errors
 /// Returns actionable service-manager, configuration and provisioning errors.
-pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<(), ServiceError> {
-    if matches!(options.command, ServiceCommand::Mcp) {
-        return mcp::serve();
+pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), ServiceError> {
+    match options.command {
+        ServiceCommand::Mcp => return mcp::serve(),
+        ServiceCommand::Run => return host(&Paths::discover()?),
+        _ => {}
     }
-    let paths = Paths::discover()?;
-    if matches!(options.command, ServiceCommand::Run) {
-        return host(&paths);
-    }
-    if let ServiceCommand::Status { json } = options.command {
-        let status = status_at(&paths)?;
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string(&status)
-                    .map_err(|_| ServiceError::Configuration("cannot serialize service status"))?
-            );
-        } else {
+    let operation = ServiceOperation::try_from(options.command)?;
+    let status = execute(operation, Some((cli, explicit_db)))?;
+    match options.command {
+        ServiceCommand::Status { json: true } => println!(
+            "{}",
+            serde_json::to_string(&status)
+                .map_err(|_| ServiceError::Configuration("cannot serialize service status"))?
+        ),
+        ServiceCommand::Status { json: false } => {
             println!(
                 "{}\nBooks: {}\nLog: {}",
                 status.plain_text(),
@@ -582,88 +593,107 @@ pub fn run(options: &ServiceOptions, mut cli: Cli, explicit_db: bool) -> Result<
                 eprintln!("{}", warning.message());
             }
         }
-        return Ok(());
+        ServiceCommand::Install(_) | ServiceCommand::InstallExtension => println!(
+            "Encrypted ledger: {}\n{}\nRecovery kit: {}. Keep an offline copy under your own control.",
+            status.books.display(),
+            status.message,
+            status.books.with_extension("recovery.txt").display()
+        ),
+        ServiceCommand::Start => println!("Beankeeper started."),
+        ServiceCommand::Stop => {
+            println!("Beankeeper stopped; login startup is disabled until bk service start.");
+        }
+        ServiceCommand::Uninstall => println!(
+            "Service removed. Books, credentials, MCP configs and recovery material were preserved."
+        ),
+        ServiceCommand::Mcp | ServiceCommand::Run => {}
+    }
+    Ok(())
+}
+
+fn execute(
+    operation: ServiceOperation,
+    ledger: Option<(Cli, bool)>,
+) -> Result<Status, ServiceError> {
+    let paths = Paths::discover()?;
+    if matches!(operation, ServiceOperation::Status) {
+        return status_at(&paths);
     }
     paths.prepare()?;
     let _lock = lock(&paths.state.join("service-operation.lock"))?;
     let previous = Config::load(&paths)?;
-    match options.command {
-        ServiceCommand::Install {
-            file_store,
-            no_agents,
-        } => install(
-            &paths,
-            &mut cli,
-            previous.as_ref(),
-            InstallMode::Command {
-                storage: if file_store {
-                    ServiceSecretStorage::PrivateFile
-                } else {
-                    ServiceSecretStorage::NativeWithFileFallback
-                },
-                explicit_db,
-                no_agents,
-            },
-        )?,
-        ServiceCommand::InstallExtension => {
+    match operation {
+        ServiceOperation::Install(options) => {
+            install(
+                &paths,
+                ledger,
+                previous.as_ref(),
+                InstallMode::Command(options),
+            )?;
+        }
+        ServiceOperation::InstallExtension => {
             // An explicit service installation racing the extension takes
             // precedence. Reuse it and leave its registration untouched.
             if previous.is_none() {
-                install(&paths, &mut cli, None, InstallMode::Extension)?;
+                install(&paths, ledger, None, InstallMode::Extension)?;
             }
         }
-        ServiceCommand::Start => {
-            let config = require_installed(previous.as_ref())?;
+        ServiceOperation::Start => {
+            let config = previous.as_ref().ok_or(ServiceError::NotInstalled)?;
             manager::start(&paths, &UserSessionEnv::discover()?)?;
             wait_ready(&paths, &config.books)?;
-            println!("Beankeeper started.");
         }
-        ServiceCommand::Stop => {
+        ServiceOperation::Stop => {
             if previous.is_some() {
                 manager::stop(&paths, &UserSessionEnv::discover()?)?;
                 // A native manager can terminate the host before it removes
                 // its descriptor, notably when Windows stops the task.
                 remove_if_exists(&paths.runtime())?;
             }
-            println!("Beankeeper stopped; login startup is disabled until bk service start.");
         }
-        ServiceCommand::Uninstall => {
+        ServiceOperation::Uninstall => {
             if previous.is_some() {
                 manager::uninstall(&paths, &UserSessionEnv::discover()?)?;
                 remove_if_exists(&paths.config())?;
                 remove_if_exists(&paths.runtime())?;
             }
-            println!(
-                "Service removed. Books, credentials, MCP configs and recovery material were preserved."
-            );
         }
-        ServiceCommand::Status { .. } | ServiceCommand::Mcp | ServiceCommand::Run => unreachable!(),
+        ServiceOperation::Status => {}
     }
-    Ok(())
+    status_at(&paths)
 }
+
 #[derive(Clone, Copy)]
 enum InstallMode {
-    Command {
-        explicit_db: bool,
-        storage: ServiceSecretStorage,
-        no_agents: bool,
-    },
+    Command(InstallOptions),
     Extension,
+}
+
+impl InstallMode {
+    fn storage(self) -> ServiceSecretStorage {
+        match self {
+            Self::Command(options) => options.storage(),
+            Self::Extension => ServiceSecretStorage::NativeRequired,
+        }
+    }
+
+    fn registration(self, previous_executable: &Path) -> ClientRegistration<'_> {
+        match self {
+            Self::Command(options) => options.registration(previous_executable),
+            Self::Extension => ClientRegistration::Skip,
+        }
+    }
 }
 
 fn install(
     paths: &Paths,
-    cli: &mut Cli,
+    ledger: Option<(Cli, bool)>,
     previous: Option<&Config>,
     mode: InstallMode,
 ) -> Result<(), ServiceError> {
-    let (explicit_db, storage) = match mode {
-        InstallMode::Command {
-            explicit_db,
-            storage,
-            ..
-        } => (explicit_db, storage),
-        InstallMode::Extension => (false, ServiceSecretStorage::NativeRequired),
+    let (mut cli, explicit_db) = match ledger {
+        Some(options) => options,
+        None => (service_ledger_options()?, false),
     };
     manager::check_user()?;
     let session = UserSessionEnv::discover()?;
@@ -689,27 +719,18 @@ fn install(
         cli.db = std::path::absolute(&cli.db)?;
     }
     let executable = std::env::current_exe()?;
-    let registration = match mode {
-        InstallMode::Command {
-            no_agents: false, ..
-        } => ClientRegistration::Managed {
-            previous_executable: previous.map_or(executable.as_path(), |config| &config.executable),
-        },
-        InstallMode::Command {
-            no_agents: true, ..
-        }
-        | InstallMode::Extension => ClientRegistration::Skip,
-    };
+    let previous_executable = previous.map_or(executable.as_path(), |config| &config.executable);
+    let registration = mode.registration(previous_executable);
     let port = previous.map_or_else(
         || SocketAddr::from(ListenerAddress::default()).port(),
         |config| config.port,
     );
     setup::run_service(
-        cli,
+        &mut cli,
         &paths.home,
         (Ipv4Addr::LOCALHOST, port).into(),
         registration,
-        storage,
+        mode.storage(),
     )?;
     let config = Config {
         executable,
@@ -720,18 +741,14 @@ fn install(
     manager::install(paths, &config)?;
     manager::start(paths, &session)?;
     wait_ready(paths, &config.books)?;
-    println!(
-        "Beankeeper is running in the background. Recovery kit: {}. Keep an offline copy under your own control.",
-        config.books.with_extension("recovery.txt").display()
-    );
     Ok(())
 }
 
-fn require_installed(config: Option<&Config>) -> Result<&Config, ServiceError> {
-    config.ok_or(ServiceError::Configuration(
-        "service is not installed; run bk service install",
-    ))
+fn service_ledger_options() -> Result<Cli, ServiceError> {
+    <Cli as clap::Parser>::try_parse_from(["bk", "mcp", "serve"])
+        .map_err(|_| ServiceError::Configuration("cannot construct service ledger options"))
 }
+
 fn wait_ready(paths: &Paths, books: &Path) -> Result<(), ServiceError> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = ServiceError::NotReady;
@@ -765,8 +782,7 @@ fn host(paths: &Paths) -> Result<(), ServiceError> {
         books: BooksPath::try_from(config.books.as_path())?,
         id: Some(id.clone()),
     };
-    let mut cli = <Cli as clap::Parser>::try_parse_from(["bk", "mcp", "serve"])
-        .map_err(|_| ServiceError::Configuration("cannot construct service ledger options"))?;
+    let mut cli = service_ledger_options()?;
     cli.db.clone_from(&config.books);
     let _passphrase = setup::stored_passphrase(&mut cli)?;
     if bound.port() != config.port {

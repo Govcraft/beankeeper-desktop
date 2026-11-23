@@ -20,6 +20,19 @@ use tempfile::TempDir;
 pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const PASSPHRASE: &str = "desktop-integration-passphrase";
 
+#[must_use]
+pub fn audit_query() -> db::audit::ListAuditParams<'static> {
+    db::audit::ListAuditParams {
+        actor: None,
+        agent_uri: None,
+        company_slug: None,
+        entity: None,
+        action: None,
+        limit: db::audit::AuditPageLimit::default(),
+        offset: db::audit::AuditPageOffset::default(),
+    }
+}
+
 pub struct Ledger {
     _dir: TempDir,
     pub path: PathBuf,

@@ -75,9 +75,10 @@ fn desktop_imports_a_reviewed_statement_once_and_preserves_provenance() -> TestR
     let read_transactions = || call(&server, reader, "txn_list", json!({"company":BOOK}));
     let before_approval = read_transactions()?;
     assert_eq!(before_approval.as_array().map(Vec::len), Some(2));
-    let unfinished = book_status(&server, reader)?;
-    assert_eq!(unfinished["imported_history"], "source_unknown");
-    assert!(unfinished.get("statement_imports").is_none());
+    let db = ledger.db()?;
+    let company = BOOK.parse()?;
+    let summary = || beankeeper_cli::commands::setup::statement_import_summary(&db, &company);
+    assert_eq!(summary()?.committed_batches, 0);
     assert_tool_error(&server, scoped, COMMIT, approval.clone(), "FORBIDDEN")?;
     let mut wrong_digest = approval.clone();
     wrong_digest["preview_sha256"] = json!("0".repeat(64));
@@ -90,14 +91,10 @@ fn desktop_imports_a_reviewed_statement_once_and_preserves_provenance() -> TestR
     assert_eq!(call(&server, reader, RECEIPT, lookup.clone())?, receipt);
     let posted = read_transactions()?;
     assert_eq!(posted.as_array().map(Vec::len), Some(3));
-    let imported = book_status(&server, reader)?;
-    assert_eq!(imported["imported_history"], "statements_recorded");
-    assert_eq!(
-        imported["statement_imports"],
-        json!({
-            "committed_batches":1,"created_transactions":1,"preexisting_matches":1,
-        })
-    );
+    let imported = summary()?;
+    assert_eq!(imported.committed_batches, 1);
+    assert_eq!(imported.created_transactions, 1);
+    assert_eq!(imported.preexisting_matches, 1);
 
     call(
         &server,
@@ -120,9 +117,15 @@ fn desktop_imports_a_reviewed_statement_once_and_preserves_provenance() -> TestR
     assert_eq!(reversed["created"], true);
     assert_eq!(read_transactions()?.as_array().map(Vec::len), Some(4));
     assert_eq!(call(&server, reader, RECEIPT, lookup)?, receipt);
+    let after_reversal = summary()?;
+    assert_eq!(after_reversal.committed_batches, imported.committed_batches);
     assert_eq!(
-        book_status(&server, reader)?["statement_imports"],
-        imported["statement_imports"]
+        after_reversal.created_transactions,
+        imported.created_transactions
+    );
+    assert_eq!(
+        after_reversal.preexisting_matches,
+        imported.preexisting_matches
     );
     assert_eq!(
         call(&server, reader, "verify", json!({}))?["status"],
@@ -165,15 +168,6 @@ fn desktop_imports_qfx_through_the_ofx_statement_path() -> TestResult {
     assert_eq!(receipt["created"].as_array().map(Vec::len), Some(1));
     assert_eq!(receipt["source_sha256"], preview["source_sha256"]);
     Ok(())
-}
-
-fn book_status(server: &Server, reader: &str) -> TestResult<Value> {
-    let mut data = call(server, reader, "setup_status", json!({}))?;
-    data["books"]
-        .as_array_mut()
-        .and_then(|books| books.iter_mut().find(|book| book["id"] == BOOK))
-        .map(Value::take)
-        .ok_or_else(|| "missing setup status for the imported book".into())
 }
 
 fn approve_opening(
