@@ -56,12 +56,24 @@ def debian_upstream_version(release_version):
     return release_version.replace("-rc.", "~rc.", 1)
 
 
-def version(tag=None):
+def validate_release_changelog(release_version):
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    headings = [line.rstrip() for line in changelog.splitlines() if line.startswith("## ")]
+    if headings[:1] != ["## [Unreleased]"]:
+        raise ValueError("CHANGELOG.md must begin its sections with ## [Unreleased]")
+    expected_heading = f"## [{release_version}]"
+    if len(headings) < 2 or headings[1].partition(" - ")[0] != expected_heading:
+        raise ValueError(f"CHANGELOG.md must have {expected_heading} directly below Unreleased")
+
+
+def version(tag=None, *, check_changelog=False):
     value = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     if not valid_version(value):
         raise ValueError("release packaging requires MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N")
     if tag is not None and tag != f"{TAG_PREFIX}{value}":
         raise ValueError(f"tag must be {TAG_PREFIX}{value}, got {tag!r}")
+    if tag is not None or check_changelog:
+        validate_release_changelog(value)
     return value
 
 
@@ -323,6 +335,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--tag")
+    parser.add_argument(
+        "--check-changelog", action="store_true",
+        help="require Unreleased followed by a section for the workspace version",
+    )
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--work", type=Path, default=Path("staging"))
@@ -340,7 +356,10 @@ def main():
             parser.error(str(error))
         print(f"Linux binary requires glibc {required} or later.")
         return
-    release_version = version(args.tag)
+    try:
+        release_version = version(args.tag, check_changelog=args.check_changelog)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     if args.command == "version":
         print(release_version)
     elif args.command == "update-manifest":

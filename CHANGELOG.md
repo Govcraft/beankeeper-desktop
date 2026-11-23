@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Collect changes under Unreleased and validate release versions, changelog sections, and tags when cutting a release.
+
 ## [0.1.0-rc.23] - 2026-11-23
 
 ### Added

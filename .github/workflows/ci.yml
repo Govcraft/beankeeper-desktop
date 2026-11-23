@@ -71,9 +71,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PUSH_FORCED: ${{ github.event.forced }}
         run: python scripts/ci/evidence.py select
-      - name: Read the workspace version
+      - name: Validate PR release metadata and read the workspace version
         id: version
-        run: echo "version=$(python scripts/release.py version)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == pull_request ]]; then
+            version=$(python scripts/release.py version --check-changelog)
+          else
+            version=$(python scripts/release.py version)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Lint workflows
         if: steps.plan.outputs.tooling == 'true'
         uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

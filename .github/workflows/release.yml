@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Validate version against tag (dispatch uses workspace version)
+      - name: Read the workspace version and validate release tags
         id: version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
