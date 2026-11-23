@@ -7,7 +7,7 @@ use beankeeper_cli::{
     error::CliError,
 };
 use beankeeper_desktop::{
-    DesktopError, agents, bridge, browser,
+    DesktopError, agents, bridge, browser, changes,
     cli::{self, OpenOptions, ServeOptions},
     links, onboarding, product, server, service, setup, updates,
 };
@@ -23,6 +23,8 @@ enum DesktopCommand {
     Serve(ServeOptions),
     Open(OpenOptions),
     SetupStatus,
+    ChangesSince,
+    ChangesMarkSeen(changes::MarkSeen),
     Setup(setup::SetupOptions),
     Bridge(bridge::BridgeOptions),
     Extension,
@@ -36,6 +38,13 @@ impl DesktopCommand {
                 Some(("link", options)) => links::LinkOptions::from_arg_matches(options)
                     .map(Box::new)
                     .map(Self::Link),
+                _ => Ok(Self::Ledger),
+            },
+            Some(("audit", audit)) => match audit.subcommand() {
+                Some(("since", _)) => Ok(Self::ChangesSince),
+                Some(("mark-seen", options)) => {
+                    changes::MarkSeen::from_arg_matches(options).map(Self::ChangesMarkSeen)
+                }
                 _ => Ok(Self::Ledger),
             },
             Some(("agents", options)) => {
@@ -115,6 +124,17 @@ fn main() -> ExitCode {
             })
         }
         DesktopCommand::Open(options) => browser::open(options.bind),
+        DesktopCommand::ChangesSince | DesktopCommand::ChangesMarkSeen(_) => {
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
+                .unwrap_or_else(|error| error.exit());
+            return match command {
+                DesktopCommand::ChangesMarkSeen(options) => {
+                    changes::run_mark_seen(ledger, &options)
+                }
+                _ => changes::run_since(ledger),
+            };
+        }
         DesktopCommand::SetupStatus => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)

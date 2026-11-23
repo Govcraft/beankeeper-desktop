@@ -134,8 +134,11 @@ impl AsRef<Path> for BooksPath {
 
 impl BooksPath {
     fn records(&self, state: &Path) -> PathBuf {
-        let digest = Sha256::digest(self.0.as_os_str().as_encoded_bytes());
-        state.join("instances").join(URL_SAFE_NO_PAD.encode(digest))
+        state.join("instances").join(self.state_key())
+    }
+
+    pub(crate) fn state_key(&self) -> String {
+        URL_SAFE_NO_PAD.encode(Sha256::digest(self.0.as_os_str().as_encoded_bytes()))
     }
 }
 

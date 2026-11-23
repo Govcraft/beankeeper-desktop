@@ -18,7 +18,8 @@ use beankeeper_cli::{
 use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
-    instance::{self, InstanceId, ListenerAddress, Registration},
+    changes,
+    instance::{self, BooksPath, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
     pairing::{self, PairingState},
@@ -112,6 +113,7 @@ fn application_with_id(
     )?;
     // Migrate through the review connection before opening the read-only snapshots.
     let review_db = Db::open_existing(&cli.db, passphrase.as_ref())?;
+    let books = BooksPath::try_from(cli.db.as_path())?;
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
     let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
     let mcp = http_router_with_host_tools(
@@ -124,6 +126,8 @@ fn application_with_id(
             navigation: navigation.clone(),
             status_db: Arc::clone(&association_db),
             managed_books,
+            books: books.clone(),
+            company: cli.company.clone(),
         },
     )?;
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
@@ -133,6 +137,13 @@ fn application_with_id(
         pairing.clone(),
         &cli.db.with_extension("owner-token"),
     )?;
+    let changes = changes::router(
+        Db::open_existing(&cli.db, passphrase.as_ref())?,
+        books,
+        cli.company.clone(),
+        cli.db.with_extension("owner-token"),
+        pairing.clone(),
+    );
     drop(passphrase);
     let fallback = cli.agent_token.clone();
     let mcp = mcp.layer(middleware::from_fn_with_state(
@@ -141,6 +152,7 @@ fn application_with_id(
     ));
     Ok(ui::router(db, cli.company.clone(), pairing.clone())
         .merge(review)
+        .merge(changes)
         .merge(navigation::router(navigation, pairing.clone()))
         .merge(pairing::router(pairing))
         .merge(mcp)

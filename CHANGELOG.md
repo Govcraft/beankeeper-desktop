@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.23] - 2026-11-23
+
+### Added
+
+- Report grouped audit receipts through `bk audit since` and `changes_since`.
+  Agents can mark each delivered page seen for the local owner.
+- Open a receipt in a paired browser and undo supported changes in one step.
+  The ledger records a reversal or account archive and preserves the history.
+
 ## [0.1.0-rc.22] - 2026-11-23
 
 ### Fixed

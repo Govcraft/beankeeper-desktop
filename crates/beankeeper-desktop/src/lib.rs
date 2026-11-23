@@ -4,6 +4,7 @@ pub mod agents;
 pub mod boundary;
 pub mod bridge;
 pub mod browser;
+pub mod changes;
 pub mod cli;
 mod instance;
 mod ledger_rows;

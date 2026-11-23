@@ -25,6 +25,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    changes,
+    instance::BooksPath,
     links::mcp as link_tool,
     navigation::Navigation,
     output::{Envelope, Metadata},
@@ -245,12 +247,15 @@ pub(crate) struct DesktopTools {
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
     pub(crate) managed_books: Option<std::path::PathBuf>,
+    pub(crate) books: BooksPath,
+    pub(crate) company: Option<beankeeper_cli::db::companies::CompanySlug>,
 }
 
 impl HostToolHandler for DesktopTools {
     fn tools(&self) -> Vec<HostTool> {
         let mut tools = self.navigation.tools();
         tools.push(link_tool::definition());
+        tools.extend(changes::definitions());
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
@@ -273,6 +278,25 @@ impl HostToolHandler for DesktopTools {
                 serde_json::Value::Object(request.arguments.unwrap_or_default()),
                 self.bound,
             ));
+        }
+        if matches!(
+            request.name.as_ref(),
+            changes::SINCE_TOOL | changes::MARK_TOOL
+        ) {
+            let db = Arc::clone(&self.status_db);
+            let books = self.books.clone();
+            let company = self.company.clone();
+            let bound = self.bound;
+            return Ok(tokio::task::spawn_blocking(move || match db.lock() {
+                Ok(db) => changes::call(request, &db, &books, company, bound),
+                Err(_) => {
+                    changes::failure(&CliError::Database("changes connection unavailable".into()))
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                changes::failure(&CliError::General("changes worker failed".into()))
+            }));
         }
         if request.name != STATUS_TOOL {
             return self.navigation.call_tool(request, identity).await;
