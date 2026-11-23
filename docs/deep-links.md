@@ -60,6 +60,9 @@ link is unavailable. If state omits a company, the CLI uses upstream's
 `--company` or `BEANKEEPER_COMPANY` default for ledger views. JSON errors contain
 `code` and `message`, exit nonzero, and also print a diagnostic to stderr.
 
+For change reports, `changes_since` returns the [report and receipt links](changes.md)
+directly. They keep opening the same page after the agent marks it seen.
+
 ## Stable views
 
 | ID | URL path | Accepted filters |

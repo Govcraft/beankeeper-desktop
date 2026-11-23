@@ -212,22 +212,40 @@ for enrolled ledgers; explicit upstream secret sources take precedence.
 existing preset. Capability changes and token renewal use upstream commands
 under the owner's control.
 
-## Record transactions and explain undo
+## Tell the owner what changed and offer undo
 
 Fresh managed installs give the agent the bookkeeper preset with
-`write_mode: direct`. When asked to record a transaction, use `txn_post` over
-the managed connection or `bk txn post` with the same agent credential. After
-the ledger posts it, tell the owner what was recorded and give them the book
-and transaction ID. Offer the optional transaction detail link through
-`ui_get_link`.
+`write_mode: direct`. Record transactions with `txn_post` or `bk txn post`
+using the agent credential. Follow the owner's inform preference when one
+is available. If they have given no preference, report changes in the same
+conversation after completing the requested work. Also report when asked
+what changed.
 
-If the owner asks to undo a posting, use `txn_reverse` with `company` and
-`id` from an owner-controlled connection with `ledger/reverse`. An agent
-with the same authority and a local shell can use
-`bk --db BOOKS --company COMPANY txn reverse ID`. The ledger appends an
-offsetting transaction linked to the original and records the reversal in
-the audit trail. If reversal access is unavailable, explain that and give
-the owner the company and transaction ID.
+1. Call `changes_since` with the book's `company`. With CLI access, run
+   `bk --db BOOKS --company COMPANY --json audit since`. Use `receipts`
+   for dates, attribution, before and after values, and source references.
+   Explain what changed in plain words and flag any categorization guesses.
+2. Offer each returned `undo_url` beside its change and `desktop_url` for the
+   whole page. The receipt link opens that change. The paired owner can
+   select **Undo** to apply it immediately. Read-only views and replies in
+   chat remain available without an undo link.
+3. After delivering the page, call `changes_mark_seen` with its exact
+   `company` and `through`. With CLI access, run
+   `bk --db BOOKS --company COMPANY --json audit mark-seen --through CURSOR`.
+   If `has_more` is true, read and deliver the next page. Leave the marker
+   alone for pages you have yet to deliver.
+
+If the receipt tools are unavailable after a post, tell the owner what was
+recorded and give them the book and transaction ID. Offer the optional
+transaction detail link through `ui_get_link`.
+
+If upstream receipt undo is available on the owner's connection, give them the
+receipt ID and book. If the owner asks to undo a posting, use `txn_reverse`
+with `company` and `id` from an owner-controlled connection with
+`ledger/reverse`. An agent with the same authority and a local shell can use
+`bk --db BOOKS --company COMPANY txn reverse ID`. The ledger keeps the original
+and records the reversal as a new entry. If reversal access is unavailable,
+explain that and give the owner the company and transaction ID.
 
 ### Change managed access in chat
 

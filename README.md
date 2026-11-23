@@ -8,16 +8,15 @@ chart.
 Beankeeper Desktop is the paid, self-hosted layer. It runs as a local service
 with signed updates and offline licensing.
 
-Your agent can link directly to optional browser views where you can review its
-work. To undo a posted transaction, ask an agent with reversal access to record
-an audited reversal. [One-step undo from the browser][browser-undo] is planned.
+Your agent can tell you what changed since you last looked and offer a link
+to each change you can undo. In a paired browser, select **Undo** on a receipt
+to reverse a posting or archive an opened account. The ledger records the
+undo and keeps the original history. See [changes and owner undo](docs/changes.md).
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
 [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
 See the [contribution guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/CONTRIBUTING.md) for feedback and contribution policies.
-
-[browser-undo]: https://github.com/Govcraft/beankeeper-desktop/issues/90
 
 ## Release packages
 
@@ -96,6 +95,9 @@ read-only default to direct posting and preserve deliberate access choices.
 Say **Make me read-only** to turn posting off, or ask for propose-only access
 if you want to review proposed entries. Restarting cannot grant posting access.
 [Background hosting and managed access](docs/service.md)
+
+Your agent can report what it changed as soon as it finishes and offer the
+receipt links for undo.
 
 ### Advanced service commands
 
