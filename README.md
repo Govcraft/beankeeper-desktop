@@ -15,6 +15,7 @@ an audited reversal. [One-step undo from the browser][browser-undo] is planned.
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
 [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
+See the [contribution guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/CONTRIBUTING.md) for feedback and contribution policies.
 
 [browser-undo]: https://github.com/Govcraft/beankeeper-desktop/issues/90
 
