@@ -17,8 +17,46 @@ function Get-ReleaseFile([string]$Url, [string]$Destination) {
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
 }
 
+function Get-PublishedReleases {
+    $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
+    $request = @{
+        Uri = "https://api.github.com/repos/$Repository/releases?per_page=100"
+        UseBasicParsing = $true
+        MaximumRedirection = 0
+    }
+    if ($token) { $request.Headers = @{ Authorization = "Bearer $token" } }
+
+    foreach ($backoff in 60, 120, 0) {
+        try {
+            return Invoke-RestMethod @request
+        } catch {
+            $response = $_.Exception.Response
+            if (-not $response) { throw }
+            $status = [int]$response.StatusCode
+            if ($status -ne 429 -and ($status -ne 403 -or $token)) { throw }
+            if ($token -or $backoff -eq 0) { break }
+
+            # GitHub can ask us to wait longer than the local retry window.
+            $retryAfter = $reset = [long]0
+            $delay = $backoff
+            if ([long]::TryParse([string]$response.Headers['Retry-After'], [ref]$retryAfter)) {
+                $delay = [Math]::Max([long]$delay, $retryAfter)
+            }
+            if ($response.Headers['X-RateLimit-Remaining'] -eq '0' -and
+                [long]::TryParse([string]$response.Headers['X-RateLimit-Reset'], [ref]$reset)) {
+                $delay = [Math]::Max([long]$delay, $reset - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+            }
+            if ($delay -gt 120) { break }
+            Write-Warning "GitHub rate limit (HTTP $status). Retrying release discovery in $delay seconds."
+            Start-Sleep -Seconds $delay
+        }
+    }
+
+    throw "GitHub rate limit (HTTP $status) while listing releases. Set BK_VERSION to a signed release to skip discovery."
+}
+
 function Find-SignedReleaseVersion([switch]$PreferStable) {
-    $releases = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases?per_page=100"
+    $releases = Get-PublishedReleases
     $candidates = foreach ($release in $releases) {
         if ($release.draft -ne $false -or $release.tag_name -cnotmatch '\Abeankeeper-desktop-v(?<core>[0-9]+\.[0-9]+\.[0-9]+)(?:-rc\.(?<rc>[0-9]+))?\z') { continue }
         $number = [version]::new()

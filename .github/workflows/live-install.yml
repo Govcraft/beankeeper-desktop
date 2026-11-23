@@ -5,6 +5,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/live-install.yml'
+      - 'SKILL.md'
+      - 'install.sh'
+      - 'install.ps1'
       - 'scripts/tests/skill-install-posix.py'
       - 'scripts/tests/skill-install-windows.ps1'
 
@@ -48,23 +51,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # Hosted runners share the anonymous API quota. Authenticate only
-          # the release listing and let curl fetch every artifact normally.
-          export BK_TEST_REAL_CURL
-          BK_TEST_REAL_CURL=$(command -v curl)
-          shim=$(mktemp -d)
-          cat > "$shim/curl" <<'SH'
-          #!/bin/sh
-          if [ "$#" -eq 2 ] && [ "$1" = '-fsSL' ] &&
-              [ "$2" = 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100' ]; then
-            exec gh api --hostname github.com "${2#https://api.github.com/}"
-          fi
-          exec "$BK_TEST_REAL_CURL" "$@"
-          SH
-          chmod +x "$shim/curl"
-          PATH="$shim:$PATH" python -B scripts/tests/skill-install-posix.py --target "$TARGET" --published
+        run: python -B scripts/tests/skill-install-posix.py --target "$TARGET" --published
       - name: Install from the guide with Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/tests/skill-install-windows.ps1 -Published

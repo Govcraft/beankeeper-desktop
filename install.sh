@@ -11,6 +11,7 @@
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
 #   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
 #   BK_REQUIRE_AGENT_SETUP=1 - require managed service and registration commands
+#   GH_TOKEN or GITHUB_TOKEN - optional GitHub authentication for release discovery
 
 set -eu
 
@@ -60,6 +61,48 @@ detect_platform() {
     TARGET="${ARCH_TARGET}-${OS_TARGET}"
 }
 
+list_published_releases() (
+    release_list_dir="$(mktemp -d)" || fatal "could not create a temporary directory for release discovery"
+    trap 'rm -rf "$release_list_dir"' EXIT
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    set -- -q -sS -D "$release_list_dir/headers" -o "$release_list_dir/body" \
+        -w '%{http_code}' "https://api.github.com/repos/${REPO}/releases?per_page=100"
+
+    for backoff in 60 120 0; do
+        if [ -n "$token" ]; then
+            status="$(printf 'Authorization: Bearer %s\n' "$token" | curl "$@" -H @-)" || break
+        else
+            status="$(curl "$@")" || break
+        fi
+        case "$status" in
+            200) cat "$release_list_dir/body"; return ;;
+            403|429) [ -z "$token" ] || break ;;
+            *) break ;;
+        esac
+
+        # GitHub can ask us to wait longer than the local retry window.
+        [ "$backoff" -ne 0 ] || break
+        delay="$(awk -v now="$(date +%s)" -v delay="$backoff" '
+            { sub(/\r$/, "") }
+            tolower($1) == "retry-after:" && $2 ~ /^[0-9]+$/ && $2 > delay { delay = $2 }
+            tolower($1) == "x-ratelimit-remaining:" && $2 == 0 { exhausted = 1 }
+            tolower($1) == "x-ratelimit-reset:" && $2 ~ /^[0-9]+$/ { reset = $2 }
+            END {
+                if (exhausted && reset - now > delay) delay = reset - now
+                print (delay > 120) ? 0 : delay
+            }
+        ' "$release_list_dir/headers")" || break
+        [ "$delay" -gt 0 ] || break
+        warn "GitHub rate limit (HTTP $status). Retrying release discovery in $delay seconds."
+        sleep "$delay" || break
+    done
+
+    if [ "$status" = 429 ] || { [ "$status" = 403 ] && [ -z "$token" ]; }; then
+        fatal "GitHub rate limit (HTTP $status) while listing releases. Set BK_VERSION to a signed release to skip discovery."
+    fi
+    fatal "could not list published releases; retry or set BK_VERSION to a signed release"
+)
+
 resolve_version() {
     if [ -n "${BK_VERSION:-}" ]; then
         VERSION="$BK_VERSION"
@@ -74,8 +117,7 @@ resolve_version() {
 
     command -v jq >/dev/null 2>&1 || fatal "jq is required to find a signed release; install jq or set BK_VERSION"
     info "finding the latest published release with signature bundles for ${TARGET}..."
-    releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100")" \
-        || fatal "could not list published releases; retry or set BK_VERSION to a signed release"
+    releases="$(list_published_releases)"
     # GitHub metadata selects a tag. Only cosign authenticates the artifacts.
     VERSION="$(printf '%s\n' "$releases" | jq -r --arg target "$TARGET" --argjson prefer_stable "$prefer_stable" '
         [ .[] | select(.draft == false)

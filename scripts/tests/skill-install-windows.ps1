@@ -49,6 +49,7 @@ $environment = @{
 }
 $previous = @{}
 $guidePassed = $false
+$installerUrl = 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1'
 
 function Set-FixtureEnvironment([string]$Key, $Value) {
     if ($null -eq $Value) {
@@ -58,7 +59,28 @@ function Set-FixtureEnvironment([string]$Key, $Value) {
     }
 }
 
+# Exercise the checkout before it reaches the guide's public bootstrap URL.
+function Invoke-WebRequest {
+    param([switch]$UseBasicParsing, [uri]$Uri, [string]$OutFile)
+    if ($Uri.AbsoluteUri -eq $installerUrl) {
+        Copy-Item -LiteralPath "$root/install.ps1" -Destination $OutFile
+        return
+    }
+    if ($Published) {
+        Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters
+        return
+    }
+    if (-not $Uri.AbsoluteUri.StartsWith("$releaseUrl/", [StringComparison]::Ordinal)) {
+        throw "Unexpected fixture download: $Uri"
+    }
+    $name = $Uri.AbsoluteUri.Substring($releaseUrl.Length + 1)
+    if ($fixtureFiles -notcontains $name) { throw "Unexpected fixture file: $name" }
+    Copy-Item -LiteralPath (Join-Path $fixtures $name) -Destination $OutFile
+}
+
 if (-not $Published) {
+    $environment.GH_TOKEN = $null
+    $environment.GITHUB_TOKEN = $null
     if (-not $ArtifactDirectory) { $ArtifactDirectory = Join-Path $root 'dist' }
     $versionText = & python "$root/scripts/release.py" version
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the built release version.' }
@@ -66,27 +88,12 @@ if (-not $Published) {
     $archive = "bk-$fixtureVersion-x86_64-pc-windows-msvc.zip"
     $releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$fixtureVersion"
     $skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$fixtureVersion"
-    $installerUrl = 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1'
     $fixtureFiles = @($archive, 'checksums-sha256.txt', "$archive.sigstore", 'checksums-sha256.txt.sigstore')
     $verified = [System.Collections.Generic.List[string]]::new()
 
-    function Invoke-WebRequest {
-        param([switch]$UseBasicParsing, [uri]$Uri, [string]$OutFile)
-        if ($Uri.AbsoluteUri -eq $installerUrl) {
-            Copy-Item -LiteralPath "$root/install.ps1" -Destination $OutFile
-            return
-        }
-        if (-not $Uri.AbsoluteUri.StartsWith("$releaseUrl/", [StringComparison]::Ordinal)) {
-            throw "Unexpected fixture download: $Uri"
-        }
-        $name = $Uri.AbsoluteUri.Substring($releaseUrl.Length + 1)
-        if ($fixtureFiles -notcontains $name) { throw "Unexpected fixture file: $name" }
-        Copy-Item -LiteralPath (Join-Path $fixtures $name) -Destination $OutFile
-    }
-
-    function Invoke-RestMethod([string]$Uri) {
-        if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100') {
-            throw "Unexpected discovery request: $Uri"
+    function Invoke-RestMethod([string]$Uri, [switch]$UseBasicParsing, [int]$MaximumRedirection, [hashtable]$Headers) {
+        if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100' -or $Headers) {
+            throw "Unexpected fixture discovery request: $Uri"
         }
         @(
             [pscustomobject]@{ tag_name = 'beankeeper-desktop-v99.0.0'; draft = $true; prerelease = $false },

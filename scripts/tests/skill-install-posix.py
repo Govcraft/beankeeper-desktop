@@ -38,10 +38,12 @@ def fixture_tool(mode, arguments):
         if url == INSTALLER_URL:
             source = ROOT / "install.sh"
         elif url == RELEASES_URL:
-            print(json.dumps([{
+            assert "-H" not in arguments, "fixture release discovery must be anonymous"
+            Path(arguments[arguments.index("-o") + 1]).write_text(json.dumps([{
                 "tag_name": f"beankeeper-desktop-v{version}", "draft": False,
                 "prerelease": "-rc." in version, "assets": [{"name": name} for name in release_files],
-            }]))
+            }]), encoding="utf-8")
+            print("200", end="")
             return
         else:
             base = f"https://github.com/{PROJECT}/releases/download/beankeeper-desktop-v{version}/"
@@ -130,7 +132,7 @@ def native_config(env, sandbox):
 def fixture_path(sandbox, original_path):
     directory = sandbox / "commands"
     directory.mkdir()
-    required = ("sh", "uname", "awk", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
+    required = ("sh", "uname", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
     manager = "launchctl" if sys.platform == "darwin" else "systemctl"
     for name in (*required, manager):
         path = shutil.which(name, path=original_path)
@@ -196,9 +198,26 @@ def exercise(target, artifacts, published):
             BEANKEEPER_SERVICE_LOG_DIR=str(sandbox / "logs"), BEANKEEPER_NO_UPDATE_CHECK="1",
         )
         if not published:
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_TOKEN", None)
             version, archive, fixtures = prepare_fixture(target, artifacts, sandbox, env)
         script = sandbox / "guide.sh"
-        script.write_text(block.group(1), encoding="utf-8")
+        guide = block.group(1)
+        if published:
+            # Exercise the checkout before it reaches the guide's public bootstrap URL.
+            # The installer runs in a child shell with real curl and cosign.
+            env.update(BK_SKILL_TEST_INSTALLER_URL=INSTALLER_URL, BK_SKILL_TEST_INSTALLER=str(ROOT / "install.sh"))
+            guide = '''\
+curl() {
+    if [ "$#" -eq 4 ] && [ "$1" = -fsSL ] &&
+        [ "$2" = "$BK_SKILL_TEST_INSTALLER_URL" ] && [ "$3" = -o ]; then
+        cp "$BK_SKILL_TEST_INSTALLER" "$4"
+    else
+        command curl "$@"
+    fi
+}
+''' + guide
+        script.write_text(guide, encoding="utf-8")
         binary = home / ".local/bin/bk"
         books = sandbox / "data/books.db"
         recovery = books.with_suffix(".recovery.txt")

@@ -35,12 +35,29 @@ function New-ReleaseFixture([string]$FixtureVersion, [switch]$Unsigned) {
 
 function Test-ReleaseDiscovery {
     . "$root/install.ps1" -Version '' -InstallDir ([IO.Path]::GetTempPath()) -RequireAgentSetup:$false
-    function Invoke-RestMethod([string]$Uri) {
+    $discovery = @{
+        Statuses = [System.Collections.Generic.Queue[int]]::new()
+        Authorization = [System.Collections.Generic.List[string]]::new()
+        Delays = [System.Collections.Generic.List[int]]::new()
+        ResponseHeaders = @{}
+    }
+    function Invoke-RestMethod([string]$Uri, [switch]$UseBasicParsing, [int]$MaximumRedirection, [hashtable]$Headers) {
         if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100') {
             throw "Unexpected discovery request: $Uri"
         }
+        $discovery.Authorization.Add($(if ($Headers) { $Headers.Authorization } else { 'anonymous' }))
+        if ($discovery.Statuses.Count -gt 0) {
+            $status = $discovery.Statuses.Dequeue()
+            $errorObject = [Exception]::new("Simulated HTTP $status")
+            $errorObject | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{
+                StatusCode = $status
+                Headers = $discovery.ResponseHeaders
+            })
+            throw $errorObject
+        }
         $releases
     }
+    function Start-Sleep([int]$Seconds) { $discovery.Delays.Add($Seconds) }
 
     $releases = @(
         (New-ReleaseFixture '0.2.0-rc.11' -Unsigned)
@@ -54,6 +71,56 @@ function Test-ReleaseDiscovery {
 
     $RequireAgentSetup = $true
     if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10') { throw 'Guided setup did not select the highest signed version' }
+
+    $previousGhToken = $env:GH_TOKEN
+    $previousGitHubToken = $env:GITHUB_TOKEN
+    try {
+        $discovery.Authorization.Clear()
+        $env:GH_TOKEN = 'preferred'
+        $env:GITHUB_TOKEN = 'fallback'
+        $null = Resolve-ReleaseVersion
+        $env:GH_TOKEN = ''
+        $null = Resolve-ReleaseVersion
+        if (($discovery.Authorization -join ',') -cne 'Bearer preferred,Bearer fallback') {
+            throw 'Release discovery did not select the expected GitHub token'
+        }
+
+        $env:GITHUB_TOKEN = ''
+        $discovery.Authorization.Clear()
+        $discovery.Statuses.Enqueue(403)
+        $discovery.Statuses.Enqueue(429)
+        $discovery.ResponseHeaders = @{ 'Retry-After' = '75' }
+        if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10' -or
+            ($discovery.Delays -join ',') -cne '75,120' -or
+            ($discovery.Authorization -join ',') -cne 'anonymous,anonymous,anonymous') {
+            throw 'Anonymous release discovery did not retry with backoff'
+        }
+
+        $discovery.Delays.Clear()
+        $discovery.ResponseHeaders = @{}
+        foreach ($status in 403, 429, 429) { $discovery.Statuses.Enqueue($status) }
+        $rateLimitMessage = $null
+        try { $null = Resolve-ReleaseVersion } catch { $rateLimitMessage = $_.Exception.Message }
+        if ($rateLimitMessage -cnotlike '*GitHub rate limit (HTTP 429)*BK_VERSION*' -or
+            ($discovery.Delays -join ',') -cne '60,120') {
+            throw 'Persistent rate limiting did not produce a bounded retry and a BK_VERSION hint'
+        }
+
+        $discovery.Delays.Clear()
+        $discovery.Statuses.Enqueue(403)
+        $discovery.ResponseHeaders = @{
+            'X-RateLimit-Remaining' = '0'
+            'X-RateLimit-Reset' = [string][DateTimeOffset]::UtcNow.AddMinutes(10).ToUnixTimeSeconds()
+        }
+        $rateLimitMessage = $null
+        try { $null = Resolve-ReleaseVersion } catch { $rateLimitMessage = $_.Exception.Message }
+        if ($rateLimitMessage -cnotlike '*GitHub rate limit (HTTP 403)*BK_VERSION*' -or $discovery.Delays.Count -ne 0) {
+            throw 'Release discovery retried before the quota reset'
+        }
+    } finally {
+        $env:GH_TOKEN = $previousGhToken
+        $env:GITHUB_TOKEN = $previousGitHubToken
+    }
 }
 
 Test-ReleaseDiscovery
