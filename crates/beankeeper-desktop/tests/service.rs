@@ -97,6 +97,12 @@ fn check_lifecycle(
             initialize["result"]["serverInfo"]["name"],
             "beankeeper-service"
         );
+        let instructions = initialize["result"]["instructions"]
+            .as_str()
+            .ok_or("missing lifecycle MCP instructions")?;
+        assert!(instructions.contains("“let my agent post” in chat"));
+        assert!(instructions.contains("access_set"));
+        assert!(instructions.contains("Restarting cannot grant posting access"));
         // This notification has no reply; send it independently.
         drop(request);
         writeln!(
@@ -446,8 +452,8 @@ fn assert_managed_stdio_launchers(
     state: &std::path::Path,
     base: &str,
 ) -> TestResult {
-    // Both stdio launchers discover the same running service. The extension
-    // leaves its installation alone and adds its MCP onboarding instructions.
+    // Both stdio launchers give the same access guidance alongside the
+    // upstream ledger instructions.
     for args in [
         &["mcp", "bridge", "--service"][..],
         &["mcp", "extension"][..],
@@ -487,10 +493,12 @@ fn assert_managed_stdio_launchers(
             .as_str()
             .ok_or("instructions")?;
         assert!(instructions.contains("minor units"));
-        assert_eq!(
-            instructions.contains("setup_status"),
-            args.ends_with(&["extension"])
-        );
+        assert!(instructions.contains("setup_status"));
+        assert!(instructions.contains("Restarting cannot grant posting access"));
+        assert!(instructions.contains("“let my agent post” in chat"));
+        assert!(instructions.contains("access_set"));
+        assert!(instructions.contains("Respect the owner's choice to stay read-only"));
+        assert!(!instructions.contains("docs_url"));
         assert!(!state.join("claude-extension").exists());
         assert_managed_link(tools, link, navigation, base)?;
     }
@@ -1194,7 +1202,28 @@ fn recorded_read_only_choice_survives_service_start_and_resume() -> TestResult {
     assert!(resume.status.success(), "cannot resume managed setup");
     let _host = fixture.host()?;
     let status = fixture.service_access(&["status", "--json"])?;
-    assert_eq!(status["agent_access"]["preset"], "read-only");
+    let access = &status["agent_access"];
+    assert_eq!(access["preset"], "read-only");
+    assert_eq!(access["write_mode"], "direct");
+    assert!(access.get("docs_url").is_none());
+    let note = access["note"].as_str().ok_or("missing read-only note")?;
+    assert!(note.contains("Restarting cannot grant posting access"));
+    assert!(note.contains("“let my agent post” in chat"));
+    assert!(note.contains("access_set"));
+    assert!(note.contains("Respect the owner's choice to stay read-only"));
+
+    let mut extension = fixture.command();
+    extension.args(["mcp", "extension"]);
+    assert_eq!(
+        stdio_tool(extension, "setup_status", &json!({}))?["agent_access"],
+        *access
+    );
+    let mut lifecycle = fixture.command();
+    lifecycle.args(["service", "mcp"]);
+    assert_eq!(
+        stdio_tool(lifecycle, "service_status", &json!({}))?["agent_access"],
+        *access
+    );
     let db = fixture.db()?;
     assert!(identity::verify(db.read(), original.expose_secret()).is_ok());
     let audit = audit::list_audit(db.read(), &common::audit_query())?;

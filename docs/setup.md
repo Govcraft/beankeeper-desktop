@@ -1,9 +1,12 @@
-# Desktop setup command reference
+# Desktop setup
 
-For quiet login startup, automatic crash recovery and lifecycle MCP tools, use
-[`bk service install`](service.md). New managed installs issue a direct
-bookkeeper grant. The commands below cover manual onboarding and foreground
-hosting.
+Ask your connected agent to **Set up my books**. If it reports read-only
+access and you want it to record transactions, say **Let my agent post**.
+For managed books, the agent uses `access_set` to change access. Say **Make me
+read-only** to keep posting off. Restarting cannot grant posting access.
+[Background hosting and managed access](service.md#choose-a-write-mode)
+
+## Advanced manual setup
 
 Run `bk setup` to create an encrypted ledger, save its passphrase in the OS
 keychain, prepare a private recovery kit, configure three MCP clients, start the

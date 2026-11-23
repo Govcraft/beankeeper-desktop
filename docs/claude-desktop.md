@@ -23,16 +23,24 @@ an offline copy under your control. Claude receives the ledger's agent access
 over stdio and can request the tools that its grants allow. [Service storage
 and recovery](service.md#platform-behavior-and-files)
 
-An existing Beankeeper service keeps its books, credentials, and lifecycle
-settings. If you stopped that service, start it again with `bk service start`
-before reconnecting the extension. If setup failed, check the extension's log
-in Claude Desktop and make sure your OS login session and keychain are
-available. [Service diagnostics](service.md#commands)
+If Claude says it can only read your books, say **Let my agent post** in chat
+when you want it to record transactions. Claude uses the extension's
+`access_set` tool. Say **Make me read-only** to turn posting off. Beankeeper
+respects your choice to stay read-only. Restarting cannot grant posting access.
+
+If setup fails, check the extension's log in Claude Desktop and make sure
+your OS login session and keychain are available.
 
 ## Remove the extension
 
-Remove Beankeeper in Claude Desktop's **Extensions** settings. To remove
-background hosting too, run `bk service uninstall`. This preserves your books
-and recovery material. If you installed only the extension, its `bk` is in the
-`claude-extension` subdirectory of the per-user service state listed in the
-service documentation. [Service state directories](service.md#platform-behavior-and-files)
+Remove Beankeeper in Claude Desktop's **Extensions** settings. If you also
+want to remove background hosting, ask your agent on a connected Beankeeper
+lifecycle connection. Your books and recovery material stay on your machine.
+
+## Advanced service commands
+
+Use `bk service start` before reconnecting the extension to a service you
+stopped. Use `bk service uninstall` to remove background hosting. If you
+installed only the extension, its `bk` is in the `claude-extension`
+subdirectory of the per-user service state.
+[Service state directories](service.md#platform-behavior-and-files)

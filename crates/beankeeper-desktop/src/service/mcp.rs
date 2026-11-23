@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ServiceError, ServiceOperation, Status, execute};
+use crate::setup::AgentAccess;
 
 struct Lifecycle;
 
@@ -22,7 +23,10 @@ impl ServerHandler for Lifecycle {
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("beankeeper-service", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some("Manage per-user hosting and agent access. Use access_set when the owner asks to change access. Answer in plain words using the structured status. Desktop is optional. Recovery material stays under the owner's control; never read or show recovery, passphrase or owner-token files.".into());
+        info.instructions = Some(format!(
+            "This connection manages the local per-user service. {}",
+            AgentAccess::mcp_instructions()
+        ));
         info
     }
     fn list_tools(

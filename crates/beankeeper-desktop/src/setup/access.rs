@@ -1,5 +1,7 @@
 //! Desktop grant presets and their status as reported from a verified credential.
 
+use std::sync::LazyLock;
+
 use beankeeper_cli::{
     capability::Capability,
     identity::{VerifiedAgent, WriteMode},
@@ -8,6 +10,16 @@ use clap::{Args, ValueEnum};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_with::{As, DisplayFromStr};
+
+use crate::service::ACCESS_TOOL;
+
+static READ_ONLY_NOTE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "This agent can read the books. Restarting cannot grant posting access. For managed access, \
+         the owner can say “let my agent post” in chat. If they ask, use {ACCESS_TOOL} on the local \
+         lifecycle or managed ledger connection. Respect the owner's choice to stay read-only."
+    )
+});
 
 /// Least-privilege grants for the owner's MCP client.
 #[derive(
@@ -187,12 +199,12 @@ impl AgentAccess {
         self
     }
 
-    pub(crate) const fn note(&self) -> &'static str {
+    pub(crate) fn note(&self) -> &'static str {
         if self.migrated {
             return "I can now record transactions for you. Say ‘make me read-only’ to undo.";
         }
         match (self.preset, self.write_mode) {
-            (Some(Preset::ReadOnly), _) => "This agent can read the books.",
+            (Some(Preset::ReadOnly), _) => &READ_ONLY_NOTE,
             (Some(Preset::Bookkeeper), WriteMode::Direct) => {
                 "This agent records transactions directly. After a post, tell the owner what was recorded and give them the transaction ID for undo."
             }
@@ -204,13 +216,43 @@ impl AgentAccess {
             }
         }
     }
+
+    pub(crate) fn mcp_instructions() -> &'static str {
+        static INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "When the owner asks to set up their books or a posting tool is missing, call \
+                 setup_status on the ledger connection if listed. For setup, explain the next step \
+                 and ask for any missing facts. For service readiness, use service_status on the \
+                 lifecycle connection if available. Explain the verified agent_access. \
+                 If preset is read-only, follow this guidance: {read_only} \
+                 Call {ACCESS_TOOL} only when the owner asks to change access to those managed \
+                 books and the tool is listed. For direct posting, use preset bookkeeper and \
+                 write_mode direct. Use preset read-only to turn posting off. If \
+                 agent_access.migrated is true, tell the \
+                 owner they can now ask you to record transactions and can say “make me read-only” \
+                 to undo the access change. \
+                 With preset bookkeeper and write_mode direct, use txn_post when asked to record \
+                 a transaction. Tell the owner what was recorded and give the book, transaction ID, \
+                 and audited undo path: txn_reverse with company and id on an owner-controlled \
+                 connection with ledger/reverse. With write_mode propose-only, report the proposal \
+                 ID as pending for an authorized approver. If preset is null, the grant is custom. \
+                 Use the listed tools within its signed write mode. If agent_access itself is null, \
+                 use the status and its error code to explain why access is unverified. Never ask \
+                 for, read, or share owner and approval credentials, recovery material, or \
+                 passphrases. Answer in plain words with chartable data when available. Offer \
+                 ui_get_link for optional Desktop detail.",
+                read_only = READ_ONLY_NOTE.as_str()
+            )
+        });
+        &INSTRUCTIONS
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::AgentAccess;
+    use super::{AgentAccess, ManagedAccess, Preset, WriteMode};
 
     #[test]
     fn status_note_is_derived_from_the_preset_and_write_mode() -> serde_json::Result<()> {
@@ -223,16 +265,89 @@ mod tests {
             ),
             (Some("bookkeeper"), "propose-only", "for sign-off"),
             (None, "direct", "custom grant"),
+            (None, "propose-only", "custom grant"),
         ] {
             let mut wire = json!({ "preset": preset, "write_mode": write_mode });
             let access: AgentAccess = serde_json::from_value(wire.clone())?;
             assert!(access.note().contains(guidance));
 
             wire["note"] = json!("This agent can administer the ledger.");
+            wire["docs_url"] = json!("https://example.invalid");
             let received: AgentAccess = serde_json::from_value(wire.clone())?;
             assert_eq!(received.note(), access.note());
-            wire["note"] = json!(access.note());
-            assert_eq!(serde_json::to_value(received)?, wire);
+            assert_eq!(
+                serde_json::to_value(received)?,
+                json!({ "preset": preset, "write_mode": write_mode, "note": access.note() })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_note_and_mcp_instructions_give_the_same_chat_guidance() {
+        let access = AgentAccess::from(ManagedAccess::ReadOnly);
+        let note = access.note();
+        let instructions = AgentAccess::mcp_instructions();
+        for guidance in [
+            "Restarting cannot grant posting access",
+            "“let my agent post” in chat",
+            "use access_set on the local lifecycle or managed ledger connection",
+            "Respect the owner's choice to stay read-only",
+        ] {
+            assert!(note.contains(guidance), "{note}");
+        }
+        assert!(instructions.contains(note));
+        for guidance in [
+            "Call access_set only when the owner asks to change access to those managed books and the tool is listed",
+            "say “make me read-only”",
+            "If agent_access itself is null",
+        ] {
+            assert!(instructions.contains(guidance), "{instructions}");
+        }
+        assert!(!instructions.contains("docs_url"));
+    }
+
+    #[test]
+    fn mcp_instructions_cover_each_serialized_access_state() -> serde_json::Result<()> {
+        let instructions = AgentAccess::mcp_instructions();
+        for (preset, write_mode, action) in [
+            (
+                Some(Preset::ReadOnly),
+                WriteMode::Direct,
+                "Restarting cannot grant posting access",
+            ),
+            (
+                Some(Preset::Bookkeeper),
+                WriteMode::Direct,
+                "txn_reverse with company and id",
+            ),
+            (
+                Some(Preset::Bookkeeper),
+                WriteMode::ProposeOnly,
+                "report the proposal ID as pending",
+            ),
+            (None, WriteMode::Direct, "the grant is custom"),
+            (None, WriteMode::ProposeOnly, "within its signed write mode"),
+        ] {
+            let access = AgentAccess {
+                preset,
+                write_mode,
+                migrated: false,
+            };
+            let reported = serde_json::to_value(access)?;
+            let name = reported["preset"].as_str().unwrap_or("null");
+            let mode = reported["write_mode"].as_str().unwrap_or_default();
+            let condition = match (preset, write_mode) {
+                (None | Some(Preset::ReadOnly), _) => format!("If preset is {name}"),
+                (Some(Preset::Bookkeeper), WriteMode::Direct) => {
+                    format!("With preset {name} and write_mode {mode}")
+                }
+                (Some(Preset::Bookkeeper), WriteMode::ProposeOnly) => {
+                    format!("With write_mode {mode}")
+                }
+            };
+            assert!(instructions.contains(&condition), "{reported}");
+            assert!(instructions.contains(action), "{reported}");
         }
         Ok(())
     }

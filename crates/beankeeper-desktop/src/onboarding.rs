@@ -254,7 +254,7 @@ impl HostToolHandler for DesktopTools {
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
-                "Call this first when the owner asks to set up their books. Read the ledger counts, recommended next step, and your verified grant and write mode.",
+                "Call this first when the owner asks to set up their books or when a posting tool is missing. Read the ledger counts and suggested setup step. Use the note in agent_access to explain the verified access.",
                 schemars::schema_for!(StatusInput).to_value().as_object().cloned().unwrap_or_default(),
             ),
             capability: Capability::Read,

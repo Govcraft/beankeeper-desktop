@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.22] - 2026-11-23
+
+### Fixed
+
+- Claude Desktop and local MCP clients explain verified posting access. Owners
+  can request an access change in chat or keep their read-only choice.
+
 ## [0.1.0-rc.21] - 2026-11-22
 
 ### Fixed

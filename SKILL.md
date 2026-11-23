@@ -130,7 +130,7 @@ These local tools use OS-user service authority. Call them when the owner asks
 for the corresponding action. They return named errors or structured status with a
 plain-language message, running version, MCP endpoint and optional Desktop link.
 When running, `service_status` also reports the managed credential's
-`agent_access`, including its `preset`, `write_mode` and a plain-language note.
+`agent_access`, including its `preset`, `write_mode` and plain-language `note`.
 Answer in plain words first. Offer the Desktop view only when useful.
 
 The ledger MCP entry runs `bk mcp bridge --service`, discovering the current
@@ -188,11 +188,12 @@ installer's `--no-agents` option. PowerShell accepts `-NoAgents`.
 The Windows setup executable accepts `/NOAGENTS=1`. The background service can
 still run and you can connect a client later.
 
-For manual foreground hosting, the owner can still run
-`bk --db /path/to/books.db setup` once in a terminal. It creates encrypted books,
-stores the passphrase in the OS keychain, prepares a private recovery kit and
-merges the `beankeeper` MCP server into Claude Desktop, Claude Code and Codex
-configs. Restart the agent client afterward.
+### Advanced manual hosting
+
+For standalone foreground hosting, `bk --db /path/to/books.db setup` creates
+encrypted books, stores the passphrase in the OS keychain, prepares a private
+recovery kit and merges the `beankeeper` MCP server into Claude Desktop, Claude
+Code and Codex configs. Restart the agent client afterward.
 
 Standalone `bk setup` defaults to read-only. Its optional
 `--preset bookkeeper` records transactions directly without Desktop-provisioned
@@ -203,7 +204,7 @@ authority.
 
 Manual setup configs invoke `bk mcp bridge` with an explicit endpoint and a
 private agent-token file path. This bridge connects to the running `bk serve`.
-For manual hosting, the owner can start `bk --db /path/to/books.db serve` or
+Start a manually hosted ledger with `bk --db /path/to/books.db serve` or
 rerun `setup --force`. Stored passphrases are resolved automatically
 for enrolled ledgers; explicit upstream secret sources take precedence.
 
@@ -220,19 +221,36 @@ the ledger posts it, tell the owner what was recorded and give them the book
 and transaction ID. Offer the optional transaction detail link through
 `ui_get_link`.
 
-If the owner wants to undo a posting, give them
-`bk --db BOOKS --company COMPANY txn reverse ID` or the equivalent
-`txn_reverse` arguments `company` and `id` for a connection they control with
-`ledger/reverse`. Upstream appends an offsetting transaction linked to the
-original and records the owner's action in the audit trail.
+If the owner asks to undo a posting, use `txn_reverse` with `company` and
+`id` from an owner-controlled connection with `ledger/reverse`. An agent
+with the same authority and a local shell can use
+`bk --db BOOKS --company COMPANY txn reverse ID`. The ledger appends an
+offsetting transaction linked to the original and records the reversal in
+the audit trail. If reversal access is unavailable, explain that and give
+the owner the company and transaction ID.
 
-When the owner asks to change managed access, call `access_set` on the local
-ledger or lifecycle connection. Use `{"preset":"read-only"}` to turn off posting,
+### Change managed access in chat
+
+If a posting tool is missing, check `agent_access` in `setup_status` or
+`service_status` and explain its note. If the preset is read-only, explain
+that restarting cannot grant posting access. For managed books, the owner
+can say “let my agent post” in chat. Respect a deliberate choice to stay
+read-only.
+
+When the owner asks to change managed access, call the listed `access_set` tool
+on the managed ledger or local lifecycle connection. Use
+`{"preset":"read-only"}` to turn off posting,
 `{"preset":"bookkeeper","write_mode":"direct"}` to enable direct posting, or
 `{"preset":"bookkeeper","write_mode":"propose-only"}` for ongoing sign-off.
-The CLI is `bk service access-set --preset PRESET [--write-mode MODE] --json`.
-Use the returned access to tell the owner what changed. For a proposal, report
-it as pending and give the owner its optional review link.
+An agent with a local shell can use
+`bk service access-set --preset PRESET [--write-mode MODE] --json`.
+Keep the access change in chat. Keep terminal commands and credential files
+out of the owner's steps. Use the returned access to tell the owner what
+changed. For a proposal, report it as pending and offer its review link.
+
+A null `preset` means a custom grant. Use the listed tools within its signed
+write mode. A null `agent_access` means access is unverified. Use the status
+and any named error to explain the problem.
 
 When `setup_status` or `service_status` reports `agent_access.migrated: true`,
 tell the owner that you can now record transactions for them and they can say
@@ -423,12 +441,10 @@ pairing alone does not associate your UI credential. A queued result is not
 browser confirmation; use `ui_status` to inspect the loaded view.
 `--read-only` removes navigation/highlight mutations. See the
 [navigation catalog](docs/navigation.md) for arguments and examples.
-Desktop's supported workflow is agent proposes, human approves in the browser.
-Do not ask for approval tokens or call MCP approval tools on the human's behalf.
-On enforced ledgers, Desktop uses the private owner-token file to issue
-short-lived approval authority for the paired human. If the review page says
-approval is unavailable, tell the human to check their private owner credential
-and restart Desktop. Keep owner and approval credentials out of agent sessions.
+When the owner has chosen sign-off for a grant or entry, report the pending
+proposal and offer its browser review link. The paired owner controls the
+approval. If approval is unavailable, explain that the proposal is still
+pending. Owner and approval credentials stay private.
 
 See [docs/setup.md](docs/setup.md) for the full command reference, all config and
 credential paths, headless test options, lifecycle and recovery instructions.

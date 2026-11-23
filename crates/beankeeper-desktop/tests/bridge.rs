@@ -64,6 +64,10 @@ fn stdio_bridge_uses_the_running_desktop_session_and_cleans_up_on_eof() -> TestR
     let initialized: Value =
         serde_json::from_str(&receive.recv_timeout(Duration::from_secs(10))??)?;
     assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
+    let instructions = initialized["result"]["instructions"]
+        .as_str()
+        .ok_or("missing MCP instructions")?;
+    assert!(instructions.contains("Restarting cannot grant posting access"));
     writeln!(
         stdin,
         "{}",
