@@ -359,14 +359,14 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("books.db");
     let passphrase_file = dir.path().join("passphrase");
-    let passphrase = "migration-fixture-passphrase";
-    std::fs::write(&passphrase_file, passphrase)?;
+    let fixture_passphrase = "migration-fixture-passphrase";
+    std::fs::write(&passphrase_file, fixture_passphrase)?;
     {
         let fixture = rusqlite::Connection::open(&path)?;
-        fixture.pragma_update(None, "key", passphrase)?;
+        fixture.pragma_update(None, "key", fixture_passphrase)?;
         fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
     }
-    let passphrase = passphrase.into();
+    let passphrase = fixture_passphrase.into();
     assert!(matches!(
         Db::open_snapshot(&path, Some(&passphrase)),
         Err(beankeeper_cli::error::CliError::Database(_))
@@ -385,15 +385,17 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
 
     let migrated = Db::open_snapshot(&path, Some(&passphrase))?;
     assert_eq!(get_schema_version(migrated.read())?, expected_version);
-    let setup_tables: u32 = migrated.read().query_row(
-        "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'table' AND name IN (
-             'setup_book_profiles', 'setup_requests', 'setup_statement_batches'
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(setup_tables, 3);
+    // Assert the internal schema only in this explicit migration fixture.
+    let schema =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    schema.pragma_update(None, "key", fixture_passphrase)?;
+    for table in [
+        "setup_book_profiles",
+        "setup_requests",
+        "setup_statement_batches",
+    ] {
+        assert!(schema.table_exists(None, table)?, "missing {table}");
+    }
     server.pair()?;
     let accounts = server
         .client

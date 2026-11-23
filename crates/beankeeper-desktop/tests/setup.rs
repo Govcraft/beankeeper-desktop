@@ -183,7 +183,6 @@ fn standalone_bookkeeper_uses_direct_mode_without_spend_limits() -> TestResult {
 fn rerun_refuses_without_force_and_force_preserves_root_tokens_and_recovery() -> TestResult {
     let setup = Setup::new()?;
     assert!(setup.setup().output()?.status.success());
-    let root = root(&setup.db()?)?;
     let files = [
         "books.agent-token",
         "books.owner-token",
@@ -202,17 +201,14 @@ fn rerun_refuses_without_force_and_force_preserves_root_tokens_and_recovery() ->
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(root, self::root(&setup.db()?)?);
+    let db = setup.db()?;
+    for credentials in &original[..2] {
+        identity::verify(db.read(), std::str::from_utf8(credentials)?)?;
+    }
     for (name, bytes) in files.into_iter().zip(original) {
         assert_eq!(fs::read(setup.path(name))?, bytes);
     }
     Ok(())
-}
-
-fn root(db: &Db) -> Result<String, Box<dyn Error>> {
-    Ok(db
-        .read()
-        .query_row("SELECT trust_root FROM identity_root", [], |row| row.get(0))?)
 }
 
 #[test]

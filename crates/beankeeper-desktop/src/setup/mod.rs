@@ -1174,13 +1174,25 @@ mod tests {
         assert!(owner.allows(Capability::Admin)?);
         assert!(db::policy::get(db.read())?.enforce);
         let policy_events = || {
-            let mut stmt = db.read().prepare(
-                "SELECT token_jti FROM audit_log WHERE entity = 'policy' AND action = 'policy_change'",
+            let rows = audit::list_audit(
+                db.read(),
+                &audit::ListAuditParams {
+                    actor: None,
+                    agent_uri: None,
+                    company_slug: None,
+                    entity: Some(audit::AuditEntity::Policy),
+                    action: Some(audit::AuditAction::PolicyChange),
+                    limit: audit::AuditPageLimit::default(),
+                    offset: audit::AuditPageOffset::default(),
+                },
             )?;
-            stmt.query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()
+            Ok::<_, CliError>(
+                rows.into_iter()
+                    .map(|row| row.token_jti)
+                    .collect::<Vec<_>>(),
+            )
         };
-        assert_eq!(policy_events()?, [owner.jti()]);
+        assert_eq!(policy_events()?, [Some(owner.jti().to_owned())]);
         let agent = read_identity(&agent_file)?;
         assert_eq!(Preset::try_from(&agent), Ok(Preset::Bookkeeper));
         assert_eq!(agent.write_mode(), WriteMode::Direct);
@@ -1192,7 +1204,7 @@ mod tests {
             Preset::try_from(&read_identity(&agent_file)?),
             Ok(Preset::Bookkeeper)
         );
-        assert_eq!(policy_events()?, [owner.jti()]);
+        assert_eq!(policy_events()?, [Some(owner.jti().to_owned())]);
         Ok(())
     }
 

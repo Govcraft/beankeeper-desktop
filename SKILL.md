@@ -232,9 +232,12 @@ point them to the owner credential steps for issuing a direct bookkeeper grant.
 
 Start with `setup_status` over MCP or `bk --db BOOKS setup status --json`. For a
 managed ledger, use the `books` path from `bk service status --json` as `BOOKS`.
-For a manually enrolled ledger, use its enrolled path. Use `next_step` and the
-recorded facts to skip questions the owner has already answered. Use
-`agent_access` to explain what the authenticated credential can do.
+For a manually enrolled ledger, use its enrolled path. The status gives the
+counts of books, accounts and posted transactions, and whether an owner key
+exists. Use `next_step` as a starting point and `agent_access` to explain what
+the authenticated credential can do. Find the books with `company_list` or
+`bk --db BOOKS company list --json`, then read each book's profile and accounts
+before asking questions the owner may already have answered.
 
 1. Ask whether the owner keeps personal books, business books, or both. Confirm
    the reporting currency and the start of the financial year for each book.
@@ -290,8 +293,8 @@ changes with the owner before reserving.
 
 Before importing a statement, confirm the book, bank account, currency,
 statement dates, and which transactions the owner has already recorded.
-Use the committed statement counts from `setup_status` when available. Ask
-the owner to confirm the source of any other earlier activity.
+Look up known statement batches with `ledger_setup_statement_receipt`. Ask
+the owner to confirm the source of any earlier activity you cannot account for.
 Confirm the suspense account for entries that still need categorization.
 Call `ledger_setup_statement_preview` with the active setup generation, the
 account codes, and a stable reference. Use `csv` for CSV and `ofx` for OFX or
