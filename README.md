@@ -50,6 +50,8 @@ Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
 then ask Claude to set up your books. The extension connects over stdio and
 starts local hosting on first use. If Claude says it can only read your books,
 say **Let my agent post** in chat when you want it to record transactions.
+Claude Desktop only needs the extension. If you also use Claude Code, Desktop
+may show its Beankeeper connections under **Local dev**.
 [Claude Desktop setup and removal](docs/claude-desktop.md)
 
 ## Unsigned builds

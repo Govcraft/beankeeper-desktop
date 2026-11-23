@@ -16,6 +16,10 @@
    Beankeeper answers in the chat. Open a Desktop link when you want to see
    the detail behind an answer.
 
+In Claude Desktop, you only need the **Beankeeper** extension. If Desktop also
+shows `beankeeper` or `beankeeper-service` under **Local dev**, those are Claude
+Code's connections for ledger access and background service controls.
+
 On its first launch, the extension sets up encrypted local books and starts
 per-user background hosting if Beankeeper is not already configured. It uses
 the OS secret store and creates a private recovery kit beside the books. Keep

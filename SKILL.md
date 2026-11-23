@@ -177,6 +177,10 @@ transport or an empty environment. If it reports a custom `env`, tell the owner
 which entry needs attention and let them decide whether to remove the overrides
 or keep them by renaming the entry.
 
+If `agents detect`, `connect`, or `doctor` reports `data.claude_overlap`, tell
+the owner that Claude Desktop only needs the Beankeeper extension. The extra
+**Local dev** rows come from Claude Code's connections.
+
 Configuration changes leave other server entries in place and keep a private
 `.beankeeper-backup` beside the original.
 `bk agents disconnect <client>` removes the managed entries and skill for that

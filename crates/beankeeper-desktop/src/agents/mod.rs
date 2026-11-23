@@ -156,7 +156,7 @@ impl From<AgentError> for Failure {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum State {
     Unsupported,
@@ -233,9 +233,38 @@ impl ServiceCheck {
     }
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(into = "&'static str")]
+struct ClaudeOverlap;
+
+impl ClaudeOverlap {
+    fn detect(agents: &[ClientStatus], inspect: impl Fn(Agent) -> State) -> Option<Self> {
+        let state = |agent| {
+            agents
+                .iter()
+                .find(|status| status.agent == agent)
+                .map_or_else(|| inspect(agent), |status| status.state)
+        };
+        (matches!(state(Agent::ClaudeDesktop), State::ExtensionManaged)
+            && matches!(
+                state(Agent::ClaudeCode),
+                State::Configured | State::PartiallyConfigured
+            ))
+        .then_some(Self)
+    }
+}
+
+impl From<ClaudeOverlap> for &'static str {
+    fn from(_: ClaudeOverlap) -> Self {
+        "Claude Desktop may also show Claude Code's Beankeeper connections under Local dev. In Claude Desktop, you only need the Beankeeper extension."
+    }
+}
+
 #[derive(Serialize)]
 struct Report {
     agents: Vec<ClientStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude_overlap: Option<ClaudeOverlap>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<ServiceCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +341,9 @@ fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write)
                 writeln!(writer, "{}: {}", item.name, item.message)?;
             }
         }
+        if let Some(overlap) = data.claude_overlap {
+            writeln!(writer, "{}", <&str>::from(overlap))?;
+        }
         match &data.service {
             Some(ServiceCheck::Ready { endpoint }) => writeln!(
                 writer,
@@ -343,11 +375,22 @@ fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, Agen
     let _lock = matches!(operation, Operation::Connect | Operation::Disconnect)
         .then(mutation_lock)
         .transpose()?;
-    let agents = Agent::ALL
+    let agents: Vec<_> = Agent::ALL
         .into_iter()
         .filter(|agent| selected.is_none_or(|selected| selected == *agent))
         .map(|agent| check_agent(agent, &locations, binary, operation, selected.is_some()))
         .collect();
+    let claude_overlap = if !matches!(operation, Operation::Disconnect)
+        && matches!(
+            selected,
+            None | Some(Agent::ClaudeDesktop | Agent::ClaudeCode)
+        ) {
+        ClaudeOverlap::detect(&agents, |agent| {
+            check_agent(agent, &locations, binary, Operation::Detect, false).state
+        })
+    } else {
+        None
+    };
     let service = match operation {
         Operation::Doctor => Some(ServiceCheck::probe()),
         Operation::Connect => service::registration_session()
@@ -362,6 +405,7 @@ fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, Agen
     };
     Ok(Report {
         agents,
+        claude_overlap,
         service,
         warning,
     })
