@@ -32,7 +32,6 @@ use crate::{
 };
 
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
-const EXTENSION_INSTRUCTIONS: &str = "When asked to set up the books, call setup_status first if it is listed. Explain the next step in plain words and ask for missing setup facts. After a direct post, tell the owner what was recorded and give them the book and transaction ID for undo. If setup_status reports migrated access, tell the owner they can now ask you to record transactions or say “make me read-only” to undo. Use access_set when the owner asks to change access. Recovery material and owner credentials stay under the owner's control. Desktop views are optional.";
 
 fn exceeds_message_limit(bytes: usize) -> bool {
     u64::try_from(bytes).map_or(true, |length| length > MAX_MESSAGE_BYTES)
@@ -140,7 +139,6 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
         run_connected(
             endpoint.url().clone(),
             endpoint.token_file(),
-            None,
             Some(endpoint.books()),
         )
     } else {
@@ -150,7 +148,6 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
                 .token_file
                 .as_deref()
                 .ok_or(BridgeError::InvalidToken)?,
-            None,
             None,
         )
     }
@@ -165,7 +162,6 @@ pub fn run_extension() -> Result<(), BridgeError> {
     run_connected(
         endpoint.url().clone(),
         endpoint.token_file(),
-        Some(EXTENSION_INSTRUCTIONS),
         Some(endpoint.books()),
     )
 }
@@ -173,11 +169,14 @@ pub fn run_extension() -> Result<(), BridgeError> {
 fn run_connected(
     url: Url,
     token_file: &Path,
-    instructions: Option<&'static str>,
     managed_books: Option<&Path>,
 ) -> Result<(), BridgeError> {
-    let mut transport =
-        connected_transport(url, token_file, instructions, Duration::from_secs(120))?;
+    let mut transport = connected_transport(
+        url,
+        token_file,
+        Some(AgentAccess::mcp_instructions()),
+        Duration::from_secs(120),
+    )?;
     transport.managed = managed_books.map(|books| ManagedConnection {
         books: books.into(),
         token_file: token_file.into(),

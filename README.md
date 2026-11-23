@@ -43,7 +43,9 @@ and verifies both signatures and SHA-256 before running the downloaded binary.
 
 Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
 then ask Claude to set up your books. The extension connects over stdio and
-starts local hosting on first use. See [Claude Desktop setup and removal](docs/claude-desktop.md).
+starts local hosting on first use. If Claude says it can only read your books,
+say **Let my agent post** in chat when you want it to record transactions.
+[Claude Desktop setup and removal](docs/claude-desktop.md)
 
 ## Unsigned builds
 
@@ -82,14 +84,6 @@ Installers now run `bk service install` for the logged-in owner. Beankeeper keep
 its encrypted books locally, starts at login and recovers after a crash. Your
 agent can use it without opening a browser.
 
-```sh
-bk service install
-bk service status --json
-bk service stop
-bk service start
-bk service uninstall  # preserves books and recovery material
-```
-
 Installation configures ledger MCP plus local lifecycle tools, including while
 the server is stopped. The bridge discovers the actual loopback endpoint, with
 a fallback when port 8750 is occupied. On Linux, lifecycle commands can find the
@@ -97,11 +91,21 @@ owner's session bus when Claude Desktop, an IDE, tmux or SSH launches `bk`
 without the login environment. Status verifies the live service directly.
 Recovery material stays in a private file under the owner's control.
 Managed installs default to a bookkeeper credential that posts directly and
-attributes each write to the agent. An original managed read-only default
-moves to bookkeeper during upgrade. Ask your agent to switch to read-only or
-propose-only any time. To undo a posted transaction, use an audited reversal.
-See [background hosting](docs/service.md) for OS paths, credential storage,
-Linux lingering, upgrades and how to change the agent's write mode.
+attributes each write to the agent. Upgrades switch the original managed
+read-only default to direct posting and preserve deliberate access choices.
+Say **Make me read-only** to turn posting off, or ask for propose-only access
+if you want to review proposed entries. Restarting cannot grant posting access.
+[Background hosting and managed access](docs/service.md)
+
+### Advanced service commands
+
+```sh
+bk service install
+bk service status --json
+bk service stop
+bk service start
+bk service uninstall  # preserves books and recovery material
+```
 
 Run `bk agents connect claude-code` to register or refresh the Claude Code
 connection and skill. Existing entries with the managed command and arguments

@@ -1,12 +1,7 @@
 # Background service
 
 Beankeeper can run quietly in the owner's login session. The agent can work with
-local books without opening a browser. Installers set this up by default, or run:
-
-```sh
-bk service install
-bk service status --json
-```
+local books without opening a browser. Installers set this up by default.
 
 First install creates encrypted local books, a random passphrase in the native
 OS secret store, a private recovery kit, and separate owner and bookkeeper
@@ -26,7 +21,7 @@ this storage explicitly on headless hosts. Existing books always reuse their
 recorded credential store; failure to unlock them never generates a replacement
 passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-in.
 
-## Commands
+## Advanced CLI reference
 
 | Command | Result |
 | --- | --- |
@@ -63,9 +58,9 @@ conflict and preserve the entry. Remove `env` if the overrides are no longer
 needed, or rename the entry to keep them, then retry.
 
 The lifecycle tools are `service_install`, `service_uninstall`, `service_start`,
-`service_stop` and `service_status`. They return a plain-language answer plus
-structured status or a named error. `service_install` accepts optional boolean
-arguments `file_store` and `no_agents`, equivalent to `--file-store` and
+`service_stop`, `service_status` and `access_set`. They return a plain-language
+answer plus structured status or a named error. `service_install` accepts
+optional boolean arguments `file_store` and `no_agents`, equivalent to `--file-store` and
 `--no-agents`. Both default to false. MCP installs use the managed books path.
 Use `bk --db BOOKS service install` to select a particular ledger on first
 install. The internal `install-extension` command is reserved for the native
@@ -101,8 +96,9 @@ is stopped. Starting without an installation returns `SERVICE_NOT_INSTALLED`.
 Lifecycle calls that need a missing Linux session bus return
 `SESSION_ENV_UNAVAILABLE`. Status also reports a named error if the published
 endpoint cannot be reached, its process identity differs, or MCP authentication fails.
-If an agent credential has expired or been revoked, ask the owner to renew it
-using the upstream agent commands.
+If authentication fails because a credential has expired or been revoked,
+explain the error. Credential renewal for manually administered ledgers is
+covered by the upstream agent commands.
 
 `bk service status` and `bk agents doctor` warn when another Desktop instance
 is listening on port 8750. The warning names its books path when a local record
@@ -112,33 +108,37 @@ still identifies the competing listener. These checks never open competing books
 
 ## Choose a write mode
 
-On a fresh managed install, `txn_post` and `bk txn post` record transactions
-directly under the bookkeeper's identity. Ask your agent to tell you what it
-recorded, with the company and transaction ID. Undo a post from your owner
-session with `bk --db BOOKS --company COMPANY txn reverse ID` or use
-`txn_reverse` on an owner-controlled connection that holds `ledger/reverse`.
-That appends a linked reversal and records both actions in audit history.
+If your agent says it can only read your books, say **Let my agent post** in
+chat when you want it to record transactions. Say **Make me read-only** to
+turn posting off. Restarting cannot grant posting access. Your agent uses
+`access_set` on the managed ledger or local lifecycle MCP connection and tells
+you what changed. Beankeeper respects your choice to stay read-only.
 
-Ask your connected local agent to change its access. It uses `access_set` on
-the managed ledger connection or the local service connection. Both use the
-owner’s private local authority. The CLI offers the same operation.
-
-| What to ask for | MCP arguments | CLI |
-| --- | --- | --- |
-| Let my agent post. | `{"preset":"bookkeeper","write_mode":"direct"}` | `bk service access-set --preset bookkeeper` |
-| Switch to propose-only. | `{"preset":"bookkeeper","write_mode":"propose-only"}` | `bk service access-set --preset bookkeeper --write-mode propose-only` |
-| Make my agent read-only. | `{"preset":"read-only"}` | `bk service access-set --preset read-only` |
-
-Add `--json` for structured CLI status. Each changed grant is issued and the
-previous credential is revoked under the verified owner’s identity. The
-credential and private key material stay out of tool responses. Access applies
-across companies in the selected ledger. Under `propose-only`, posting returns
-a pending proposal that a separate approving credential can resolve.
+With direct posting, your agent records each transaction under its own
+identity and tells you what it recorded, with the company and transaction ID.
+To undo it, ask for an audited reversal. An owner-controlled connection with
+`ledger/reverse` uses `txn_reverse` to add the linked reversal.
+You can also ask for propose-only access if you want to review proposed entries.
 
 On startup or managed setup resume, Desktop moves the original legacy
 read-only default to bookkeeper with direct posting. It preserves recorded
 owner choices and recognized replacement grants. The next access status explains
 the change and tells the owner that “make me read-only” undoes it in chat.
+
+### Advanced access commands
+
+Both MCP and CLI use the owner's private local authority. Each change issues a
+grant and revokes the previous credential under the verified owner's identity.
+Access applies across companies in the selected ledger.
+
+| Chat request | `access_set` arguments | CLI |
+| --- | --- | --- |
+| Let my agent post. | `{"preset":"bookkeeper","write_mode":"direct"}` | `bk service access-set --preset bookkeeper --write-mode direct` |
+| Switch to propose-only. | `{"preset":"bookkeeper","write_mode":"propose-only"}` | `bk service access-set --preset bookkeeper --write-mode propose-only` |
+| Make me read-only. | `{"preset":"read-only"}` | `bk service access-set --preset read-only` |
+
+Add `--json` for structured CLI status. For an audited reversal from an
+authorized owner session, use `bk --db BOOKS --company COMPANY txn reverse ID`.
 
 ## Platform behavior and files
 
