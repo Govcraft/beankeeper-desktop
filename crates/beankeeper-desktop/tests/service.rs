@@ -104,7 +104,6 @@ fn check_lifecycle(
         assert!(instructions.contains("access_set"));
         assert!(instructions.contains("Restarting cannot grant posting access"));
         // This notification has no reply; send it independently.
-        drop(request);
         writeln!(
             input,
             "{}",

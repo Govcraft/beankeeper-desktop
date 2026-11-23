@@ -245,6 +245,7 @@ struct Report {
 type Output = Envelope<Operation, Report, Failure>;
 
 /// Run the requested local agent operation and print its result.
+#[must_use]
 pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
     let (operation, selected) = match options.command {
         AgentCommand::Detect => (Operation::Detect, None),

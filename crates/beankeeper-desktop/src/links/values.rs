@@ -123,7 +123,7 @@ impl fmt::Display for Date {
 
 string_wire!(Date);
 
-/// A register amount, in nonnegative whole minor units within SQLite's range.
+/// A register amount, in nonnegative whole minor units within `SQLite`'s range.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct MinorAmount(i64);
@@ -166,7 +166,7 @@ pub(crate) struct DecimalAmount {
 }
 
 impl DecimalAmount {
-    /// Check the currency-dependent precision and SQLite bounds at the boundary.
+    /// Check the currency-dependent precision and `SQLite` bounds at the boundary.
     pub(super) fn validate_currency(&self, currency: &Currency) -> Result<(), LinkError> {
         self.money(currency.ledger()).map(|_| ())
     }
@@ -324,7 +324,7 @@ impl fmt::Display for AccountSelection {
     }
 }
 
-/// A positive upstream SQLite transaction ID, retaining existing link addresses.
+/// A positive upstream `SQLite` transaction ID, retaining existing link addresses.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "i64", into = "i64")]
 pub(crate) struct TransactionId(LedgerTransactionId);
@@ -557,7 +557,7 @@ impl BudgetWindow {
 /// Maximum number of ledger records examined while filling a browser page.
 pub(crate) const SCAN_LIMIT: i64 = 1_000;
 
-/// An offset leaving room for one full register scan in SQLite's signed range.
+/// An offset leaving room for one full register scan in `SQLite`'s signed range.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "i64", into = "i64")]
 pub(crate) struct Offset(i64);
