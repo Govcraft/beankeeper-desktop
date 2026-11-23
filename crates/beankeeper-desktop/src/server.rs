@@ -11,7 +11,10 @@ use axum::{Router, middleware, routing::get, serve::Listener};
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
-    mcp::{StreamableHttpServerConfig, http_router_with_host_tools},
+    mcp::{
+        LedgerTargets, StreamableHttpServerConfig, http_router_with_host_tools,
+        http_router_with_ledger_targets,
+    },
     passphrase::resolve_passphrase,
 };
 
@@ -19,6 +22,7 @@ use crate::{
     DesktopError,
     boundary::{self, LocalBoundary},
     changes,
+    demo::DemoBooks,
     instance::{self, BooksPath, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
@@ -90,6 +94,7 @@ pub fn application(
         InstanceId::default(),
         None,
     )
+    .map(|(router, _)| router)
 }
 
 fn application_with_id(
@@ -100,7 +105,7 @@ fn application_with_id(
     pairing: PairingState,
     id: InstanceId,
     managed_books: Option<std::path::PathBuf>,
-) -> Result<Router, DesktopError> {
+) -> Result<(Router, Option<DemoBooks>), DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
         .with_allowed_hosts(boundary.authorities())
@@ -116,20 +121,29 @@ fn application_with_id(
     let books = BooksPath::try_from(cli.db.as_path())?;
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
     let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
-    let mcp = http_router_with_host_tools(
-        cli,
-        passphrase.as_ref(),
-        read_only,
-        config,
-        DesktopTools {
-            bound,
-            navigation: navigation.clone(),
-            status_db: Arc::clone(&association_db),
+    let mut tools = DesktopTools {
+        bound,
+        navigation: navigation.clone(),
+        status_db: Arc::clone(&association_db),
+        managed_books,
+        demo: None,
+        books: books.clone(),
+        company: cli.company.clone(),
+    };
+    let demo;
+    let mcp = if let Some(managed_books) = &tools.managed_books {
+        let targets = LedgerTargets::new(Db::open_existing(&cli.db, passphrase.as_ref())?);
+        demo = Some(DemoBooks::new(
+            targets.clone(),
             managed_books,
-            books: books.clone(),
-            company: cli.company.clone(),
-        },
-    )?;
+            config.cancellation_token.clone(),
+        ));
+        tools.demo.clone_from(&demo);
+        http_router_with_ledger_targets(cli, targets, read_only, config, tools)?
+    } else {
+        demo = None;
+        http_router_with_host_tools(cli, passphrase.as_ref(), read_only, config, tools)?
+    };
     let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
     let review = review::router(
         review_db,
@@ -150,14 +164,15 @@ fn application_with_id(
         (pairing.clone(), fallback, association_db),
         pairing::mcp_guard,
     ));
-    Ok(ui::router(db, cli.company.clone(), pairing.clone())
+    let router = ui::router(db, cli.company.clone(), pairing.clone())
         .merge(review)
         .merge(changes)
         .merge(navigation::router(navigation, pairing.clone()))
         .merge(pairing::router(pairing))
         .merge(mcp)
         .route("/health", get(move || async move { instance::health(&id) }))
-        .layer(middleware::from_fn_with_state(boundary, boundary::guard)))
+        .layer(middleware::from_fn_with_state(boundary, boundary::guard));
+    Ok((router, demo))
 }
 
 /// Run the combined listener until Ctrl-C, then cancel MCP and drain HTTP.
@@ -197,7 +212,7 @@ fn serve_bound(
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
     let (pairing, pairing_url) = PairingState::new(bound)?;
-    let app = application_with_id(
+    let (app, demo) = application_with_id(
         cli,
         read_only,
         bound,
@@ -224,12 +239,20 @@ fn serve_bound(
         );
     }
     runtime.block_on(async move {
-        axum::serve(serving, app)
+        let shutdown = cancellation.clone();
+        let result = axum::serve(serving, app)
             .with_graceful_shutdown(async move {
                 shutdown_signal().await;
-                cancellation.cancel();
+                shutdown.cancel();
             })
-            .await
+            .await;
+        cancellation.cancel();
+        if let Some(demo) = demo
+            && let Err(error) = demo.remove().await
+        {
+            eprintln!("{error}");
+        }
+        result
     })?;
     Ok(())
 }

@@ -104,7 +104,6 @@ fn check_lifecycle(
         assert!(instructions.contains("access_set"));
         assert!(instructions.contains("Restarting cannot grant posting access"));
         // This notification has no reply; send it independently.
-        drop(request);
         writeln!(
             input,
             "{}",
@@ -1329,4 +1328,271 @@ fn managed_resume_finishes_an_interrupted_audited_rotation() -> TestResult {
         && row.entity_id == old_id
         && row.actor == "desktop-owner"));
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
+    use beankeeper_cli::{identity, mcp::LEDGER_TARGET_META_KEY};
+    use secrecy::ExposeSecret;
+
+    let fixture = LegacyService::new()?;
+    let mut host = fixture.host()?;
+    let credential = fixture.secret("agent-token")?;
+    let token = credential.expose_secret();
+    let identity = identity::verify(fixture.db()?.read(), token)?;
+    host.initialize(Some(token))?;
+    let cli = fixture
+        .command()
+        .args(["demo", "start", "--json"])
+        .output()?;
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let created: Value = serde_json::from_slice(&cli.stdout)?;
+    let start =
+        common::rpc(host.request("tools/call", json!({"name":"demo_start"}), Some(token))?)?;
+    let target = start["result"]["structuredContent"]["target"]
+        .as_str()
+        .ok_or("missing demo target")?;
+    assert_eq!(start["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
+    assert_eq!(created["target"], target);
+
+    let posting = demo_posting();
+    let post = demo_http(&host, token, target, "txn_post", &posting)?;
+    assert_eq!(post["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
+    let posted = demo_payload(&post["result"])?;
+    assert_eq!(posted["created"], true);
+    let undo = json!({"company":"personal", "id":posted["id"], "reference":"demo-undo"});
+    let denied = demo_http(&host, token, target, "txn_reverse", &undo)?;
+    assert_eq!(denied["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
+    assert_eq!(demo_payload(&denied["result"])?["code"], "FORBIDDEN");
+    let owner = fixture.secret("owner-token")?;
+    let reversal = demo_http(&host, owner.expose_secret(), target, "txn_reverse", &undo)?;
+    assert_eq!(reversal["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
+    assert_ne!(reversal["result"]["isError"], true, "{reversal}");
+    let audit = demo_http(&host, token, target, "audit_log", &json!({"limit":8}))?;
+    let rows = demo_payload(&audit["result"])?;
+    let rows = rows.as_array().ok_or("missing audit rows")?;
+    assert!(rows.iter().any(|row| row["action"] == "policy_change"));
+    assert!(rows.iter().any(|row| {
+        row["agent_uri"].as_str() == Some(identity.uri())
+            && row["token_jti"].as_str() == Some(identity.jti())
+    }));
+
+    let removed =
+        common::rpc(host.request("tools/call", json!({"name":"demo_remove"}), Some(token))?)?;
+    assert_eq!(removed["result"]["structuredContent"]["state"], "removed");
+    assert_eq!(removed["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
+    let real = common::rpc(host.request(
+        "tools/call",
+        json!({"name":"txn_list","arguments":{"company":"personal"}}),
+        Some(token),
+    )?)?;
+    assert_eq!(demo_payload(&real["result"])?, json!([]));
+    assert!(
+        real["result"]["_meta"]
+            .get(LEDGER_TARGET_META_KEY)
+            .is_none()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn demo_http(
+    host: &common::Server,
+    token: &str,
+    target: &str,
+    tool: &str,
+    arguments: &Value,
+) -> TestResult<Value> {
+    common::rpc(
+        host.client
+            .post(format!("{}/mcp", host.base))
+            .bearer_auth(token)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .header("Mcp-Session-Id", host.session.as_deref().ok_or("session")?)
+            .header(beankeeper_cli::mcp::LEDGER_TARGET_HEADER, target)
+            .json(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name": tool, "arguments": arguments
+                }}),
+            )
+            .send()?,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn demo_posting() -> Value {
+    json!({
+        "company":"personal", "description":"A fictional test entry", "reference":"demo-post",
+        "date":"2026-11-20", "debits":[{"account":"1000","amount":"12.50"}],
+        "credits":[{"account":"3000","amount":"12.50"}]
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn demo_payload(result: &Value) -> TestResult<Value> {
+    if let Some(payload) = result.get("structuredContent") {
+        return Ok(payload.clone());
+    }
+    Ok(serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .ok_or("missing payload")?,
+    )?)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> TestResult {
+    use beankeeper_cli::mcp::LEDGER_TARGET_META_KEY;
+    use std::{fs, io::Read};
+
+    let fixture = LegacyService::new()?;
+    let _host = fixture.host()?;
+    let mut pipe = DemoPipe::new(&fixture)?;
+    let malformed = pipe.tool("demo_start", &json!({"path":fixture.books}))?;
+    assert_eq!(malformed["structuredContent"]["code"], "DEMO_ARGUMENTS");
+    let unavailable = pipe.tool("txn_post", &demo_posting())?;
+    assert_eq!(unavailable["structuredContent"]["code"], "DEMO_UNAVAILABLE");
+
+    let started = pipe.tool("demo_start", &json!({}))?;
+    let target = &started["structuredContent"]["target"];
+    assert_eq!(started["structuredContent"]["state"], "active");
+    assert_eq!(&started["_meta"][LEDGER_TARGET_META_KEY], target);
+    let sibling = fs::read_dir(fixture.books.parent().ok_or("books parent")?)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("demo.db"))
+        .find(|path| path.is_file())
+        .ok_or("missing demo file")?;
+    let mut header = [0; 16];
+    fs::File::open(&sibling)?.read_exact(&mut header)?;
+    assert_ne!(&header, b"SQLite format 3\0");
+
+    let list = pipe.request("tools/list", &json!({}))?;
+    assert_eq!(&list["_meta"][LEDGER_TARGET_META_KEY], target);
+    let tools = list["tools"].as_array().ok_or("missing list")?;
+    assert!(tools.iter().any(|tool| tool["name"] == "demo_remove"));
+    assert!(tools.iter().all(|tool| tool["name"] != "setup_status"));
+    assert!(tools.iter().all(|tool| tool["name"] != "changes_since"));
+    assert!(tools.iter().all(|tool| tool["name"] != "changes_mark_seen"));
+    let listed = pipe.tool("company_list", &json!({}))?;
+    assert_eq!(&listed["_meta"][LEDGER_TARGET_META_KEY], target);
+    assert_eq!(
+        demo_payload(&listed)?.as_array().ok_or("demo books")?.len(),
+        3
+    );
+
+    let cli = fixture
+        .command()
+        .args(["demo", "remove", "--json"])
+        .output()?;
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let removed: Value = serde_json::from_slice(&cli.stdout)?;
+    assert_eq!(&removed["target"], target);
+    assert!(!sibling.exists());
+    assert!(fixture.books.exists());
+    let unavailable = pipe.tool("txn_post", &demo_posting())?;
+    assert_eq!(&unavailable["_meta"][LEDGER_TARGET_META_KEY], target);
+    assert_eq!(unavailable["structuredContent"]["code"], "DEMO_UNAVAILABLE");
+
+    let restarted = pipe.tool("demo_start", &json!({}))?;
+    assert_eq!(restarted["structuredContent"]["state"], "active");
+    assert_ne!(&restarted["structuredContent"]["target"], target);
+    let removed = pipe.tool("demo_remove", &json!({}))?;
+    assert_eq!(removed["structuredContent"]["state"], "removed");
+    let real = pipe.tool("txn_list", &json!({"company":"personal"}))?;
+    assert_eq!(demo_payload(&real)?, json!([]));
+    assert!(real["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    let receipts = pipe.tool("changes_since", &json!({"company":"personal"}))?;
+    assert_eq!(receipts["structuredContent"]["company"], "personal");
+    assert!(receipts["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct DemoPipe {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    frames: mpsc::Receiver<std::io::Result<String>>,
+    id: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DemoPipe {
+    fn new(fixture: &LegacyService) -> TestResult<Self> {
+        let mut child = fixture
+            .bridge()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let input = child.stdin.take().ok_or("missing stdin")?;
+        let output = child.stdout.take().ok_or("missing stdout")?;
+        let (send, frames) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut pipe = Self {
+            child,
+            input,
+            frames,
+            id: 0,
+        };
+        pipe.request(
+            "initialize",
+            &json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{
+                "name":"demo-test","version":"1.0"
+            }}),
+        )?;
+        writeln!(
+            pipe.input,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )?;
+        pipe.input.flush()?;
+        Ok(pipe)
+    }
+
+    fn tool(&mut self, tool: &str, arguments: &Value) -> TestResult<Value> {
+        self.request("tools/call", &json!({"name":tool,"arguments":arguments}))
+    }
+
+    fn request(&mut self, method: &str, params: &Value) -> TestResult<Value> {
+        self.id += 1;
+        let id = self.id;
+        writeln!(
+            self.input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )?;
+        self.input.flush()?;
+        loop {
+            let frame: Value =
+                serde_json::from_str(&self.frames.recv_timeout(Duration::from_secs(20))??)?;
+            if frame["id"] == id {
+                assert!(frame.get("error").is_none(), "{frame}");
+                return Ok(frame["result"].clone());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DemoPipe {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }

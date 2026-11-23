@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod browser;
 pub mod changes;
 pub mod cli;
+pub mod demo;
 mod instance;
 mod ledger_rows;
 pub mod license;

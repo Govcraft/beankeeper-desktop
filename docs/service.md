@@ -106,6 +106,32 @@ identifies it. Older Linux instances with an explicit `--db` can also be
 identified from their launch arguments. If the path is unavailable, the warning
 still identifies the competing listener. These checks never open competing books.
 
+## Demo books on the managed connection
+
+`demo_start` creates or reuses an encrypted sample ledger in a private directory
+beside the managed books. The managed stdio bridge selects the returned target
+for discovery and ledger calls on its existing session. Other sessions keep
+their own selections. Direct HTTP clients call the demo controls on the startup
+target and use `Beankeeper-Ledger-Target` for selected discovery and ledger calls.
+Named results carry `_meta["beankeeper/ledgerTarget"]`. The startup result omits
+that marker.
+
+The demo enforces ledger policy with the startup credential's live signed
+grants, write mode, and audit identity. Demo posts use the ordinary ledger
+operations, including audited reversal. The service holds a fresh encryption
+key in memory for each demo. [Change receipts and owner undo](changes.md) and
+browser views use the owner's books.
+
+`demo_remove` drains calls to the demo, closes the connection, and removes the
+demo file. The invoking bridge switches to the owner's books after success.
+Other bridges still targeting the removed demo return `DEMO_UNAVAILABLE`
+until they start or remove the demo explicitly. A fresh demo receives a new
+target. The service discards the demo on graceful shutdown. An abrupt stop can
+leave an encrypted file whose key was lost with the process.
+
+Use `bk demo start --json` and `bk demo remove --json` to manage the same
+demo from shell automation. Owners can do both in chat.
+
 ## Choose a write mode
 
 If your agent says it can only read your books, say **Let my agent post** in

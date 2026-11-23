@@ -144,7 +144,7 @@ impl Ledger {
     }
 
     /// Open a temporary fixture independently of the ledger API to exercise
-    /// schema migration, corruption detection or an injected SQLite failure.
+    /// schema migration, corruption detection or an injected `SQLite` failure.
     /// # Errors
     /// Returns connection or `SQLCipher` errors.
     pub fn fixture_sql(&self) -> TestResult<rusqlite::Connection> {

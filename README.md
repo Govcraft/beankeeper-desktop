@@ -283,16 +283,16 @@ summary and reconciliation URLs are supported with restorable filters. Tool
 results distinguish queued requests from the browser's confirmed view. See the [tool catalog, grant
 commands and tab design](docs/navigation.md) for arguments, examples and tests.
 
+## Try it with demo books
+
+Ask your connected agent, “Show me what Beankeeper can do with sample books.”
+The agent can read fictional reports and practice bookkeeping in encrypted
+demo books over the open chat connection. Ask it to discard the demo when
+you’re done. Practice entries stay in the demo. [Agent demo guide](SKILL.md#try-it-with-demo-books)
+
 ## Browse your books
 
-To try the views with fictional data, initialize a separate demo ledger:
-
-```sh
-bk init --demo --path ./desktop-demo.db
-bk --db ./desktop-demo.db serve
-```
-
-After starting `bk serve`, open its one-time pairing URL as described above.
+Open the optional Desktop link from your agent to explore your own books.
 Every ledger page, report download and proposal review requires D3's
 paired human session. Agent credentials cannot unlock browser views, and browser
 cookies cannot authorize MCP. Health and CSS remain public and data-free behind

@@ -823,7 +823,7 @@ fn issue(
     })?)
 }
 
-fn generate_passphrase() -> Result<SecretString, SetupError> {
+pub(crate) fn generate_passphrase() -> Result<SecretString, SetupError> {
     use fmt::Write;
     let mut bytes = [0; 32];
     getrandom::fill(&mut bytes)

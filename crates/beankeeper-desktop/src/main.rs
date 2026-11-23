@@ -9,7 +9,7 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, agents, bridge, browser, changes,
     cli::{self, OpenOptions, ServeOptions},
-    links, onboarding, product, server, service, setup, updates,
+    demo, links, onboarding, product, server, service, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
@@ -28,6 +28,7 @@ enum DesktopCommand {
     Setup(setup::SetupOptions),
     Bridge(bridge::BridgeOptions),
     Extension,
+    Demo(demo::DemoOptions),
     Ledger,
 }
 
@@ -53,6 +54,7 @@ impl DesktopCommand {
             Some(("service", options)) => {
                 service::ServiceOptions::from_arg_matches(options).map(Self::Service)
             }
+            Some(("demo", options)) => demo::DemoOptions::from_arg_matches(options).map(Self::Demo),
             Some(("license", options)) => {
                 product::LicenseOptions::from_arg_matches(options).map(Self::License)
             }
@@ -152,6 +154,14 @@ fn main() -> ExitCode {
                 })
         }
         DesktopCommand::Bridge(options) => bridge::run(&options).map_err(DesktopError::Bridge),
+        DesktopCommand::Demo(options) => {
+            let json = matches.get_flag("json")
+                || matches!(
+                    matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
+                    Some(beankeeper_cli::cli::OutputFormat::Json)
+                );
+            return demo::run(&options, json);
+        }
         DesktopCommand::Extension => bridge::run_extension().map_err(DesktopError::Bridge),
         DesktopCommand::Ledger => return upstream(&matches),
     };
