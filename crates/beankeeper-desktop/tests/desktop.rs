@@ -988,6 +988,7 @@ fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> Tes
     let mut server = Server::start(&ledger, &["serve"], None)?;
     let paths = [
         "/",
+        "/summary?company=acme&from=2026-03-01&to=2026-03-15&compare_from=2026-02-01&compare_to=2026-02-15",
         "/accounts?company=acme",
         "/transactions?company=acme&offset=50",
         "/transactions/txn_missing?company=acme",
@@ -1042,6 +1043,12 @@ fn paired_browser_reads_restore_deep_links_and_reject_agent_credentials() -> Tes
             "{path}"
         );
         let html = response.text()?;
+        if path.starts_with("/summary") {
+            assert!(html.contains(
+                "2026-03-01 through 2026-03-15, compared with 2026-02-01 through 2026-02-15"
+            ));
+            assert!(html.contains("Net worth is USD 0.00"));
+        }
         assert_eq!(
             html,
             server

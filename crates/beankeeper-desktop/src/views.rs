@@ -5,10 +5,9 @@ use std::{collections::HashSet, error::Error, fmt, fmt::Write};
 use axum::http::StatusCode;
 use beankeeper::types::{ClearanceStatus, Money};
 use beankeeper_cli::{
-    cli::Cli,
     commands::{
         report_currency::resolve_report_currency,
-        summary::{SummaryArgs, execute_json as execute_summary},
+        summary::{SummaryAccounts, SummaryDates, SummaryRequest},
     },
     db::{
         self, Db, EntryRow, ListAuditParams, ListTransactionParams, TransactionRow,
@@ -19,8 +18,6 @@ use beankeeper_cli::{
     },
     error::CliError,
 };
-use clap::Parser;
-use serde::Deserialize;
 
 use crate::{
     ledger_rows::{self, AccountGroup, AuditSubject, EntryValues, RowError},
@@ -28,6 +25,7 @@ use crate::{
     links::{ACCOUNTS, HOME, LedgerRoute, REPORTS, REVIEW, ReportKind, SUMMARY, TRANSACTIONS},
     markup::{Attribute, Markup, markup, write_markup},
     money,
+    pairing::HumanSession,
 };
 
 pub(crate) mod filters;
@@ -248,23 +246,22 @@ fn company_form(
     html
 }
 
-pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, ViewError> {
+pub(crate) fn render(
+    db: &Db,
+    session: &HumanSession,
+    path: &str,
+    query: &Filters,
+) -> Result<ViewPage, ViewError> {
     let route = LedgerRoute::parse(path).map_err(|_| ViewError::NotFound)?;
-    if matches!(query.comparison, Some(Comparison::AsOf(_))) {
-        match route {
-            LedgerRoute::Register => {
-                return Err(ViewError::Invalid(
-                    "Register comparison requires compare_from and compare_to.",
-                ));
-            }
-            LedgerRoute::Summary => {
-                return Err(ViewError::Invalid(
-                    "Financial summary comparison requires compare_from and compare_to.",
-                ));
-            }
-            _ => {}
+    let snapshot = match route {
+        LedgerRoute::Summary => SnapshotView::Detail(query.try_into()?),
+        LedgerRoute::Register if matches!(query.comparison, Some(Comparison::AsOf(_))) => {
+            return Err(ViewError::Invalid(
+                "Register comparison requires compare_from and compare_to.",
+            ));
         }
-    }
+        _ => SnapshotView::Home,
+    };
     let (title, description, nav) = match route {
         LedgerRoute::Home => ("Your books", "A snapshot of your recorded finances.", HOME),
         LedgerRoute::Summary => (
@@ -319,23 +316,8 @@ pub(crate) fn render(db: &Db, path: &str, query: &Filters) -> Result<ViewPage, V
         company_form(&companies, company.as_str(), query, path)
     };
     match route {
-        LedgerRoute::Home => {
-            financial_snapshot(
-                db,
-                company.as_str(),
-                query,
-                SnapshotView::Home,
-                &mut content,
-            )?;
-        }
-        LedgerRoute::Summary => {
-            financial_snapshot(
-                db,
-                company.as_str(),
-                query,
-                SnapshotView::Detail,
-                &mut content,
-            )?;
+        LedgerRoute::Home | LedgerRoute::Summary => {
+            financial_snapshot(db, session, company, query, snapshot, &mut content)?;
         }
         LedgerRoute::Accounts => accounts(&book, query, &mut content)?,
         LedgerRoute::Register => render_register(db, &book, query, &mut content)?,
@@ -388,64 +370,39 @@ fn empty_snapshot(note: &Markup) -> Markup {
     home
 }
 
-#[derive(Deserialize)]
-struct SummaryResponse {
-    data: SummaryHighlights,
-}
-
-#[derive(Deserialize)]
-struct SummaryHighlights {
-    highlights: Vec<String>,
-    periods: SummaryPeriods,
-}
-
-#[derive(Deserialize)]
-struct SummaryPeriods {
-    current: SummaryPeriod,
-    prior: SummaryPeriod,
-}
-
-#[derive(Deserialize)]
-struct SummaryPeriod {
-    from: Date,
-    to: Date,
-}
-
 #[derive(Clone, Copy)]
 enum SnapshotView {
     Home,
-    Detail,
+    Detail(SummaryDates),
 }
 
 impl SnapshotView {
-    fn request(self, query: &Filters, currency: beankeeper::types::Currency) -> SummaryArgs {
-        let mut args = SummaryArgs {
-            currency: Some(currency.into()),
-            ..SummaryArgs::default()
-        };
-        if let Self::Detail = self {
-            args.from = query.dates.from().map(|date| date.date().into());
-            args.to = query.dates.to().map(|date| date.date().into());
-            if let Some(comparison) = query.comparison {
-                let bounds = comparison.bounds();
-                args.compare_from = bounds.from().map(|date| date.date().into());
-                args.compare_to = bounds.to().map(|date| date.date().into());
+    fn request(
+        self,
+        company: &CompanySlug,
+        query: &Filters,
+        currency: beankeeper::types::Currency,
+    ) -> Result<SummaryRequest, CliError> {
+        let (dates, accounts) = match self {
+            Self::Home => (SummaryDates::default(), SummaryAccounts::default()),
+            Self::Detail(dates) => {
+                let accounts = [
+                    query.cash_account.as_ref(),
+                    query.receivable_account.as_ref(),
+                    query.payable_account.as_ref(),
+                ]
+                .map(|selection| selection.map_or_else(Vec::new, AccountSelection::ledger_codes));
+                (dates, accounts.into())
             }
-            args.cash_account = selected_accounts(query.cash_account.as_ref());
-            args.receivable_account = selected_accounts(query.receivable_account.as_ref());
-            args.payable_account = selected_accounts(query.payable_account.as_ref());
-        }
-        args
+        };
+        (company.clone(), dates, Some(currency), accounts).try_into()
     }
-}
-
-fn selected_accounts(filter: Option<&AccountSelection>) -> Vec<String> {
-    filter.map_or_else(Vec::new, AccountSelection::codes)
 }
 
 fn financial_snapshot(
     db: &Db,
-    company: &str,
+    session: &HumanSession,
+    company: &CompanySlug,
     query: &Filters,
     view: SnapshotView,
     html: &mut Markup,
@@ -455,34 +412,39 @@ fn financial_snapshot(
         "<section aria-labelledby=\"snapshot-title\"><h2 id=\"snapshot-title\">Financial snapshot</h2>"
     );
     let currency = query.currency.as_ref().map_or_else(
-        || resolve_report_currency(db.read(), company, None),
+        || resolve_report_currency(db.read(), company.as_str(), None),
         |currency| Ok(currency.ledger()),
     );
     match currency {
         Ok(currency) => {
-            let cli = Cli::try_parse_from(["bk", "summary"])
-                .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
-            let args = view.request(query, currency);
-            let result = execute_summary(&cli, db, company, &args)?;
-            let summary: SummaryResponse = serde_json::from_value(result)
-                .map_err(|_| ViewError::Invalid("Financial summary is unavailable."))?;
+            let request = view.request(company, query, currency)?;
+            let summary = session.summary_reader(db)?.summary(request, |read| {
+                eprintln!(
+                    "{} owner ledger read operation={} company={} actor={}",
+                    chrono::Utc::now().to_rfc3339(),
+                    read.operation().name(),
+                    read.company().as_str(),
+                    read.actor(),
+                );
+            })?;
+            let highlights = summary.highlights();
             let headlines = match view {
                 SnapshotView::Home => 5,
-                SnapshotView::Detail => {
-                    let SummaryPeriods { current, prior } = summary.data.periods;
+                SnapshotView::Detail(_) => {
+                    let [(from, to), (compare_from, compare_to)] = summary.period_windows();
                     write_markup!(
                         html,
                         "<p>{} through {}, compared with {} through {}.</p>",
-                        current.from,
-                        current.to,
-                        prior.from,
-                        prior.to,
+                        from,
+                        to,
+                        compare_from,
+                        compare_to,
                     );
-                    summary.data.highlights.len()
+                    highlights.len()
                 }
             };
             write_markup!(html, "<ul>");
-            for highlight in summary.data.highlights.iter().take(headlines) {
+            for highlight in highlights.iter().take(headlines) {
                 write_markup!(html, "<li>{}</li>", highlight);
             }
             write_markup!(html, "</ul>");
@@ -494,7 +456,7 @@ fn financial_snapshot(
         Err(error) => return Err(error.into()),
     }
     write_markup!(html, "</section>");
-    snapshot_links(html, Some(company), query.currency.as_ref());
+    snapshot_links(html, Some(company.as_str()), query.currency.as_ref());
     Ok(())
 }
 
@@ -988,7 +950,9 @@ mod tests {
         path: &str,
         query: &ViewQuery,
     ) -> Result<ViewPage, ViewError> {
-        render(db, path, &query.clone().parse()?)
+        let session = crate::pairing::authenticated_browser()
+            .map_err(|error| CliError::General(error.to_string()))?;
+        render(db, &session, path, &query.clone().parse()?)
     }
 
     fn fixture() -> TestResult<Db> {

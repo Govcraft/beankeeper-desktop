@@ -10,6 +10,8 @@
   and preserve recorded owner choices.
 - Change managed access from chat or the CLI and refresh the MCP tool list
   after a credential rotation.
+- Read financial summaries on enforced books from a paired browser session,
+  with owner access recorded in the Desktop service log.
 
 ## [0.1.0-rc.20] - 2026-11-22
 
