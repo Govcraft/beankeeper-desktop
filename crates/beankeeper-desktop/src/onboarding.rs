@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     changes,
+    demo::{DemoBooks, DemoOperation},
     instance::BooksPath,
     links::mcp as link_tool,
     navigation::Navigation,
@@ -246,6 +247,7 @@ pub(crate) struct DesktopTools {
     pub(crate) bound: SocketAddr,
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
+    pub(crate) demo: Option<DemoBooks>,
     pub(crate) managed_books: Option<std::path::PathBuf>,
     pub(crate) books: BooksPath,
     pub(crate) company: Option<beankeeper_cli::db::companies::CompanySlug>,
@@ -265,6 +267,9 @@ impl HostToolHandler for DesktopTools {
             capability: Capability::Read,
             effect: HostToolEffect::ReadOnly,
         });
+        if self.demo.is_some() {
+            tools.extend(DemoOperation::ALL.map(DemoOperation::definition));
+        }
         tools
     }
 
@@ -273,6 +278,11 @@ impl HostToolHandler for DesktopTools {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(demo) = &self.demo
+            && let Ok(operation) = request.name.parse::<DemoOperation>()
+        {
+            return Ok(demo.call(operation, request).await);
+        }
         if request.name == link_tool::NAME {
             return Ok(link_tool::call(
                 serde_json::Value::Object(request.arguments.unwrap_or_default()),

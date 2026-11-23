@@ -59,6 +59,9 @@ pub fn command() -> Command {
             Command::new("service")
                 .about("Manage per-user background hosting and lifecycle MCP tools"),
         ))
+        .subcommand(crate::demo::DemoOptions::augment_args(
+            Command::new("demo").about("Manage fictional books on the running service"),
+        ))
         .subcommand(ServeOptions::augment_args(Command::new("serve").about(
             "Serve the embedded UI and authenticated MCP on one listener",
         )))

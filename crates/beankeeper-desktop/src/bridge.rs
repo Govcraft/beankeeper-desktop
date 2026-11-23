@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use beankeeper_cli::mcp::{LEDGER_TARGET_HEADER, NamedLedgerTarget};
 use clap::Args;
 use reqwest::{
     StatusCode, Url,
@@ -20,11 +21,13 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
+use rmcp::model::{CallToolResult, ListToolsResult, Tool};
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    demo::{DemoError, DemoOperation, DemoReport, target_meta},
     onboarding::STATUS_TOOL,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
     service::{self, Endpoint, ServiceError},
@@ -210,6 +213,21 @@ pub(crate) fn probe_service(
     result
 }
 
+pub(crate) fn call_demo(operation: DemoOperation) -> Result<CallToolResult, BridgeError> {
+    let endpoint = service::connection()?;
+    let mut transport = connected_transport(
+        endpoint.url().clone(),
+        endpoint.token_file(),
+        None,
+        Duration::from_secs(120),
+    )?;
+    let result = transport
+        .initialize()
+        .and_then(|()| transport.request_tool(operation.name()));
+    transport.close();
+    result
+}
+
 fn connected_transport(
     url: Url,
     token_file: &Path,
@@ -229,6 +247,7 @@ fn connected_transport(
         session: None,
         protocol: None,
         managed: None,
+        demo: DemoSelection::default(),
         instructions,
     })
 }
@@ -269,11 +288,63 @@ struct ManagedConnection {
     initialize: Option<Value>,
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum DemoSelection {
+    #[default]
+    Startup,
+    Unavailable,
+    Active(NamedLedgerTarget),
+}
+
+impl DemoSelection {
+    fn named(&self) -> Option<&NamedLedgerTarget> {
+        match self {
+            Self::Active(target) => Some(target),
+            Self::Startup | Self::Unavailable => None,
+        }
+    }
+
+    fn begin(&mut self, operation: DemoOperation) -> bool {
+        if matches!((operation, &*self), (DemoOperation::Start, Self::Startup)) {
+            // A failed attempt leaves practice calls suspended until explicitly resolved.
+            *self = Self::Unavailable;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn apply(&mut self, operation: DemoOperation, result: &Value) -> Result<bool, BridgeError> {
+        if result.is_null() || result.get("isError").and_then(Value::as_bool) == Some(true) {
+            return Ok(false);
+        }
+        let report = DemoReport::deserialize(&result["structuredContent"])
+            .map_err(|_| BridgeError::Protocol)?;
+        let selection = match (operation, report) {
+            (DemoOperation::Start, DemoReport::Active { target }) => Self::Active(target),
+            (DemoOperation::Remove, DemoReport::Removed { .. } | DemoReport::Absent) => {
+                Self::Startup
+            }
+            _ => return Err(BridgeError::Protocol),
+        };
+        let changed = *self != selection;
+        *self = selection;
+        Ok(changed)
+    }
+}
+
+fn demo_tools() -> Vec<Tool> {
+    DemoOperation::ALL
+        .map(|operation| operation.definition().tool)
+        .into()
+}
+
 struct Transport {
     client: Client,
     url: Url,
     authorization: HeaderValue,
     managed: Option<ManagedConnection>,
+    demo: DemoSelection,
     session: Option<HeaderValue>,
     protocol: Option<String>,
     instructions: Option<&'static str>,
@@ -312,6 +383,34 @@ impl Transport {
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
         self.refresh_access(output)?;
+        let tool_request = message["method"] == "tools/call";
+        let tool_list = message["method"] == "tools/list";
+        let operation = if self.managed.is_some() && tool_request {
+            message["params"]["name"]
+                .as_str()
+                .and_then(|name| name.parse::<DemoOperation>().ok())
+        } else {
+            None
+        };
+        if let Some(operation) = operation {
+            let entering_demo = self.demo.begin(operation);
+            let replies = self.exchange_startup(message, output)?;
+            let changed = if let Some(reply) = replies
+                .iter()
+                .find(|reply| reply.get("id") == message.get("id"))
+            {
+                self.demo.apply(operation, &reply["result"])?
+            } else {
+                false
+            };
+            if entering_demo || changed {
+                tools_changed(output)?;
+            }
+            return Ok(());
+        }
+        if (tool_request || tool_list) && !matches!(self.demo, DemoSelection::Startup) {
+            return self.exchange_demo(message, tool_list, output);
+        }
         if let Some(managed) = &self.managed
             && self.protocol.is_some()
             && message["method"] == "tools/call"
@@ -326,24 +425,69 @@ impl Transport {
             self.refresh_access(output)?;
             return Ok(());
         }
-        match self.exchange(message, output) {
-            Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
-                if self.refresh_access(output)? =>
-            {
-                self.exchange(message, output)?;
-            }
-            Err(error) if self.managed.is_some() && lost_session(&error) => {
-                self.reconnect()?;
-                self.exchange(message, output)?;
-            }
-            result => {
-                result?;
-            }
-        }
+        self.exchange_startup(message, output)?;
         if message["method"] == "initialize"
             && let Some(managed) = &mut self.managed
         {
             managed.initialize = Some(message.clone());
+        }
+        Ok(())
+    }
+
+    fn exchange_startup(
+        &mut self,
+        message: &Value,
+        output: &mut impl Write,
+    ) -> Result<Vec<Value>, BridgeError> {
+        match self.exchange(message, output) {
+            Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
+                if self.refresh_access(output)? =>
+            {
+                self.exchange(message, output)
+            }
+            Err(error) if self.managed.is_some() && lost_session(&error) => {
+                self.reconnect()?;
+                self.exchange(message, output)
+            }
+            result => result,
+        }
+    }
+
+    fn exchange_demo(
+        &mut self,
+        message: &Value,
+        tool_list: bool,
+        output: &mut impl Write,
+    ) -> Result<(), BridgeError> {
+        let target = self.demo.named().cloned();
+        if let Some(target) = &target {
+            let result = match self.exchange_target(message, Some(target), output) {
+                Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
+                    if self.refresh_access(output)? =>
+                {
+                    self.exchange_target(message, Some(target), output)
+                }
+                result => result,
+            };
+            match result {
+                Ok(_) => return Ok(()),
+                Err(BridgeError::Rejected(StatusCode::NOT_FOUND)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(id) = message.get("id") {
+            let meta = target.as_ref().map(target_meta);
+            let result = if tool_list {
+                let mut result = ListToolsResult::with_all_items(demo_tools());
+                result.meta = meta;
+                serde_json::to_value(result)
+            } else {
+                let mut result = DemoError::Unavailable.result();
+                result.meta = meta;
+                serde_json::to_value(result)
+            }
+            .map_err(|_| BridgeError::Protocol)?;
+            write_message(output, &json!({"jsonrpc":"2.0","id":id,"result":result}))?;
         }
         Ok(())
     }
@@ -358,10 +502,7 @@ impl Transport {
         }
         self.authorization = current;
         if self.protocol.is_some() {
-            write_message(
-                output,
-                &json!({"jsonrpc": "2.0", "method":"notifications/tools/list_changed"}),
-            )?;
+            tools_changed(output)?;
         }
         Ok(true)
     }
@@ -394,12 +535,24 @@ impl Transport {
         message: &Value,
         output: &mut impl Write,
     ) -> Result<Vec<Value>, BridgeError> {
+        self.exchange_target(message, None, output)
+    }
+
+    fn exchange_target(
+        &mut self,
+        message: &Value,
+        target: Option<&NamedLedgerTarget>,
+        output: &mut impl Write,
+    ) -> Result<Vec<Value>, BridgeError> {
         let mut request = self
             .client
             .post(self.url.clone())
             .header(AUTHORIZATION, self.authorization.clone())
             .header("Accept", "application/json, text/event-stream")
             .json(message);
+        if let Some(target) = target {
+            request = request.header(LEDGER_TARGET_HEADER, target.as_ref());
+        }
         if let Some(session) = &self.session {
             request = request.header("Mcp-Session-Id", session);
         }
@@ -418,7 +571,10 @@ impl Transport {
             request_id: message.get("id"),
             instructions: if initial { self.instructions } else { None },
             managed_initialize: initial && self.managed.is_some(),
-            managed_tools: message["method"] == "tools/list" && self.managed.is_some(),
+            managed_tools: message["method"] == "tools/list"
+                && self.managed.is_some()
+                && target.is_none(),
+            demo_tools: message["method"] == "tools/list" && target.is_some(),
         };
         let replies = relay_response(response, relay, output)?;
         if initial {
@@ -433,7 +589,7 @@ impl Transport {
         Ok(replies)
     }
 
-    fn probe(&mut self, probe: Probe) -> Result<Option<AgentAccess>, BridgeError> {
+    fn initialize(&mut self) -> Result<(), BridgeError> {
         let mut output = io::sink();
         self.exchange(
             &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -446,11 +602,11 @@ impl Transport {
         if self.session.is_none() || self.protocol.is_none() {
             return Err(BridgeError::Protocol);
         }
-        let tool = match probe {
-            Probe::Authentication => return Ok(None),
-            Probe::ReadOnlyTool => "company_list",
-            Probe::AgentAccess => STATUS_TOOL,
-        };
+        Ok(())
+    }
+
+    fn request_tool(&mut self, tool: &str) -> Result<CallToolResult, BridgeError> {
+        let mut output = io::sink();
         self.exchange(
             &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             &mut output,
@@ -466,8 +622,17 @@ impl Transport {
             .find(|reply| reply.get("id").and_then(Value::as_u64) == Some(2))
             .ok_or(BridgeError::Protocol)?;
         let result = reply.get("result").ok_or(BridgeError::ToolFailed)?;
-        let result =
-            rmcp::model::CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)?;
+        CallToolResult::deserialize(result).map_err(|_| BridgeError::Protocol)
+    }
+
+    fn probe(&mut self, probe: Probe) -> Result<Option<AgentAccess>, BridgeError> {
+        self.initialize()?;
+        let tool = match probe {
+            Probe::Authentication => return Ok(None),
+            Probe::ReadOnlyTool => "company_list",
+            Probe::AgentAccess => STATUS_TOOL,
+        };
+        let result = self.request_tool(tool)?;
         if result.is_error == Some(true) {
             return Err(BridgeError::ToolFailed);
         }
@@ -518,6 +683,7 @@ struct ReplyContext<'a> {
     instructions: Option<&'static str>,
     managed_initialize: bool,
     managed_tools: bool,
+    demo_tools: bool,
 }
 
 fn relay_response(
@@ -588,16 +754,30 @@ fn emit(
         {
             tools.insert("listChanged".into(), json!(true));
         }
-        if context.managed_tools
-            && result.get("nextCursor").is_none_or(Value::is_null)
+        if result.get("nextCursor").is_none_or(Value::is_null)
             && let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut)
-            && let Some(tool) = service::access_tool()
         {
-            tools.push(serde_json::to_value(tool).map_err(|_| BridgeError::Protocol)?);
+            let supplemental = if context.demo_tools {
+                demo_tools()
+            } else if context.managed_tools {
+                service::access_tool().into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            for tool in supplemental {
+                tools.push(serde_json::to_value(tool).map_err(|_| BridgeError::Protocol)?);
+            }
         }
     }
     write_message(output, &message)?;
     Ok(message)
+}
+
+fn tools_changed(output: &mut impl Write) -> Result<(), BridgeError> {
+    write_message(
+        output,
+        &json!({"jsonrpc": "2.0", "method":"notifications/tools/list_changed"}),
+    )
 }
 
 fn write_message(output: &mut impl Write, message: &Value) -> Result<(), BridgeError> {
@@ -785,6 +965,7 @@ mod tests {
             url,
             authorization,
             managed: None,
+            demo: DemoSelection::default(),
             session: None,
             protocol: None,
             instructions: None,
