@@ -19,7 +19,7 @@ use beankeeper_cli::{
 };
 use rmcp::{
     ErrorData,
-    model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool},
+    model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -157,10 +157,7 @@ fn inspect_cli(cli: &mut Cli) -> Result<(SetupReport, Option<VerifiedAgent>), Cl
             cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
             Capability::Read,
         )?;
-        let ledger = LedgerState::Installed {
-            status: status(&db)?,
-        };
-        let report = SetupReport::new(ledger, agent.as_ref());
+        let report = StatusInput::default().read(&db, agent.as_ref())?;
         Ok((report, agent))
     })
 }
@@ -220,9 +217,28 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
     }
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StatusInput {}
+
+impl TryFrom<Option<JsonObject>> for StatusInput {
+    type Error = CliError;
+
+    fn try_from(arguments: Option<JsonObject>) -> Result<Self, Self::Error> {
+        serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+            .map_err(|_| CliError::Usage("setup_status takes no arguments".into()))
+    }
+}
+
+impl StatusInput {
+    fn read(self, db: &Db, agent: Option<&VerifiedAgent>) -> Result<SetupReport, CliError> {
+        let Self {} = self;
+        let ledger = LedgerState::Installed {
+            status: status(db)?,
+        };
+        Ok(SetupReport::new(ledger, agent))
+    }
+}
 
 pub(crate) struct DesktopTools {
     pub(crate) bound: SocketAddr,
@@ -260,25 +276,16 @@ impl HostToolHandler for DesktopTools {
         if request.name != STATUS_TOOL {
             return self.navigation.call_tool(request, identity).await;
         }
-        if request
-            .arguments
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return Ok(tool_error(&CliError::Usage(
-                "setup_status takes no arguments".into(),
-            )));
-        }
+        let input = match StatusInput::try_from(request.arguments) {
+            Ok(input) => input,
+            Err(error) => return Ok(tool_error(&error)),
+        };
         let status_db = Arc::clone(&self.status_db);
         let result = tokio::task::spawn_blocking(move || {
             let db = status_db
                 .lock()
                 .map_err(|_| CliError::Database("setup status connection is unavailable".into()))?;
-            let report = db.read_snapshot(|_| {
-                let ledger = LedgerState::Installed {
-                    status: status(&db)?,
-                };
-                Ok(SetupReport::new(ledger, Some(&identity)))
-            })?;
+            let report = db.read_snapshot(|_| input.read(&db, Some(&identity)))?;
             let value = serde_json::to_value(&report).map_err(|error| {
                 CliError::General(format!("cannot encode setup status: {error}"))
             })?;

@@ -96,6 +96,9 @@ fn read_only_mcp_reports_live_setup_status_like_the_cli() -> TestResult {
     for name in ["setup_status", LEDGER_SETUP_STATUS] {
         assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
     }
+    let invalid = setup_call(&server, reader, "setup_status", json!({"unknown": true}))?;
+    assert_eq!(invalid["result"]["isError"], true, "{invalid}");
+    assert_eq!(invalid["result"]["structuredContent"]["code"], "USAGE");
     let status = |name| -> TestResult<Value> {
         let response = rpc(server.request(
             "tools/call",
