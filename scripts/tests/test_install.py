@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 from test_release import ROOT, release
 
@@ -389,6 +390,32 @@ else:
                     "service install --no-agents", "agents connect --all --json", "service status --json",
                 ])
                 expected.unlink()
+
+                bundles = self.root / "guide-bundles"
+                release.mcp_bundle(directory, version, target, bundles)
+                with zipfile.ZipFile(bundles / f"{directory.name}.mcpb") as archive:
+                    guide = archive.read("SKILL.md").decode("utf-8")
+                for instruction in (
+                    "## Recover from a rejected Beankeeper tool call",
+                    "Correct the call and retry it in the same conversation.",
+                    "the error code and message so they can report it.",
+                    "in the Beankeeper app, on a screen, or in a terminal.",
+                    "into a description to work around a rejected call.",
+                    "## Annotating or tagging an entry",
+                    "`txn_meta_set` with `company`, exactly one of `id` or `reference`",
+                    '`values: {"status":"pending"}`',
+                    '`values: ["status=pending"]`',
+                    '`txn_meta_unset` with the same selector and `keys: ["status"]`',
+                    "`bk txn meta set ID status=pending`",
+                    "`status: pending`",
+                    "`flag: review`",
+                    "Reserved keys are `correlate`, `proposal_id`, `reverses`, `reversed_by`,",
+                    "`applies_to` and `beankeeper_source`.",
+                    "### Pending card holds",
+                    "`bank_reference` if known.",
+                    "with `txn_reverse` or `bk txn reverse`, and post the settled entry in the same",
+                ):
+                    self.assertIn(instruction, guide)
 
     def test_invalid_bundle_and_non_404_download_errors_fail_closed(self):
         self.cosign(fail=True)

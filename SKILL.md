@@ -122,6 +122,15 @@ the owner that the books are encrypted locally, give the exact books path from
 `bk service uninstall` remove the connection and background service while
 preserving the books. The binary can then be removed from its install directory.
 
+## Recover from a rejected Beankeeper tool call
+
+When a Beankeeper tool rejects a call, read the error and the installed tool's
+schema or command help. Correct the call and retry it in the same conversation.
+If the corrected call still fails, tell the owner which action failed and show
+the error code and message so they can report it. Never tell the owner to do it
+in the Beankeeper app, on a screen, or in a terminal. Never put structured data
+into a description to work around a rejected call.
+
 ## Manage background hosting
 
 Installers normally configure encrypted local books and background hosting.
@@ -282,6 +291,37 @@ tell the owner that you can now record transactions for them and they can say
 “make me read-only” to undo the change. The access change in chat uses the
 local owner’s authority and takes effect in the running managed connection.
 
+## Annotating or tagging an entry
+
+Treat requests to tag, flag or mark a posted entry as requests to set an
+annotation. Give a bare label a key and a string value, such as `status: pending`
+or `flag: review`.
+
+- Call `txn_meta_set` with `company`, exactly one of `id` or `reference`, and
+  `values: {"status":"pending"}` when the installed tool schema supports the map.
+  Use `values: ["status=pending"]` if the schema only accepts an array of
+  strings. The array also remains accepted by tools that support the map.
+- Call `txn_meta_unset` with the same selector and `keys: ["status"]` to remove
+  an annotation. For CLI access, use `bk txn meta set ID status=pending` and
+  `bk txn meta unset ID status` with the same book and agent credential. Use
+  `--reference REF` in place of `ID` to select by reference.
+- Reserved keys are `correlate`, `proposal_id`, `reverses`, `reversed_by`,
+  `applies_to` and `beankeeper_source`. Beankeeper manages those keys through
+  its ledger operations.
+
+### Pending card holds
+
+Until [typed holds](https://github.com/Govcraft/beankeeper/issues/280) are
+available, annotate the hold posting with `status: pending` and add
+`bank_reference` if known. For a new posting, pass these annotations in
+`txn_post`'s `meta` map or with `bk txn post --meta KEY=VALUE` for each
+annotation. When the charge posts, identify the original hold, reverse it
+with `txn_reverse` or `bk txn reverse`, and post the settled entry in the same
+turn. Use a distinct stable reference for each write and reuse it on retry.
+Before posting the settled entry, check that the reversal succeeded and that
+the settled entry is still missing. Tell the owner what changed, including
+any step that failed, and offer the available audit or undo links.
+
 ## Try it with demo books
 
 When the owner asks to try Beankeeper or see sample data, use `demo_start`
@@ -327,9 +367,9 @@ access choice. If setup tools are missing on a Direct connection, explain
 which step is unavailable and offer to check for a newer signed Desktop
 release. Continue with the steps the connection supports.
 
-If a setup or posting tool fails, report the error and retry. Never tell
-the owner to add accounts or enter data in a Beankeeper app screen.
-Screens are optional; the agent is the interface.
+If a setup or posting tool fails,
+[correct the call and retry it in chat](#recover-from-a-rejected-beankeeper-tool-call).
+Screens are optional. The agent is the interface.
 
 ### Set up books, accounts and opening balances
 
