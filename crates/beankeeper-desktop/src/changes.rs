@@ -177,7 +177,9 @@ impl TryFrom<&AuditReceipt> for UndoLink {
 
     fn try_from(receipt: &AuditReceipt) -> Result<Self, Self::Error> {
         match receipt.change().summary() {
-            ReceiptChange::AccountCreated { .. } | ReceiptChange::PostingCreated { .. } => {}
+            ReceiptChange::AccountCreated { .. }
+            | ReceiptChange::PostingCreated { .. }
+            | ReceiptChange::OnboardingApplied => {}
             ReceiptChange::ProposalResolved { .. } if receipt.posting().is_some() => {}
             _ => return Err(NoUndoLink),
         }
@@ -200,6 +202,8 @@ fn description(receipt: &AuditReceipt) -> String {
         ReceiptChange::PostingCreated { after } => format!("Recorded {}", after.description),
         ReceiptChange::PostingReversed => "Reversed a transaction".into(),
         ReceiptChange::PostingCorrelated => "Linked two transactions".into(),
+        ReceiptChange::OnboardingApplied => "Applied a book setup change".into(),
+        ReceiptChange::OnboardingReverted => "Undid a setup change".into(),
         ReceiptChange::ProposalResolved { .. } if receipt.posting().is_some() => {
             "Posted an approved transaction".into()
         }

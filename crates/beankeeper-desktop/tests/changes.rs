@@ -2,7 +2,7 @@
 
 pub mod common;
 
-use std::{path::Path, process::Command};
+use std::{path::Path, process::Command, time::Duration};
 
 use beankeeper::types::AccountType;
 use beankeeper_cli::{
@@ -10,7 +10,7 @@ use beankeeper_cli::{
         self, audit::receipts::ReceiptPageLimit, companies::CompanySlug,
         verification::VerifiedLedger,
     },
-    identity::{Admin, Granted},
+    identity::{self, Admin, Granted, IssueRequest},
 };
 use common::{Ledger, Server, TestResult, rpc, token};
 use serde_json::{Value, json};
@@ -211,12 +211,14 @@ fn receipt_csrf(server: &Server, url: &str) -> TestResult<String> {
     ] {
         assert!(html.contains(expected), "missing {expected}");
     }
-    let csrf = html
-        .split_once("name=\"csrf\" value=\"")
+    Ok(undo_form_token(&html)?.to_owned())
+}
+
+fn undo_form_token(html: &str) -> TestResult<&str> {
+    html.split_once("name=\"csrf\" value=\"")
         .and_then(|(_, rest)| rest.split_once('"'))
-        .ok_or("CSRF field")?
-        .0;
-    Ok(csrf.to_owned())
+        .map(|(csrf, _)| csrf)
+        .ok_or_else(|| "missing Undo form CSRF field".into())
 }
 
 #[test]
@@ -309,6 +311,172 @@ fn paired_owner_applies_one_audited_undo_per_receipt() -> TestResult {
         rows.iter()
             .all(|row| row["change"]["actor"] == "desktop-owner" && row["undo_url"].is_null())
     );
+    VerifiedLedger::read(&db)?;
+    Ok(())
+}
+
+fn issue_direct_bookkeeper(ledger: &Ledger, db: &db::Db) -> TestResult<Value> {
+    Ok(Granted::<Admin>::with_db(db, ledger.owner(), |grant| {
+        identity::issue(
+            grant,
+            &IssueRequest {
+                name: "desktop_bookkeeper",
+                capabilities: &[
+                    "ledger/read".into(),
+                    "ledger/post".into(),
+                    "ledger/propose".into(),
+                ],
+                ttl: Duration::from_secs(3600),
+                public_key: None,
+                generate_key: true,
+            },
+        )
+    })?)
+}
+
+fn set_up_books(receipt: impl Fn(&str, Value) -> TestResult<Value>) -> TestResult<[Value; 5]> {
+    let settings =
+        json!({"purpose":"personal", "base_currency":"USD", "fiscal_year_start":"01-01"});
+    let profile = receipt(
+        "ledger_setup_book_initialize",
+        json!({
+            "target":{"company":"acme", "reference":"initialize"}, "settings":settings
+        }),
+    )?;
+    let book = receipt(
+        "ledger_setup_book_create",
+        json!({
+            "target":{"company":"home", "reference":"create"}, "name":"Home", "settings":settings
+        }),
+    )?;
+    let chart = receipt(
+        "ledger_setup_chart_apply",
+        json!({
+            "target":{"company":"home", "reference":"chart"}, "template":"personal-v1"
+        }),
+    )?;
+    let account = receipt(
+        "ledger_setup_account_add",
+        json!({
+            "target":{"company":"home", "reference":"checking"}, "code":"1234",
+            "name":"Checking", "account_type":"asset"
+        }),
+    )?;
+    let opening = receipt(
+        "ledger_setup_opening_post",
+        json!({
+            "company":"home", "reference":"opening", "date":"2026-01-01", "currency":"USD",
+            "debits":[{"account":"1234", "amount":"100.00"}],
+            "credits":[{"account":"3000", "amount":"100.00"}]
+        }),
+    )?;
+    Ok([profile, book, chart, account, opening])
+}
+
+fn read_setup_receipt(server: &Server, write: &Value) -> TestResult<String> {
+    let path = write["desktop_path"]
+        .as_str()
+        .ok_or_else(|| format!("missing receipt path: {write}"))?;
+    let id = write["receipt_id"].as_i64().ok_or("receipt ID")?;
+    let html = server
+        .client
+        .get(format!("{}{path}", server.base))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(
+        html.contains(&format!("aria-label=\"Undo receipt {id}\"")),
+        "{path}"
+    );
+    Ok(html)
+}
+
+#[test]
+fn direct_bookkeeper_sets_up_books_and_owner_undoes_an_import_in_one_step() -> TestResult {
+    let ledger = Ledger::new()?;
+    ledger.enable_browser_review()?;
+    let db = ledger.db()?;
+    let bookkeeper = issue_direct_bookkeeper(&ledger, &db)?;
+    let bearer = token(&bookkeeper)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(bearer))?;
+    let receipt = |name: &str, arguments| call(&server, bearer, name, &arguments);
+    let status = receipt("setup_status", json!({}))?;
+    assert_eq!(status["agent_access"]["preset"], "bookkeeper");
+    assert_eq!(status["agent_access"]["write_mode"], "direct");
+    let setup = set_up_books(receipt)?;
+    let import = |reference, rows: &str| {
+        json!({
+            "company":"home", "reference":reference, "bank":"1234", "suspense":"5000",
+            "currency":"USD", "format":"csv", "csv":{"reference_col":"reference"},
+            "content":format!("date,description,amount,reference\n{rows}")
+        })
+    };
+    let prior_row = "2026-01-02,First deposit,12,bank-first\n";
+    let prior = receipt(
+        "ledger_setup_statement_import",
+        import("first-import", prior_row),
+    )?;
+    let batch = import(
+        "next-import",
+        &format!(
+            "{prior_row}2026-01-03,Second deposit,3,bank-second\n2026-01-04,Third deposit,7,bank-third\n"
+        ),
+    );
+    let imported = receipt("ledger_setup_statement_import", batch.clone())?;
+    assert_eq!(receipt("ledger_setup_statement_import", batch)?, imported);
+    assert_eq!(imported["created"].as_array().map(Vec::len), Some(2));
+    assert_eq!(imported["preexisting"], prior["created"]);
+
+    let page = receipt("changes_since", json!({"company":"home"}))?;
+    let rows = page["receipts"].as_array().ok_or("missing receipts")?;
+    let import_path = imported["desktop_path"]
+        .as_str()
+        .ok_or("import receipt path")?;
+    let import_id = imported["receipt_id"].as_i64().ok_or("import receipt ID")?;
+    let import_url = format!("{}{import_path}", server.base);
+    assert!(
+        rows.iter()
+            .any(|row| { row["id"] == import_id && row["undo_url"].as_str().is_some() })
+    );
+    assert_eq!(server.client.get(&import_url).send()?.status(), 401);
+    server.pair()?;
+    for write in setup.iter().chain([&prior]) {
+        read_setup_receipt(&server, write)?;
+    }
+
+    let (_, query) = import_path.split_once('?').ok_or("import receipt query")?;
+    let (query, _) = query.split_once('#').ok_or("import receipt anchor")?;
+    let undo_path = format!("/changes/{import_id}/undo?{query}");
+    let html = read_setup_receipt(&server, &imported)?;
+    assert!(html.contains(&format!("action=\"{}\"", undo_path.replace('&', "&amp;"))));
+    let csrf = undo_form_token(&html)?;
+    let undo_url = format!("{}{undo_path}", server.base);
+    for _ in 0..2 {
+        let feedback = server
+            .client
+            .post(&undo_url)
+            .header("Origin", &server.base)
+            .form(&[("csrf", csrf)])
+            .send()?
+            .error_for_status()?
+            .text()?;
+        assert!(feedback.contains("Undid the setup change"));
+    }
+    let reversals = db::audit::list_audit(
+        db.read(),
+        &db::audit::ListAuditParams {
+            company_slug: Some(&"home".parse()?),
+            action: Some(db::audit::AuditAction::Reverse),
+            ..common::audit_query()
+        },
+    )?;
+    assert_eq!(reversals.len(), 2);
+    let created = imported["created"].as_array().ok_or("imported postings")?;
+    for posting in created {
+        let id = posting["transaction_id"].to_string();
+        assert!(reversals.iter().any(|event| event.entity_id == id));
+    }
     VerifiedLedger::read(&db)?;
     Ok(())
 }
