@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.29] - 2026-11-24
+
+- Desktop now uses Beankeeper where the bookkeeper agent can undo its own changes by receipt with `audit_undo` and reverse postings with `txn_reverse` in chat (Govcraft/beankeeper#287); propose-only agents get pending corrections for sign-off.
 - Guide agents to correct their own work in chat with audited undo or reversal, report pending sign-off, and offer Desktop links for viewing.
 
 ## [0.1.0-rc.28] - 2026-11-24
