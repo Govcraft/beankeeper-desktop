@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.27] - 2026-11-24
+
 - Teach agents to tag entries, record and settle pending card holds, and recover from tool errors in chat.
+- Desktop now uses Beankeeper with typed transaction annotations: `txn_meta_set` accepts `{"status":"pending"}`, errors explain how to retry, and annotation edits can be undone.
 
 ## [0.1.0-rc.26] - 2026-11-23
 
