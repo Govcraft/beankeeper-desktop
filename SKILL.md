@@ -7,10 +7,12 @@ description: Work with the user's encrypted local Beankeeper Desktop workspace o
 
 ## Install and set up Beankeeper on this machine
 
-Run the commands below from an authorized shell in the owner's logged-in OS
-session. Choose the setup path for your client first.
+Choose the setup path for your client. For paths that use shell commands,
+run them from an authorized shell in the owner's logged-in OS session.
 
 - **Claude Desktop chat.** Use the verified `.mcpb` extension.
+  With the extension enabled, ask **Set up my books** and use the
+  [book setup tools](#guide-the-owner-through-book-setup) in the same chat.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
 - **Claude Code, local Codex, and Grok Build.** Follow the steps below when
   running on the owner's machine.
@@ -312,29 +314,92 @@ books in an open chat.
 
 ## Guide the owner through book setup
 
-Start with `setup_status` over MCP or `bk --db BOOKS setup status --json`. For a
-managed ledger, use the `books` path from `bk service status --json` as `BOOKS`.
-For a manually enrolled ledger, use its enrolled path. The status gives the
-counts of books, accounts and posted transactions, and whether an owner key
-exists. Use `next_step` as a starting point and `agent_access` to explain what
-the authenticated credential can do. Find the books with `company_list` or
-`bk --db BOOKS company list --json`, then read each book's profile and accounts
-before asking questions the owner may already have answered.
+Use the existing Beankeeper MCP connection and keep setup in chat. Start with
+`setup_status` and `company_list`. Read each relevant book with
+`ledger_setup_book_show` using its `company` slug. Check the accounts and read
+existing postings with `txn_list` for that `company` before asking for facts
+the owner may already have provided.
 
-1. Ask whether the owner keeps personal books, business books, or both. Confirm
-   the reporting currency and the start of the financial year for each book.
-2. Ask for the names of their real accounts and the dates and amounts of any
-   opening balances. Confirm which balances are already recorded.
-3. Ask which statements they want to import and which have already been
-   entered. Transaction currencies and existing postings alone leave those
-   settings and import history unconfirmed.
+Use the listed setup tools on the Direct bookkeeper connection. If access is
+restricted, explain the `agent_access` note and keep any requested
+[access change in chat](#change-managed-access-in-chat). Respect the owner's
+access choice. If setup tools are missing on a Direct connection, explain
+which step is unavailable and offer to check for a newer signed Desktop
+release. Continue with the steps the connection supports.
 
-Summarize what is already recorded, what the owner has confirmed, and what
-still needs an answer or a statement. Run the
-[bookkeeping interview](#ask-how-to-keep-the-books) as soon as the intended
-book exists. Use the setup operations below for outstanding structural work.
-Tax, fee and update preferences can be saved while accounts, opening balances
-or statement imports are pending.
+### Set up books, accounts and opening balances
+
+For the first four tools below, send `target: {company, reference}`. Use a
+distinct stable `reference` for each intended write in a book and omit
+`target.generation`. For an uncertain result, retry with the same reference
+and unchanged inputs. If the tool reports a conflict, explain what needs to
+be resolved before making another request for that step.
+
+1. Ask whether the owner keeps personal books, business books or both, and
+   ask for the reporting currency and first day of the financial year for
+   each. For a new book, call `ledger_setup_book_create` with `target`,
+   `name` and `settings`. For an existing book without a profile, including
+   the default Personal book, use `ledger_setup_book_initialize` with
+   `target` and `settings`. In `settings`, send `purpose` (`personal` or
+   `business`), `base_currency` (for example `USD`) and `fiscal_year_start`
+   (`MM-DD`). Leave an existing profile in place. Corrections to a saved
+   profile use the optional owner-admin setup workflow.
+2. For a new chart, call `ledger_setup_chart_apply` with `target` and the
+   matching `template` (`personal-v1` or `business-v1`). Read the accounts
+   back. For each real account still missing, call `ledger_setup_account_add`
+   with `target`, an unused `code`, `name` and `account_type` (`asset`,
+   `liability`, `equity`, `revenue` or `expense`). Reuse existing accounts
+   that already represent the owner's accounts.
+3. Ask which opening balances still need to be recorded and establish their
+   date, currency and amounts from the owner's records. Call
+   `ledger_setup_opening_post` with top-level `company`, `reference`, `date`
+   (`YYYY-MM-DD`), `currency`, and nonempty `debits` and `credits`. Each line
+   has `account` and a decimal-string `amount` in major units, with optional
+   `memo`. Use the book's account codes and balance both sides, using its
+   opening balance equity account where appropriate. `description` is
+   optional. Report the posted journal and its transaction ID.
+
+Run the [bookkeeping interview](#ask-how-to-keep-the-books) once the intended
+book exists. Save policies and categorization rules as the owner gives them.
+The import uses existing rules and the suspense account for unmatched entries.
+
+### Import a statement
+
+Ask the owner to attach or share their CSV, OFX or QFX statement in chat.
+Establish the book, bank account, currency, date range and any earlier imports
+before writing. Use the book's distinct suspense account for entries without
+a matching rule. Call `ledger_setup_statement_import` with top-level
+`company`, `reference`, `bank`, `suspense`, `currency`, `format` and `content`.
+Send the bank and suspense account codes and the UTF-8 statement contents,
+up to 1 MiB and 5,000 rows. Use `format: "csv"` for CSV or `format: "ofx"`
+for OFX or QFX. For CSV, supply `csv` only for the mapping you need. Its
+fields are `date_col`, `description_col`, `amount_col`, `reference_col`,
+`date_format` and `positive_amount` (`inflow` or `outflow`). Use a new stable
+reference for each import and reuse the unchanged request for retries.
+Report the `created` and `preexisting` counts. Use `txn_show` with `company`
+and the returned transaction `id` to identify postings to suspense that
+still need categorization.
+
+### Report each setup change and offer undo
+
+After each successful setup write, tell the owner in plain words what was
+saved, report its `receipt_id` and offer **Undo** using the returned
+`desktop_path` on the running Desktop origin. Get the origin from the
+`desktop_url` in `changes_since` for that book or use its `undo_url` for the
+exact receipt. Offer the receipt for the whole operation, especially for a chart
+or an import. The owner can select **Undo** once in a paired browser. The
+ledger keeps the original history and records the reversal, archive or
+profile retirement. Import undo reverses only newly created postings and
+keeps identical entries that were already there. If a change cannot be
+undone because of current book activity or a closed period, explain the
+eligibility error. Keep setup and the summary in chat, with Desktop as an
+optional detail and undo link.
+
+An agent with shell access can use the same credential and the equivalent
+`bk setup` commands. Owners who already use a scoped setup session or need a
+saved profile correction can continue using the
+[optional owner-admin workflow](https://github.com/Govcraft/beankeeper/blob/main/docs/beankeeper/references/commands.md#optional-setup-sessions).
+[CLI and MCP setup reference](https://github.com/Govcraft/beankeeper/blob/main/docs/beankeeper/references/commands.md#direct-onboarding)
 
 ### Ask how to keep the books
 
@@ -441,75 +506,6 @@ cadence when the client can deliver later updates. When it cannot, tell the
 owner what you can deliver in chat and offer a summary on request. Use the
 structured transaction data when a chart helps and offer the matching Desktop
 transaction link when available.
-
-### Advanced manual book setup
-
-Use these operations when an already configured owner session supports the
-structural setup step. On a local shell, `bk setup --help` lists the available
-setup commands. If the owner session is unavailable, explain which structural
-step is pending and continue the interview for books and accounts that exist.
-
-The existing `ledger_setup_begin` / `bk setup begin` operation requires the
-owner's live `ledger/admin` access. Use the scoped setup connection for the
-session and the regular bookkeeper connection for interview writes. Keep
-credentials out of chat and logs.
-
-Use `ledger_setup_book_show` to confirm the current profile and accounts for
-each existing book. Use `ledger_setup_book_initialize` to save the first
-profile for an existing book, including the default Personal book. Use
-`ledger_setup_book_create` for each new book the owner wants. Supply its
-purpose, base currency and the first day of its financial year as `MM-DD`.
-If a saved profile needs a correction, use `ledger_setup_book_update` with
-the current profile revision.
-
-For a new chart, confirm the matching template (`personal-v1` or
-`business-v1`) and apply it with `ledger_setup_chart_apply`. For a book that
-already has accounts, review those accounts before proposing any additions.
-Use `ledger_setup_account_add` for each confirmed real account with its own
-available account code. Read the book again to confirm the changes.
-
-Before previewing opening balances, confirm which amounts are still missing,
-the opening date, and the currency. Call `ledger_setup_opening_preview` with
-the book, active setup generation, and balanced debit and credit lines using
-the confirmed account codes. Send amounts as decimal strings in the currency's
-major units. Show the owner the preview's date, account names and amounts. A
-preview leaves the ledger unchanged.
-
-After the owner confirms the preview, reserve it with
-`ledger_setup_opening_reserve`. Send the unchanged preview inputs under
-`opening`, the returned `fingerprint`, and a stable `reference`. Share the
-pending proposal for review by the owner with approval authority, then check
-whether it posted. If the inputs change, preview them again and confirm the
-changes with the owner before reserving.
-
-Before importing a statement, confirm the book, bank account, currency,
-statement dates, and which transactions the owner has already recorded.
-Look up known statement batches with `ledger_setup_statement_receipt`. Ask
-the owner to confirm the source of any earlier activity you cannot account for.
-Confirm the suspense account for entries that still need categorization.
-Call `ledger_setup_statement_preview` with the active setup generation, the
-account codes, and a stable reference. Use `csv` for CSV and `ofx` for OFX or
-QFX. Supply the UTF-8 statement to the local tool and describe its preview in
-plain words so the owner can review the proposed entries.
-
-After review, have the owner use a separate live approval credential to call
-`ledger_setup_statement_commit` with the book, `batch_id`, and
-`preview_sha256` returned by the preview. Retry with the same ID and digest
-if the result is uncertain. Call `ledger_setup_statement_receipt` to confirm
-which transactions were created and which already existed. Give the owner
-those counts and identify any entries still awaiting categorization.
-
-For writes that take a setup target, send the company, setup generation and a
-stable request reference. Reuse the same reference and inputs when retrying.
-Stop and explain what needs to be resolved if a tool reports a conflict.
-
-After summarizing the outcome, have the owner finish the session or revoke it
-if they want to cancel access. Both actions deactivate the setup grant. Use
-normal ledger reversals to correct posted entries. For an unused account or an
-empty book created by mistake, the owner can use the audited admin controls.
-See the
-[ledger setup commands](https://github.com/Govcraft/beankeeper/blob/main/docs/beankeeper/references/commands.md#setup-sessions)
-for the CLI flags and MCP arguments.
 
 ## Offer Desktop views
 

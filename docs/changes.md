@@ -31,9 +31,12 @@ Open the optional `desktop_url` to see the full page, or follow an `undo_url`
 to the individual receipt. A link does not apply an undo. In a paired browser,
 select **Undo** on an eligible receipt. Desktop applies the undo using its
 private owner credential and shows the result. It reverses posted transactions
-and archives opened accounts, retaining the original history. Upstream checks
-whether the change can still be undone, for example when a posting period is
-locked. Repeating a completed undo returns its earlier result.
+and archives opened accounts, retaining the original history. Setup writes
+also return an individual receipt link. Use that receipt to undo a whole chart
+or import in one step. Undoing an import keeps the postings it matched that
+were already in your books. Upstream checks whether the change can still be
+undone, for example when a posting period is locked. Repeating a completed undo
+returns its earlier result.
 
 The CLI includes links when it finds a running Desktop instance for the
 selected books. The receipts and summary are also available while Desktop is

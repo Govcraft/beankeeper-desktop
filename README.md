@@ -47,9 +47,11 @@ Ask in chat any time to see or change those instructions.
 ## Claude Desktop extension
 
 Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
-then ask Claude to set up your books. The extension connects over stdio and
-starts local hosting on first use. If Claude says it can only read your books,
-say **Let my agent post** in chat when you want it to record transactions.
+then say **Set up my books** in Claude. On the existing Direct bookkeeper
+connection, Claude can create books and accounts, post opening balances and
+import a statement you share in chat. It reports each change and gives you an
+optional **Undo** link. If Claude reports read-only access and you want it to
+make changes, say **Let my agent post** in chat.
 Claude Desktop only needs the extension. If you also use Claude Code, Desktop
 may show its Beankeeper connections under **Local dev**.
 [Claude Desktop setup and removal](docs/claude-desktop.md)

@@ -13,8 +13,10 @@
    The published 0.1.0-rc.11 bundle requires glibc 2.39.
    [Claude Desktop extension installation](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
 3. Enable the extension in a Claude Desktop chat and ask **Set up my books**.
-   Beankeeper answers in the chat. Open a Desktop link when you want to see
-   the detail behind an answer.
+   Claude can set up your books and accounts, post opening balances and import
+   a CSV, OFX or QFX statement you share in chat. It uses the existing Direct
+   bookkeeper connection and offers an optional **Undo** link after each
+   change. [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
 
 In Claude Desktop, you only need the **Beankeeper** extension. If Desktop also
 shows `beankeeper` or `beankeeper-service` under **Local dev**, those are Claude

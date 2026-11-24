@@ -1,7 +1,12 @@
 # Desktop setup
 
-Ask your connected agent to **Set up my books**. If it reports read-only
-access and you want it to record transactions, say **Let my agent post**.
+Ask your connected agent to **Set up my books**. A Direct bookkeeper can
+create books and accounts, apply a chart, record opening balances and import
+the statements you share, all in the same chat. After each change it tells
+you what it recorded and offers an optional **Undo** link.
+[Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
+
+If it reports read-only access and you want it to make changes, say **Let my agent post**.
 For managed books, the agent uses `access_set` to change access. Say **Make me
 read-only** to keep posting off. Restarting cannot grant posting access.
 [Background hosting and managed access](service.md#choose-a-write-mode)
