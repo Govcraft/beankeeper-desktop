@@ -15,8 +15,8 @@
 3. Enable the extension in a Claude Desktop chat and ask **Set up my books**.
    Claude can set up your books and accounts, post opening balances and import
    a CSV, OFX or QFX statement you share in chat. It uses the existing Direct
-   bookkeeper connection and offers an optional **Undo** link after each
-   change. [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
+   bookkeeper connection, reports each change, and can undo supported changes
+   when you ask in chat. [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
 
 In Claude Desktop, you only need the **Beankeeper** extension. If Desktop also
 shows `beankeeper` or `beankeeper-service` under **Local dev**, those are Claude

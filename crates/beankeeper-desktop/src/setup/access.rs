@@ -21,6 +21,16 @@ static READ_ONLY_NOTE: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+const AGENT_UNDO_GUIDANCE: &str = "Correct your own work in chat with audit_undo by receipt ID or txn_reverse by transaction ID when the tool is listed. Never make offsetting entries by hand. Offer Desktop links only for viewing and handle undo, tagging, renaming, and data entry in chat.";
+const PROPOSE_ONLY_NOTE: &str = "This agent submits transactions for sign-off. Undo and reversal also return pending proposals for an authorized approver.";
+static DIRECT_NOTE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "This agent records transactions directly. Use changes_since when available to tell the owner what changed. {AGENT_UNDO_GUIDANCE}"
+    )
+});
+static PROPOSE_NOTE: LazyLock<String> =
+    LazyLock::new(|| format!("{PROPOSE_ONLY_NOTE} {AGENT_UNDO_GUIDANCE}"));
+
 /// Least-privilege grants for the owner's MCP client.
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, ValueEnum, JsonSchema,
@@ -205,12 +215,8 @@ impl AgentAccess {
         }
         match (self.preset, self.write_mode) {
             (Some(Preset::ReadOnly), _) => &READ_ONLY_NOTE,
-            (Some(Preset::Bookkeeper), WriteMode::Direct) => {
-                "This agent records transactions directly. Use changes_since when available to tell the owner what changed and offer receipt links for undo."
-            }
-            (Some(Preset::Bookkeeper), WriteMode::ProposeOnly) => {
-                "This agent submits transactions for sign-off. A separate credential with approval access can post them."
-            }
+            (Some(Preset::Bookkeeper), WriteMode::Direct) => &DIRECT_NOTE,
+            (Some(Preset::Bookkeeper), WriteMode::ProposeOnly) => &PROPOSE_NOTE,
             (None, _) => {
                 "This credential has a custom grant. Its signed permissions determine which actions it can take."
             }
@@ -235,14 +241,19 @@ impl AgentAccess {
                  a transaction. Follow the owner's inform preference after recording changes. By \
                  default, report them in the same conversation after the work is complete. Also \
                  report when asked what changed. When listed, use changes_since on the ledger \
-                 connection to explain the changes in plain words and offer the returned Desktop \
-                 and undo links. The paired owner can select Undo to apply it immediately. After \
-                 delivering each page, pass its company and through to changes_mark_seen if \
-                 listed. If changes_since is unavailable after a post, tell the owner what was \
-                 recorded and give the book, transaction ID, and audited undo path: \
-                 txn_reverse with company and id on an owner-controlled \
-                 connection with ledger/reverse. With write_mode propose-only, report the proposal \
-                 ID as pending for an authorized approver. If preset is null, the grant is custom. \
+                 connection to explain the changes in plain words, offer undo in chat, and offer \
+                 receipt links for viewing. After delivering each page, pass its company and \
+                 through to changes_mark_seen if listed. If changes_since is unavailable after a \
+                 post, tell the owner what was recorded and give the book and transaction ID. \
+                 With preset bookkeeper, \
+                 follow this correction guidance. {AGENT_UNDO_GUIDANCE} If a typed rule blocks \
+                 a correction, explain it in plain words and take the next authorized step named \
+                 by the error. If neither tool is available, explain that in chat and check for \
+                 the CLI equivalent or a newer signed release. If an earlier hand-made offset \
+                 and its original should both be undone, explain the pair and undo each by receipt \
+                 only when the owner asks you to undo both in chat. \
+                 With write_mode propose-only, report the proposal ID as pending. \
+                 {PROPOSE_ONLY_NOTE} If preset is null, the grant is custom. \
                  Use the listed tools within its signed write mode. If agent_access itself is null, \
                  use the status and its error code to explain why access is unverified. Never ask \
                  for, read, or share owner and approval credentials, recovery material, or \
@@ -315,6 +326,19 @@ mod tests {
     }
 
     #[test]
+    fn mcp_instructions_keep_blocked_corrections_and_legacy_cleanup_in_chat() {
+        let instructions = AgentAccess::mcp_instructions();
+        for guidance in [
+            "Never make offsetting entries by hand",
+            "Offer Desktop links only for viewing",
+            "take the next authorized step named by the error",
+            "undo each by receipt only when the owner asks you to undo both in chat",
+        ] {
+            assert!(instructions.contains(guidance), "{guidance}");
+        }
+    }
+
+    #[test]
     fn mcp_instructions_cover_each_serialized_access_state() -> serde_json::Result<()> {
         let instructions = AgentAccess::mcp_instructions();
         for (preset, write_mode, action) in [
@@ -326,12 +350,12 @@ mod tests {
             (
                 Some(Preset::Bookkeeper),
                 WriteMode::Direct,
-                "txn_reverse with company and id",
+                "audit_undo by receipt ID or txn_reverse by transaction ID",
             ),
             (
                 Some(Preset::Bookkeeper),
                 WriteMode::ProposeOnly,
-                "report the proposal ID as pending",
+                "Undo and reversal also return pending proposals",
             ),
             (None, WriteMode::Direct, "the grant is custom"),
             (None, WriteMode::ProposeOnly, "within its signed write mode"),

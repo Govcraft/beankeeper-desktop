@@ -142,9 +142,9 @@ you what changed. Beankeeper respects your choice to stay read-only.
 
 With direct posting, your agent records each transaction under its own
 identity and tells you what it recorded, with the company and transaction ID.
-To undo it, ask for an audited reversal. An owner-controlled connection with
-`ledger/reverse` uses `txn_reverse` to add the linked reversal.
-You can also ask for propose-only access if you want to review proposed entries.
+To undo it, ask your agent in chat. It uses `audit_undo` with the receipt ID or
+`txn_reverse` with the transaction ID to record an audited correction.
+In propose-only mode, both operations return pending proposals for sign-off.
 
 On startup or managed setup resume, Desktop moves the original legacy
 read-only default to bookkeeper with direct posting. It preserves recorded
@@ -163,8 +163,9 @@ Access applies across companies in the selected ledger.
 | Switch to propose-only. | `{"preset":"bookkeeper","write_mode":"propose-only"}` | `bk service access-set --preset bookkeeper --write-mode propose-only` |
 | Make me read-only. | `{"preset":"read-only"}` | `bk service access-set --preset read-only` |
 
-Add `--json` for structured CLI status. For an audited reversal from an
-authorized owner session, use `bk --db BOOKS --company COMPANY txn reverse ID`.
+Add `--json` for structured CLI status. With the same agent credential, use
+`bk --db BOOKS --company COMPANY audit undo RECEIPT` or
+`bk --db BOOKS --company COMPANY txn reverse ID`.
 
 ## Platform behavior and files
 

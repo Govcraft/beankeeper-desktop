@@ -107,7 +107,7 @@ impl ServiceOperation {
             },
             Self::AccessSet(_) => Exposure::Mcp {
                 name: ACCESS_TOOL,
-                description: "Change the managed agent’s access at the owner’s request. Use read-only to undo posting access, or bookkeeper with direct or propose-only writes. Tell the owner the resulting access in plain words. No secrets are returned.",
+                description: "Change managed agent access at the owner's request. Use read-only to turn off posting, or bookkeeper with direct or propose-only writes. Tell the owner the resulting access in plain words. On the ledger connection, correct your own work in chat with audit_undo by receipt ID or txn_reverse by transaction ID when listed. In propose-only mode both return pending proposals for sign-off. Never make offsetting entries by hand or send the owner to a screen to undo, tag, rename, or enter data. Desktop links are for viewing only.",
             },
             Self::InstallExtension => Exposure::CliOnly(CliOnlyReason::BundleFirstLaunch),
         }
