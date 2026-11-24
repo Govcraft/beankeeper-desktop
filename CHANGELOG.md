@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.25] - 2026-11-23
+
 - Set up books and accounts, post opening balances, and import statements in the existing agent chat, with an audited Undo link after each change.
 
 ## [0.1.0-rc.24] - 2026-11-23
