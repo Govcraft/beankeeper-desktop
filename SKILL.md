@@ -311,16 +311,28 @@ or `flag: review`.
 
 ### Pending card holds
 
-Until [typed holds](https://github.com/Govcraft/beankeeper/issues/280) are
-available, annotate the hold posting with `status: pending` and add
-`bank_reference` if known. For a new posting, pass these annotations in
-`txn_post`'s `meta` map or with `bk txn post --meta KEY=VALUE` for each
-annotation. When the charge posts, identify the original hold, reverse it
-with `txn_reverse` or `bk txn reverse`, and post the settled entry in the same
-turn. Use a distinct stable reference for each write and reuse it on retry.
-Before posting the settled entry, check that the reversal succeeded and that
-the settled entry is still missing. Tell the owner what changed, including
-any step that failed, and offer the available audit or undo links.
+Record a card authorization with `txn_post` and `status: "pending"` (or
+`bk txn post --status pending`). Use one debit and one credit on different
+accounts and a stable authorization reference. Pending holds count toward the
+available balance, not the posted balance.
+
+When the charge posts, settle the hold instead of posting a second entry.
+Call `txn_settle_hold` with `company`, `hold: {"id":42}` or
+`hold: {"reference":"hold-1"}`, the actual decimal `amount`, the posted
+`date`, and the bank's posted `reference`. In the CLI, use
+`bk txn settle-hold --id 42 --amount 43.88 --date 2026-03-04 --reference posted-1`.
+Reuse the same values on retry.
+
+A CSV or OFX/QFX import can settle an open hold when the statement line
+uniquely matches its bank account, currency, direction, payee, and amount
+within seven days. If the import finds multiple candidates and you can
+identify the intended hold, call `txn_settle_hold` using the posted reference
+from the import error. Tell the owner the actual charge and any difference
+from the authorization. For undo, offer to reverse the settled transaction or
+undo its receipt, which restores the hold. Never record a hold as an ordinary
+posted entry and later reverse and repost it by hand. Do not put "PENDING"
+only in the description, and do not send the owner to a Beankeeper app screen
+to tag or settle a hold.
 
 ## Try it with demo books
 
@@ -393,7 +405,15 @@ be resolved before making another request for that step.
    back. For each real account still missing, call `ledger_setup_account_add`
    with `target`, an unused `code`, `name` and `account_type` (`asset`,
    `liability`, `equity`, `revenue` or `expense`). Reuse existing accounts
-   that already represent the owner's accounts.
+   that already represent the owner's accounts. Rename accounts with the
+   rename tool, never create-and-transfer. If the owner wants a different
+   label on an existing account, call `account_rename` with `company`, the
+   current `code`, and the new `name` (for example
+   `{"company":"acme","code":"1000","name":"Operating Cash"}`), or
+   `bk --company acme account rename 1000 "Operating Cash"`. A rename changes
+   only the display name; the code, history, and balances stay the same. Tell
+   the owner the new label and share the undo receipt. With a propose-only
+   grant, report the proposal for sign-off.
 3. Ask which opening balances still need to be recorded and establish their
    date, currency and amounts from the owner's records. Call
    `ledger_setup_opening_post` with top-level `company`, `reference`, `date`

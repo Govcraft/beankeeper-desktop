@@ -178,6 +178,7 @@ impl TryFrom<&AuditReceipt> for UndoLink {
     fn try_from(receipt: &AuditReceipt) -> Result<Self, Self::Error> {
         match receipt.change().summary() {
             ReceiptChange::AccountCreated { .. }
+            | ReceiptChange::AccountRenamed { .. }
             | ReceiptChange::PostingCreated { .. }
             | ReceiptChange::OnboardingApplied => {}
             ReceiptChange::ProposalResolved { .. } if receipt.posting().is_some() => {}
@@ -197,6 +198,9 @@ fn description(receipt: &AuditReceipt) -> String {
     let change = receipt.change();
     match change.summary() {
         ReceiptChange::AccountCreated { after } => format!("Opened the {} account", after.name),
+        ReceiptChange::AccountRenamed { before, after } => {
+            format!("Renamed {} to {}", before.as_str(), after.as_str())
+        }
         ReceiptChange::AccountDeleted { before } => format!("Removed the {} account", before.name),
         ReceiptChange::AccountArchived => "Archived an account".into(),
         ReceiptChange::PostingCreated { after } => format!("Recorded {}", after.description),
