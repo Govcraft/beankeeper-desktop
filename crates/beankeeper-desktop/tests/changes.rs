@@ -461,7 +461,7 @@ fn direct_bookkeeper_sets_up_books_and_owner_undoes_an_import_in_one_step() -> T
             .send()?
             .error_for_status()?
             .text()?;
-        assert!(feedback.contains("Undid the setup change"));
+        assert!(feedback.contains("Undid that change"));
     }
     let reversals = db::audit::list_audit(
         db.read(),
