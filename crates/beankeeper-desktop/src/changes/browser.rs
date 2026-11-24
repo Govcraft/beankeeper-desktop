@@ -17,7 +17,7 @@ use beankeeper_cli::{
         Actor, Db,
         audit::receipts::{
             AuditCursor, AuditReceipt, PostingSnapshot, ReceiptChange, ReceiptEvent, ReceiptId,
-            UndoOutcome, undo_receipt,
+            ReceiptUndoOutcome, UndoOutcome, undo_change,
         },
         companies::{CompanySlug, list_companies},
     },
@@ -160,7 +160,7 @@ impl Books {
         _write: &HumanWrite,
         company: &CompanySlug,
         receipt: ReceiptId,
-    ) -> Result<UndoOutcome, CliError> {
+    ) -> Result<ReceiptUndoOutcome, CliError> {
         let owner = PrivateFile::open(&self.owner_file)
             .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
             .map_err(|_| {
@@ -172,7 +172,7 @@ impl Books {
         )?)?;
         let actor = Actor::try_from(owner)?;
         Granted::<OwnerUndo>::with_db(&self.db, &actor, |grant| {
-            undo_receipt(grant, company, receipt)
+            undo_change(grant, company, receipt)
         })
     }
 }
@@ -196,14 +196,18 @@ async fn run(
     }
 }
 
-fn undo_response(outcome: Result<UndoOutcome, CliError>, return_to: &str) -> Response {
+fn undo_response(outcome: Result<ReceiptUndoOutcome, CliError>, return_to: &str) -> Response {
     let message = match outcome {
-        Ok(UndoOutcome::Reversed { reversal, .. }) => format!(
+        Ok(ReceiptUndoOutcome::Single(UndoOutcome::Reversed { reversal, .. })) => format!(
             "Recorded reversal transaction {reversal}. The original is still in your books."
         ),
-        Ok(UndoOutcome::Archived { account, .. }) => {
+        Ok(ReceiptUndoOutcome::Single(UndoOutcome::Archived { account, .. })) => {
             format!("Archived account {account}. Its history is still in your books.")
         }
+        Ok(outcome @ ReceiptUndoOutcome::Onboarding(_)) => format!(
+            "Undid the setup change. Receipt {} records the undo and preserves the original history.",
+            outcome.receipt()
+        ),
         Err(error) => return error_response(&error, return_to),
     };
     ui::page("Change undone", "", PATH, &feedback(&message, return_to)).into_response()
