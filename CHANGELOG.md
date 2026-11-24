@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.28] - 2026-11-24
+
+- Teach agents to rename accounts with the rename tool, never create-and-transfer, and to settle typed card holds with `txn_settle_hold`.
+- Desktop now uses Beankeeper with audited account renames: `account_rename` changes only the display name and returns a one-step undo receipt. Imports can settle a matching pending hold, and the Changes page names a restored account label.
+
 ## [0.1.0-rc.27] - 2026-11-24
 
 - Teach agents to tag entries, record and settle pending card holds, and recover from tool errors in chat.

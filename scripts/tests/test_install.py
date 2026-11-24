@@ -412,8 +412,14 @@ else:
                     "Reserved keys are `correlate`, `proposal_id`, `reverses`, `reversed_by`,",
                     "`applies_to` and `beankeeper_source`.",
                     "### Pending card holds",
-                    "`bank_reference` if known.",
-                    "with `txn_reverse` or `bk txn reverse`, and post the settled entry in the same",
+                    '`status: "pending"`',
+                    "`txn_settle_hold`",
+                    "`bk txn settle-hold --id 42 --amount 43.88 --date 2026-03-04 --reference posted-1`",
+                    "settle the hold instead of posting a second entry.",
+                    "which restores the hold.",
+                    "Rename accounts with the",
+                    "rename tool, never create-and-transfer.",
+                    "`account_rename` with `company`, the",
                 ):
                     self.assertIn(instruction, guide)
 

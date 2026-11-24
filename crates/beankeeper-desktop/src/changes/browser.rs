@@ -209,6 +209,11 @@ fn undo_response(outcome: Result<ReceiptUndoOutcome, CliError>, return_to: &str)
         Ok(ReceiptUndoOutcome::Single(UndoOutcome::Archived { account, .. })) => {
             format!("Archived account {account}. Its history is still in your books.")
         }
+        Ok(ReceiptUndoOutcome::Single(UndoOutcome::AccountNameRestored {
+            account, name, ..
+        })) => {
+            format!("Restored the name of account {account} to {name}.")
+        }
         // Onboarding and any future undo kinds share the receipt-backed message.
         Ok(outcome) => format!(
             "Undid that change. Receipt {} records the undo and preserves the original history.",
@@ -352,6 +357,14 @@ fn render_event(html: &mut Markup, event: &ReceiptEvent) {
                 "<p>Before: No account. After: {} ({})</p>",
                 after.name,
                 after.account_type
+            );
+        }
+        ReceiptChange::AccountRenamed { before, after } => {
+            write_markup!(
+                html,
+                "<p>Before: {}. After: {}.</p>",
+                before.as_str(),
+                after.as_str()
             );
         }
         ReceiptChange::AccountDeleted { before } => {
