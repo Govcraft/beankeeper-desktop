@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- If a setup or posting tool fails, the agent reports the error and retries; it never asks the owner to add accounts or enter data in a Beankeeper app screen. Desktop now uses Beankeeper with inlined MCP schemas and propose-only setup.
+
 ## [0.1.0-rc.25] - 2026-11-23
 
 - Set up books and accounts, post opening balances, and import statements in the existing agent chat, with an audited Undo link after each change.

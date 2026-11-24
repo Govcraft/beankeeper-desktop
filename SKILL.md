@@ -327,6 +327,10 @@ access choice. If setup tools are missing on a Direct connection, explain
 which step is unavailable and offer to check for a newer signed Desktop
 release. Continue with the steps the connection supports.
 
+If a setup or posting tool fails, report the error and retry. Never tell
+the owner to add accounts or enter data in a Beankeeper app screen.
+Screens are optional; the agent is the interface.
+
 ### Set up books, accounts and opening balances
 
 For the first four tools below, send `target: {company, reference}`. Use a
