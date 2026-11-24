@@ -201,11 +201,17 @@ fn undo_response(outcome: Result<ReceiptUndoOutcome, CliError>, return_to: &str)
         Ok(ReceiptUndoOutcome::Single(UndoOutcome::Reversed { reversal, .. })) => format!(
             "Recorded reversal transaction {reversal}. The original is still in your books."
         ),
+        Ok(ReceiptUndoOutcome::Single(UndoOutcome::AnnotationsRestored {
+            transaction, ..
+        })) => {
+            format!("Restored the earlier annotations on transaction {transaction}.")
+        }
         Ok(ReceiptUndoOutcome::Single(UndoOutcome::Archived { account, .. })) => {
             format!("Archived account {account}. Its history is still in your books.")
         }
-        Ok(outcome @ ReceiptUndoOutcome::Onboarding(_)) => format!(
-            "Undid the setup change. Receipt {} records the undo and preserves the original history.",
+        // Onboarding and any future undo kinds share the receipt-backed message.
+        Ok(outcome) => format!(
+            "Undid that change. Receipt {} records the undo and preserves the original history.",
             outcome.receipt()
         ),
         Err(error) => return error_response(&error, return_to),
