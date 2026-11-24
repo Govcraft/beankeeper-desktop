@@ -513,13 +513,7 @@ fn assert_managed_link(tools: &Value, link: &Value, navigation: &Value, base: &s
         .ok_or("managed ledger connection omitted ui_get_link")?;
     assert_eq!(advertised["annotations"]["readOnlyHint"], true);
     assert!(tools.iter().any(|tool| tool["name"] == "txn_post"));
-    for name in [
-        "ui_show_view",
-        "ui_highlight",
-        "ui_status",
-        "txn_approve",
-        "txn_reverse",
-    ] {
+    for name in ["ui_show_view", "ui_highlight", "ui_status", "txn_approve"] {
         assert!(!tools.iter().any(|tool| tool["name"] == name));
     }
 
@@ -579,6 +573,9 @@ fn assert_managed_write_modes(
     lifecycle.args(["service", "mcp"]);
     let saved_owner_file = books.with_extension("owner-token.offline");
     fs::rename(&owner_file, &saved_owner_file)?;
+    let direct_note = direct_access["note"].as_str().ok_or("direct access note")?;
+    assert!(direct_note.contains("audit_undo by receipt ID or txn_reverse by transaction ID"));
+    assert!(direct_note.contains("Desktop links only for viewing"));
     assert_eq!(
         stdio_tool(lifecycle, "service_status", &json!({}))?["agent_access"],
         *direct_access
@@ -610,12 +607,9 @@ fn assert_managed_write_modes(
     let access = &status["agent_access"];
     assert_eq!(access["preset"], "bookkeeper");
     assert_eq!(access["write_mode"], "propose-only");
-    assert!(
-        access["note"]
-            .as_str()
-            .ok_or("write mode note")?
-            .contains("sign-off")
-    );
+    let proposal_note = access["note"].as_str().ok_or("propose-only access note")?;
+    assert!(proposal_note.contains("audit_undo by receipt ID or txn_reverse by transaction ID"));
+    assert!(proposal_note.contains("Undo and reversal also return pending proposals"));
     assert_eq!(
         stdio_tool(bridge(), "setup_status", &json!({}))?["agent_access"],
         *access
@@ -1164,7 +1158,16 @@ fn assert_managed_access_pipe(fixture: &LegacyService) -> TestResult {
             .ok_or_else(|| "missing MCP tool list".into())
     };
     assert_eq!(result(1)?["capabilities"]["tools"]["listChanged"], true);
-    assert!(tools(2)?.iter().any(|tool| tool["name"] == "access_set"));
+    let access_description = tools(2)?
+        .iter()
+        .find(|tool| tool["name"] == "access_set")
+        .and_then(|tool| tool["description"].as_str())
+        .ok_or("missing managed access tool description")?;
+    assert!(
+        access_description.contains("audit_undo by receipt ID or txn_reverse by transaction ID")
+    );
+    assert!(access_description.contains("pending proposals for sign-off"));
+    assert!(access_description.contains("Never make offsetting entries by hand"));
     assert!(tools(2)?.iter().any(|tool| tool["name"] == "txn_post"));
     assert_eq!(result(3)?["structuredContent"]["code"], "SERVICE_ARGUMENTS");
     assert_eq!(
@@ -1366,7 +1369,8 @@ fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
     let posted = demo_payload(&post["result"])?;
     assert_eq!(posted["created"], true);
     let undo = json!({"company":"personal", "id":posted["id"], "reference":"demo-undo"});
-    let denied = demo_http(&host, token, target, "txn_reverse", &undo)?;
+    let approval = json!({"company":"personal", "id":"proposal_00000000000000000000000000"});
+    let denied = demo_http(&host, token, target, "txn_approve", &approval)?;
     assert_eq!(denied["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
     assert_eq!(demo_payload(&denied["result"])?["code"], "FORBIDDEN");
     let owner = fixture.secret("owner-token")?;

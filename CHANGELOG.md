@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Guide agents to correct their own work in chat with audited undo or reversal, report pending sign-off, and offer Desktop links for viewing.
+
 ## [0.1.0-rc.28] - 2026-11-24
 
 - Teach agents to rename accounts with the rename tool, never create-and-transfer, and to settle typed card holds with `txn_settle_hold`.

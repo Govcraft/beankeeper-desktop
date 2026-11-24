@@ -3,7 +3,7 @@
 Ask your connected agent to **Set up my books**. A Direct bookkeeper can
 create books and accounts, apply a chart, record opening balances and import
 the statements you share, all in the same chat. After each change it tells
-you what it recorded and offers an optional **Undo** link.
+you what it recorded. Ask in the same chat to undo a supported change.
 [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
 
 If it reports read-only access and you want it to make changes, say **Let my agent post**.
@@ -81,10 +81,10 @@ migration. An explicit `--preset` on managed resume records the owner’s choice
 The owner can also change managed access [in chat](service.md#choose-a-write-mode).
 Tokens expire after one year.
 
-Setup enables upstream capability enforcement. Only the separate owner
-credential includes approval, reversal and administration grants. Keep it
-private. MCP clients reference the agent credential. For `ui/navigate`, issue a
-separate UI credential as described below.
+Setup enables upstream capability enforcement. Keep the separate owner
+credential for approval and administration private. The MCP client uses its
+bookkeeper credential for supported corrections to its own work. For
+`ui/navigate`, issue a separate UI credential as described below.
 
 ## Native keychain and recovery
 

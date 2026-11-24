@@ -215,7 +215,7 @@ Standalone `bk setup` defaults to read-only. Its optional
 spend limits. See the [standalone setup options](docs/setup.md#options).
 Never ask for, read, print, copy or attach the recovery kit, passphrase store or
 owner-token file. The owner controls recovery, credential changes and reversal
-authority.
+authority for owner-only changes.
 
 Manual setup configs invoke `bk mcp bridge` with an explicit endpoint and a
 private agent-token file path. This bridge connects to the running `bk serve`.
@@ -241,10 +241,8 @@ Also report when asked what changed.
    `bk --db BOOKS --company COMPANY --json audit since`. Use `receipts`
    for dates, attribution, before and after values, and source references.
    Explain what changed in plain words and flag any categorization guesses.
-2. Offer each returned `undo_url` beside its change and `desktop_url` for the
-   whole page. The receipt link opens that change. The paired owner can
-   select **Undo** to apply it immediately. Read-only views and replies in
-   chat remain available without an undo link.
+2. Offer to undo supported changes in chat. Offer a returned receipt link
+   (`undo_url`) or page link (`desktop_url`) only for optional viewing.
 3. After delivering the page, call `changes_mark_seen` with its exact
    `company` and `through`. With CLI access, run
    `bk --db BOOKS --company COMPANY --json audit mark-seen --through CURSOR`.
@@ -255,13 +253,34 @@ If the receipt tools are unavailable after a post, tell the owner what was
 recorded and give them the book and transaction ID. Offer the optional
 transaction detail link through `ui_get_link`.
 
-If upstream receipt undo is available on the owner's connection, give them the
-receipt ID and book. If the owner asks to undo a posting, use `txn_reverse`
-with `company` and `id` from an owner-controlled connection with
-`ledger/reverse`. An agent with the same authority and a local shell can use
-`bk --db BOOKS --company COMPANY txn reverse ID`. The ledger keeps the original
-and records the reversal as a new entry. If reversal access is unavailable,
-explain that and give the owner the company and transaction ID.
+### Correct your work in chat
+
+Use your existing bookkeeper connection to correct your own work. Use
+`audit_undo` with `company` and `receipt` for the exact receipt ID. For a
+posting identified by its transaction ID, use `txn_reverse` with `company`
+and `id`. With a local shell and the same agent credential, use
+`bk --db BOOKS --company COMPANY audit undo RECEIPT` or
+`bk --db BOOKS --company COMPANY txn reverse ID`. These operations keep
+the original history and add an audited correction. Never make offsetting
+entries by hand or send the owner to the Changes page or another app screen
+to undo, tag, rename, or enter data. Offer Desktop links only for viewing.
+
+In propose-only mode, undo and reversal return pending proposals for
+sign-off. Report the proposal ID and its pending status. In direct mode,
+report the audited correction after it succeeds.
+
+If a typed rule blocks the correction, explain the rule in plain words, such
+as a closed period, a reconciled transaction, or an owner-only receipt. Take
+the next authorized step named in the error. If that step needs authority
+you lack, explain what is needed in chat. When an undo tool is missing,
+check for its CLI equivalent with the same agent credential. If neither
+path is available, explain which correction is unavailable and offer to
+check for a newer signed release.
+
+If an earlier hand-made offset and its original would be clearer undone,
+identify both receipts and explain the proposed cleanup. Use `audit_undo`
+on each receipt only when the owner asks you in chat to undo both. Report
+each result, including if one is pending or blocked.
 
 ### Change managed access in chat
 
@@ -280,7 +299,7 @@ An agent with a local shell can use
 `bk service access-set --preset PRESET [--write-mode MODE] --json`.
 Keep the access change in chat. Keep terminal commands and credential files
 out of the owner's steps. Use the returned access to tell the owner what
-changed. For a proposal, report it as pending and offer its review link.
+changed.
 
 A null `preset` means a custom grant. Use the listed tools within its signed
 write mode. A null `agent_access` means access is unverified. Use the status
@@ -352,8 +371,8 @@ encrypted fictional books and uses your existing access for every call.
    are available on the owner's books.
 3. If asked to practice recording an entry, use `txn_post`. Report what
    happened and provide the transaction ID. Use `txn_reverse` for individual
-   undo when your existing grant lists it. With the standard managed grant,
-   the owner can ask you to discard all practice entries by removing the demo.
+   undo when your existing grant lists it. The owner can ask you to discard
+   all practice entries by removing the demo.
 4. If asked to discard the demo, call `demo_remove`. From direct HTTP, send
    this control request to the startup books by omitting the target header.
    A successful removal returns a managed chat to the owner's books. If the
@@ -447,17 +466,15 @@ still need categorization.
 ### Report each setup change and offer undo
 
 After each successful setup write, tell the owner in plain words what was
-saved, report its `receipt_id` and offer **Undo** using the returned
-`desktop_path` on the running Desktop origin. Get the origin from the
-`desktop_url` in `changes_since` for that book or use its `undo_url` for the
-exact receipt. Offer the receipt for the whole operation, especially for a chart
-or an import. The owner can select **Undo** once in a paired browser. The
-ledger keeps the original history and records the reversal, archive or
-profile retirement. Import undo reverses only newly created postings and
-keeps identical entries that were already there. If a change cannot be
-undone because of current book activity or a closed period, explain the
-eligibility error. Keep setup and the summary in chat, with Desktop as an
-optional detail and undo link.
+saved and report its `receipt_id`. Offer to undo supported changes in chat
+using the receipt for the whole operation, especially for a chart or an
+import. The ledger keeps the original history and records the reversal,
+archive or profile retirement. Import undo reverses only newly created
+postings and keeps identical entries that were already there. If a rule
+blocks the undo, [explain it in chat and follow the error](#correct-your-work-in-chat).
+Offer the returned receipt link only for viewing. If you only have a
+`desktop_path`, use the running Desktop origin from `desktop_url` in
+`changes_since` for that book.
 
 An agent with shell access can use the same credential and the equivalent
 `bk setup` commands. Owners who already use a scoped setup session or need a

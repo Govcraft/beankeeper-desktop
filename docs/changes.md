@@ -21,22 +21,27 @@ repeat for the next page. The CLI puts the same result inside its `data` envelop
 The first read starts at the beginning of the book's history. The cursor is
 local to the Desktop user and book at that ledger path. It persists across
 restarts. Reading a report or opening the browser never changes the cursor.
-Acknowledging it changes only Desktop state. Agent writes and owner undo work
+Acknowledging it changes only Desktop state. Agent writes and audited undo work
 independently of the cursor. A read-only MCP listener offers `changes_since`
 and hides `changes_mark_seen`.
 
 ## Undo a receipt
 
-Open the optional `desktop_url` to see the full page, or follow an `undo_url`
-to the individual receipt. A link does not apply an undo. In a paired browser,
-select **Undo** on an eligible receipt. Desktop applies the undo using its
-private owner credential and shows the result. It reverses posted transactions
-and archives opened accounts, retaining the original history. Setup writes
-also return an individual receipt link. Use that receipt to undo a whole chart
-or import in one step. Undoing an import keeps the postings it matched that
-were already in your books. Upstream checks whether the change can still be
-undone, for example when a posting period is locked. Repeating a completed undo
-returns its earlier result.
+Ask your bookkeeper agent to undo its work in chat. With an eligible receipt,
+the agent calls `audit_undo` or `bk audit undo RECEIPT` to undo the whole
+operation. With a transaction ID, it uses `txn_reverse` or `bk txn reverse ID`.
+The ledger retains the original history. Undoing an import keeps the postings
+it matched that were already in your books. Repeating a completed receipt
+undo returns its earlier result.
+
+In propose-only mode, the agent reports the correction as pending sign-off.
+If a rule blocks the correction, the agent explains why and follows the next
+authorized step named by the error. If the agent suggests undoing an earlier
+hand-made offset and the original entry, it waits for you to ask it to undo
+both in chat.
+
+Open the optional `desktop_url` to see the full page or the returned `undo_url`
+to view the individual receipt.
 
 The CLI includes links when it finds a running Desktop instance for the
 selected books. The receipts and summary are also available while Desktop is

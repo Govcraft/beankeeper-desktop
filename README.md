@@ -8,10 +8,10 @@ chart.
 Beankeeper Desktop is the paid, self-hosted layer. It runs as a local service
 with signed updates and offline licensing.
 
-Your agent can tell you what changed since you last looked and offer a link
-to each change you can undo. In a paired browser, select **Undo** on a receipt
-to reverse a posting or archive an opened account. The ledger records the
-undo and keeps the original history. See [changes and owner undo](docs/changes.md).
+Ask your agent what changed since you last looked or ask it to undo its
+work in chat. The ledger records the correction and keeps the original
+history. Receipt links are available if you want to see the details.
+[Changes and audited undo](docs/changes.md)
 
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
@@ -49,9 +49,9 @@ Ask in chat any time to see or change those instructions.
 Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
 then say **Set up my books** in Claude. On the existing Direct bookkeeper
 connection, Claude can create books and accounts, post opening balances and
-import a statement you share in chat. It reports each change and gives you an
-optional **Undo** link. If Claude reports read-only access and you want it to
-make changes, say **Let my agent post** in chat.
+import a statement you share in chat. It reports each change, and you can ask
+it to undo supported changes in the same chat. If Claude reports read-only
+access and you want it to make changes, say **Let my agent post** in chat.
 Claude Desktop only needs the extension. If you also use Claude Code, Desktop
 may show its Beankeeper connections under **Local dev**.
 [Claude Desktop setup and removal](docs/claude-desktop.md)
@@ -106,8 +106,8 @@ Say **Make me read-only** to turn posting off, or ask for propose-only access
 if you want to review proposed entries. Restarting cannot grant posting access.
 [Background hosting and managed access](docs/service.md)
 
-Your agent can report what it changed as soon as it finishes and offer the
-receipt links for undo.
+Your agent can report what it changed as soon as it finishes and offer to
+undo supported changes in chat.
 
 ### Advanced service commands
 
