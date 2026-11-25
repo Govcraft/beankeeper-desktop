@@ -262,11 +262,14 @@ fn connected_transport(
     })
 }
 
-fn authorization(token_file: &Path) -> Result<HeaderValue, BridgeError> {
+pub(crate) fn authorization(token_file: &Path) -> Result<HeaderValue, BridgeError> {
     let secret = PrivateFile::open(token_file)
         .and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
         .map_err(|_| BridgeError::InvalidToken)?;
-    let token = secret.expose_secret().trim();
+    bearer_header(secret.expose_secret().trim())
+}
+
+pub(crate) fn bearer_header(token: &str) -> Result<HeaderValue, BridgeError> {
     if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return Err(BridgeError::InvalidToken);
     }
@@ -408,6 +411,24 @@ impl Transport {
         message: &Value,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
+        // A relative upload target belongs to the HTTP transport. This stdio
+        // bridge has no externally reachable upload address to advertise.
+        let mut sanitized;
+        let message = if message["params"]["_meta"][crate::imports::META_CAPABILITIES]["extensions"]
+            .get(crate::imports::FILES)
+            .is_some()
+        {
+            sanitized = message.clone();
+            if let Some(extensions) = sanitized["params"]["_meta"]
+                [crate::imports::META_CAPABILITIES]["extensions"]
+                .as_object_mut()
+            {
+                extensions.remove(crate::imports::FILES);
+            }
+            &sanitized
+        } else {
+            message
+        };
         let request = match BridgeRequest::try_from(message) {
             Ok(request) => request,
             Err(error) => {
@@ -825,6 +846,22 @@ fn relay_response(
     Ok(vec![message])
 }
 
+pub(crate) fn response_result(response: Response) -> Result<Value, BridgeError> {
+    if !response.status().is_success() {
+        return Err(BridgeError::Rejected(response.status()));
+    }
+    let id = json!(1);
+    let context = ReplyContext {
+        request_id: Some(&id),
+        ..ReplyContext::default()
+    };
+    relay_response(response, context, &mut io::sink())?
+        .into_iter()
+        .find(|message| message["id"] == id)
+        .and_then(|mut message| message.get_mut("result").map(Value::take))
+        .ok_or(BridgeError::Protocol)
+}
+
 fn emit(
     contents: &[u8],
     context: ReplyContext<'_>,
@@ -859,6 +896,13 @@ fn emit(
         .is_some_and(|id| message.get("id") == Some(id))
         && let Some(result) = message.get_mut("result")
     {
+        if let Some(extensions) = result
+            .get_mut("capabilities")
+            .and_then(|capabilities| capabilities.get_mut("extensions"))
+            .and_then(Value::as_object_mut)
+        {
+            extensions.remove(crate::imports::FILES);
+        }
         if context.managed_initialize
             && let Some(tools) = result
                 .get_mut("capabilities")

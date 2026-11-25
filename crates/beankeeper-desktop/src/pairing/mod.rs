@@ -26,7 +26,7 @@ use std::{
 
 use axum::http::{HeaderMap, header};
 use beankeeper_cli::{commands::summary::OwnerSummaryReader, db::Db, error::CliError};
-use secret::Secret;
+pub(crate) use secret::Secret;
 
 use crate::boundary::SameOrigin;
 

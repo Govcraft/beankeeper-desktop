@@ -55,6 +55,9 @@ pub fn command() -> Command {
         .subcommand(crate::demo::DemoOptions::augment_args(
             Command::new("demo").about("Manage fictional books on the running service"),
         ))
+        .subcommand(crate::imports::command::ImportOptions::augment_args(
+            Command::new("import").about("Import a statement through the running Desktop"),
+        ))
         .subcommand(ServeOptions::augment_args(Command::new("serve").about(
             "Serve the embedded UI and authenticated MCP on one listener",
         )))

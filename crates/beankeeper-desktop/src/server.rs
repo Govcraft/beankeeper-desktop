@@ -29,6 +29,7 @@ use crate::{
     boundary::{self, LocalBoundary},
     changes,
     demo::DemoBooks,
+    imports,
     instance::{self, BooksPath, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
@@ -145,6 +146,7 @@ fn application_with_id(
         books: books.clone(),
         company: cli.company.clone(),
     };
+    let request_limit = config.max_request_body_bytes;
     let demo;
     let mcp = if let Some(managed_books) = &tools.managed_books {
         let targets = LedgerTargets::new(Db::open_existing(&cli.db, passphrase.as_ref())?);
@@ -175,6 +177,16 @@ fn application_with_id(
     );
     drop(passphrase);
     let fallback = cli.agent_token.clone();
+    let mcp = if read_only {
+        mcp
+    } else {
+        imports::layer(
+            mcp,
+            Arc::clone(&association_db),
+            fallback.clone(),
+            request_limit,
+        )
+    };
     let mcp = mcp.layer(middleware::from_fn_with_state(
         (pairing.clone(), fallback, association_db),
         pairing::mcp_guard,

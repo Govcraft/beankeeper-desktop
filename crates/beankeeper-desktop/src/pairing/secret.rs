@@ -13,7 +13,7 @@ pub(crate) struct Secret(String);
 impl Secret {
     pub(super) const LENGTH: usize = 64;
 
-    pub(super) fn generate() -> io::Result<Self> {
+    pub(crate) fn generate() -> io::Result<Self> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes).map_err(io::Error::other)?;
         let mut value = String::with_capacity(bytes.len() * 2);
