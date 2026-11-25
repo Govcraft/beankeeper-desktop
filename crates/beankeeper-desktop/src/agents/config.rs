@@ -106,13 +106,13 @@ pub(super) fn read_config_text(path: &Path) -> Result<Option<String>, AgentError
     Ok(FileSnapshot::read(path)?.before)
 }
 
-struct FileChange {
+pub(super) struct FileChange {
     original: FileSnapshot,
     revised: Option<String>,
 }
 
 impl FileChange {
-    fn commit(&self) -> Result<(), AgentError> {
+    pub(super) fn commit(&self) -> Result<(), AgentError> {
         let path = self.original.path.as_path();
         if FileSnapshot::read(path)?.before != self.original.before {
             return Err(AgentError::Conflict(path.into()));
@@ -181,6 +181,27 @@ enum Document {
     Toml(DocumentMut),
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct KnownExecutables<'a> {
+    pub(super) current: &'a str,
+    pub(super) managed_service: Option<&'a str>,
+}
+
+impl<'a> From<&'a str> for KnownExecutables<'a> {
+    fn from(current: &'a str) -> Self {
+        Self {
+            current,
+            managed_service: None,
+        }
+    }
+}
+
+impl KnownExecutables<'_> {
+    fn matches(self, command: &str) -> bool {
+        command == self.current || self.managed_service == Some(command)
+    }
+}
+
 fn property(
     object: &CstObject,
     name: &str,
@@ -222,7 +243,7 @@ impl Document {
 
     fn owned_entry(
         &self,
-        command: &str,
+        executables: KnownExecutables<'_>,
         server: Server,
         path: &Path,
     ) -> Result<Option<OwnedEntry>, AgentError> {
@@ -239,9 +260,9 @@ impl Document {
                 let Some(entry) = property(&servers, server.name(), path)? else {
                     return Ok(None);
                 };
-                let expected = ManagedServer::from((*kind, server, command));
+                let expected = ManagedServer::from((*kind, server, executables.current));
                 ParsedServer::try_from((*kind, &entry))
-                    .and_then(|parsed| parsed.check(&expected))
+                    .and_then(|parsed| parsed.check(&expected, executables))
                     .map(Some)
                     .map_err(|reason| AgentError::RegistrationConflict {
                         path: path.into(),
@@ -259,7 +280,10 @@ impl Document {
                 };
                 let owned = entry.as_table_like().is_some_and(|fields| {
                     fields.len() == 2
-                        && fields.get("command").and_then(Item::as_str) == Some(command)
+                        && fields
+                            .get("command")
+                            .and_then(Item::as_str)
+                            .is_some_and(|command| executables.matches(command))
                         && fields
                             .get("args")
                             .and_then(Item::as_array)
@@ -282,16 +306,16 @@ impl Document {
 
     fn edited(
         mut self,
-        command: &str,
+        executables: KnownExecutables<'_>,
         change: Change,
         path: &Path,
     ) -> Result<Option<String>, AgentError> {
         let mut changed = false;
         for server in Server::ALL {
-            match (change, self.owned_entry(command, server, path)?) {
+            match (change, self.owned_entry(executables, server, path)?) {
                 (Change::Connect, None | Some(OwnedEntry::NeedsRewrite))
                 | (Change::Disconnect, Some(_)) => {
-                    self.edit(command, server, change, path)?;
+                    self.edit(executables.current, server, change, path)?;
                     changed = true;
                 }
                 _ => {}
@@ -370,8 +394,8 @@ impl Adapter {
     pub(super) fn registration(&self, binary: &str) -> Result<Registration, AgentError> {
         let snapshot = FileSnapshot::read(&self.config)?;
         let document = Document::parse(&snapshot, &self.format)?;
-        let ledger = document.owned_entry(binary, Server::Ledger, &self.config)?;
-        let lifecycle = document.owned_entry(binary, Server::Lifecycle, &self.config)?;
+        let ledger = document.owned_entry(binary.into(), Server::Ledger, &self.config)?;
+        let lifecycle = document.owned_entry(binary.into(), Server::Lifecycle, &self.config)?;
         Ok(match (ledger, lifecycle) {
             (Some(_), Some(_)) => Registration::Owned,
             (None, None) => Registration::Missing,
@@ -388,15 +412,23 @@ impl Adapter {
         })
     }
 
-    pub(super) fn change(&self, binary: &str, change: Change) -> Result<(), AgentError> {
+    pub(super) fn stage_config(
+        &self,
+        executables: KnownExecutables<'_>,
+        change: Change,
+    ) -> Result<Option<FileChange>, AgentError> {
         let snapshot = FileSnapshot::read(&self.config)?;
         let document = Document::parse(&snapshot, &self.format)?;
-        let config = document
-            .edited(binary, change, &self.config)?
+        Ok(document
+            .edited(executables, change, &self.config)?
             .map(|updated| FileChange {
                 revised: Some(updated),
                 original: snapshot,
-            });
+            }))
+    }
+
+    pub(super) fn change(&self, binary: &str, change: Change) -> Result<(), AgentError> {
+        let config = self.stage_config(binary.into(), change)?;
         let skill = self
             .skill
             .as_ref()
@@ -650,7 +682,7 @@ mod tests {
                     JsonClient::Standard => ConfigFormat::Json,
                 };
                 let document = Document::parse(&snapshot, &format)?;
-                let result = document.owned_entry("/bin/bk", Server::Ledger, &snapshot.path);
+                let result = document.owned_entry("/bin/bk".into(), Server::Ledger, &snapshot.path);
                 assert!(matches!(result, Err(error) if error.to_string().contains(expected)));
             }
         }

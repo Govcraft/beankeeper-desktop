@@ -6,7 +6,7 @@ use jsonc_parser::{
 };
 use serde::de::DeserializeOwned;
 
-use super::{OwnedEntry, Server, env_overrides::EnvOverrides};
+use super::{KnownExecutables, OwnedEntry, Server, env_overrides::EnvOverrides};
 
 #[derive(Clone, Copy)]
 pub(super) enum JsonClient {
@@ -187,25 +187,28 @@ pub(super) struct ParsedServer {
 }
 
 impl ParsedServer {
-    pub(super) fn check(self, expected: &ManagedServer) -> Result<OwnedEntry, ServerConflict> {
+    pub(super) fn check(
+        self,
+        expected: &ManagedServer,
+        executables: KnownExecutables<'_>,
+    ) -> Result<OwnedEntry, ServerConflict> {
         let expected = &expected.spec;
-        if self.spec == *expected {
-            return Ok(if self.needs_rewrite {
-                OwnedEntry::NeedsRewrite
-            } else {
-                OwnedEntry::Canonical
-            });
-        }
         let field = if self.spec.env != expected.env {
             ConflictField::Env
-        } else if self.spec.command != expected.command {
+        } else if !executables.matches(&self.spec.command) {
             ConflictField::Command
         } else if self.spec.args != expected.args {
             ConflictField::Args
         } else if self.spec.transport != expected.transport {
             ConflictField::Transport
-        } else {
+        } else if self.spec.tools != expected.tools {
             ConflictField::Unknown("tools")
+        } else {
+            return Ok(if self.needs_rewrite {
+                OwnedEntry::NeedsRewrite
+            } else {
+                OwnedEntry::Canonical
+            });
         };
         Err(field.into())
     }

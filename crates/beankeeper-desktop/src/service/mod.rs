@@ -327,6 +327,11 @@ pub fn managed_books() -> Result<Option<PathBuf>, ServiceError> {
         .map(|config| config.books))
 }
 
+pub(crate) fn managed_executable() -> Result<Option<PathBuf>, ServiceError> {
+    let paths = Paths::discover()?;
+    Ok(Config::load(&paths)?.map(|config| config.executable))
+}
+
 pub(crate) fn managed_books_match(books: &Path) -> Result<bool, ServiceError> {
     Ok(managed_books()?
         .is_some_and(|managed| fs::canonicalize(books).is_ok_and(|books| books == managed)))

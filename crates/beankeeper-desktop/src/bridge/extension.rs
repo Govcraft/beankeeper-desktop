@@ -24,6 +24,7 @@ use super::{
 };
 use crate::{
     agent_skill,
+    agents::extension as agents_extension,
     service::{
         self, Endpoint, ExtensionCommand, ServiceError,
         extension::{self, ExtensionRequest, Progress, Registration},
@@ -50,6 +51,7 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .into_iter()
         .filter(|command| include_status || *command != ExtensionCommand::Status)
         .filter_map(ExtensionCommand::tool)
+        .chain(agents_extension::mcp_tool())
         .collect()
 }
 
@@ -144,6 +146,20 @@ impl Session {
         }
         if request.kind() == MethodKind::Ping && inline.is_none() {
             return response(output, id, json!({}));
+        }
+        if request.kind() == MethodKind::ToolsCall
+            && message["params"]["name"] == agents_extension::TOOL
+        {
+            let result = CallToolRequestParams::deserialize(&message["params"]).map_or_else(
+                |_| {
+                    failure(
+                        agents_extension::ARGUMENTS_ERROR,
+                        "Use the extension tool's arguments.",
+                    )
+                },
+                agents_extension::mcp_call,
+            );
+            return response(output, id, result);
         }
         let command = (request.kind() == MethodKind::ToolsCall)
             .then(|| {

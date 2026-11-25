@@ -11,9 +11,12 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::FromStr,
     time::Duration,
 };
 use tempfile::NamedTempFile;
+
+pub(crate) mod extension;
 
 const REPOSITORY: &str = "https://github.com/Govcraft/beankeeper-desktop";
 const RELEASE_API: &str = "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases";
@@ -98,20 +101,24 @@ impl fmt::Display for ReleaseVersion {
     }
 }
 
-fn release_version(value: &str) -> Result<ReleaseVersion, UpdateError> {
-    let version =
-        semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
-    let supported_prerelease = version
-        .pre
-        .as_str()
-        .strip_prefix("rc.")
-        .is_some_and(|rc| !rc.is_empty() && rc.bytes().all(|byte| byte.is_ascii_digit()));
-    if (!version.pre.is_empty() && !supported_prerelease) || !version.build.is_empty() {
-        return Err(UpdateError::Invalid(
-            "only stable and rc.N releases are supported",
-        ));
+impl FromStr for ReleaseVersion {
+    type Err = UpdateError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let version =
+            semver::Version::parse(value).map_err(|_| UpdateError::Invalid("invalid version"))?;
+        let supported_prerelease = version
+            .pre
+            .as_str()
+            .strip_prefix("rc.")
+            .is_some_and(|rc| !rc.is_empty() && rc.bytes().all(|byte| byte.is_ascii_digit()));
+        if (!version.pre.is_empty() && !supported_prerelease) || !version.build.is_empty() {
+            return Err(UpdateError::Invalid(
+                "only stable and rc.N releases are supported",
+            ));
+        }
+        Ok(Self(version))
     }
-    Ok(ReleaseVersion(version))
 }
 
 /// Local prereleases may opt into RC updates. Build metadata is prohibited.
@@ -127,8 +134,10 @@ fn installed_version(value: &str) -> Result<semver::Version, UpdateError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Sha256Digest([u8; 32]);
 
-impl Sha256Digest {
-    fn from_hex(text: &str) -> Result<Self, UpdateError> {
+impl FromStr for Sha256Digest {
+    type Err = UpdateError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         fn nibble(byte: u8) -> Option<u8> {
             match byte {
                 b'0'..=b'9' => Some(byte - b'0'),
@@ -207,15 +216,18 @@ fn select_release(
 ) -> Result<ReleaseVersion, UpdateError> {
     releases
         .iter()
-        .filter(|release| !release.draft)
-        .filter_map(|release| {
-            let version = release_version(release.tag_name.strip_prefix(TAG_PREFIX)?).ok()?;
-            let prerelease = !version.0.pre.is_empty();
-            (release.prerelease == prerelease && (!current.pre.is_empty() || !prerelease))
-                .then_some(version)
-        })
+        .filter_map(GithubRelease::published_version)
+        .filter(|version| !current.pre.is_empty() || version.0.pre.is_empty())
         .max()
         .ok_or(UpdateError::Invalid("no supported published release found"))
+}
+
+impl GithubRelease {
+    fn published_version(&self) -> Option<ReleaseVersion> {
+        let version: ReleaseVersion = self.tag_name.strip_prefix(TAG_PREFIX)?.parse().ok()?;
+        let prerelease = !version.0.pre.is_empty();
+        (!self.draft && self.prerelease == prerelease).then_some(version)
+    }
 }
 
 fn fetch_manifest(
@@ -333,7 +345,7 @@ fn verify_manifest(
                 "manifest version does not match release tag",
             ));
         }
-        None => release_version(&manifest.version)?,
+        None => manifest.version.parse()?,
     };
     if manifest.schema_version != 1
         || manifest.released_at.timestamp() <= 0
@@ -344,7 +356,7 @@ fn verify_manifest(
     verify_bytes(bytes, bundle, &version, verifier)?;
     let mut artifacts = BTreeMap::new();
     for (platform, artifact) in &manifest.artifacts {
-        let digest = Sha256Digest::from_hex(&artifact.sha256)?;
+        let digest = artifact.sha256.parse()?;
         // Older binaries can still update when the release adds a platform.
         if let Some(target) = Target::from_triple(platform) {
             artifacts.insert(target, digest);
@@ -635,7 +647,7 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
         .ok_or(UpdateError::Invalid(
             "run bk update-check successfully first",
         ))?;
-    let version = release_version(&cached.version)?;
+    let version = cached.version.parse()?;
     let bytes = download(&asset_url(&version, "update-manifest.json"), MAX_METADATA)?;
     let bundle = download(
         &asset_url(&version, "update-manifest.json.sigstore"),
@@ -706,20 +718,34 @@ fn install(
     verify_bytes(checksums, checksums_bundle, version, verifier)?;
     verify_bytes(archive, bundle, version, verifier)?;
     let hash = Sha256Digest(Sha256::digest(archive).into());
+    if hash != *artifact || listed_checksum(checksums, &name)? != Some(hash) {
+        return Err(UpdateError::Invalid(
+            "archive checksum mismatch or missing/duplicate checksum",
+        ));
+    }
+    replace_binary(archive, version, target, destination)
+}
+
+fn listed_checksum(checksums: &[u8], name: &str) -> Result<Option<Sha256Digest>, UpdateError> {
     let lines = std::str::from_utf8(checksums)
         .map_err(|_| UpdateError::Invalid("invalid checksum manifest"))?;
     let mut matching = lines
         .lines()
         .filter_map(|line| line.split_once("  "))
         .filter(|(_, filename)| *filename == name);
-    let listed = matching
-        .next()
-        .map(|(digest, _)| Sha256Digest::from_hex(digest));
-    if hash != *artifact || listed.transpose()? != Some(hash) || matching.next().is_some() {
-        return Err(UpdateError::Invalid(
-            "archive checksum mismatch or missing/duplicate checksum",
-        ));
+    let listed = matching.next().map(|(digest, _)| digest.parse());
+    if matching.next().is_some() {
+        return Err(UpdateError::Invalid("duplicate SHA-256 checksum"));
     }
+    listed.transpose()
+}
+
+fn replace_binary(
+    archive: &[u8],
+    version: &ReleaseVersion,
+    target: Target,
+    destination: &Path,
+) -> Result<(), UpdateError> {
     let expected = format!("bk-{version}-{}/{}", target.triple(), target.binary_name());
     let parent = destination.parent().ok_or(UpdateError::Invalid(
         "installation needs a parent directory",
@@ -914,7 +940,7 @@ mod tests {
         let command = cosign_command(
             Path::new("archive"),
             Path::new("bundle"),
-            &release_version("9.10.0")?,
+            &ReleaseVersion::from_str("9.10.0")?,
         );
         let arguments: Vec<_> = command
             .get_args()
@@ -935,7 +961,7 @@ mod tests {
                 "archive"
             ]
         );
-        assert!(release_version("../../tag").is_err());
+        assert!(ReleaseVersion::from_str("../../tag").is_err());
         Ok(())
     }
     #[test]
@@ -954,8 +980,8 @@ mod tests {
         unsupported["schema_version"] = 2.into();
         let bytes = serde_json::to_vec(&unsupported)?;
         assert!(verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier).is_err());
-        assert!(release_version("1.0.0/../../payload").is_err());
-        assert!(release_version("1.0.0-rc.1").is_ok());
+        assert!(ReleaseVersion::from_str("1.0.0/../../payload").is_err());
+        assert!(ReleaseVersion::from_str("1.0.0-rc.1").is_ok());
         assert!(installed_version("1.0.0-rc.1").is_ok());
         assert!(installed_version("1.0.0/../../payload").is_err());
         Ok(())
@@ -972,7 +998,10 @@ mod tests {
             "v1.0.0",
             "../1.0.0",
         ] {
-            assert!(release_version(version).is_err(), "accepted {version}");
+            assert!(
+                ReleaseVersion::from_str(version).is_err(),
+                "accepted {version}"
+            );
         }
         let mut manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
         for (candidate, current, newer) in [
@@ -1073,8 +1102,11 @@ mod tests {
                 urls,
                 [
                     format!("{endpoint}version={current}&os={}", std::env::consts::OS),
-                    asset_url(&release_version(version)?, "update-manifest.json"),
-                    asset_url(&release_version(version)?, "update-manifest.json.sigstore"),
+                    asset_url(&ReleaseVersion::from_str(version)?, "update-manifest.json"),
+                    asset_url(
+                        &ReleaseVersion::from_str(version)?,
+                        "update-manifest.json.sigstore"
+                    ),
                 ]
             );
             let checked_at = now();
@@ -1145,7 +1177,7 @@ mod tests {
         let command = cosign_command(
             Path::new("archive"),
             Path::new("bundle"),
-            &release_version("0.1.0-rc.2")?,
+            &ReleaseVersion::from_str("0.1.0-rc.2")?,
         );
         assert!(command.get_args().any(|arg| arg == format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.2").as_str()));
         Ok(())
@@ -1463,7 +1495,7 @@ mod tests {
         let checksums = format!(
             "{}  {}\n",
             sha256(&archive),
-            archive_name(&release_version("9.10.0")?, target)
+            archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
         );
         let bundle = sign(&archive);
         let checksums_bundle = sign(checksums.as_bytes());
@@ -1496,7 +1528,7 @@ mod tests {
             format!(
                 "{}  {}\n",
                 "0".repeat(64),
-                archive_name(&release_version("9.10.0")?, target)
+                archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
             ),
             checksums.repeat(2),
             String::new(),
@@ -1549,7 +1581,7 @@ mod tests {
             .get_mut(target.triple())
             .ok_or("fixture artifact")?;
         artifact.sha256.make_ascii_uppercase();
-        let name = archive_name(&release_version("9.10.0")?, target);
+        let name = archive_name(&ReleaseVersion::from_str("9.10.0")?, target);
         let checksums = format!("{}  {name}\n", artifact.sha256);
         let release = authorize(&wire, "9.9.0")?;
         install(
@@ -1592,7 +1624,7 @@ mod tests {
         let checksums = format!(
             "{}  {}\n",
             sha256(&archive),
-            archive_name(&release_version(version)?, target)
+            archive_name(&ReleaseVersion::from_str(version)?, target)
         );
         for bundle in [b"invalid".to_vec(), sign(&archive)] {
             let result = install(
@@ -1631,7 +1663,7 @@ mod tests {
             let list = format!(
                 "{}  {}\n",
                 sha256(&bytes),
-                archive_name(&release_version("9.10.0")?, target)
+                archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
             );
             assert!(
                 install(
