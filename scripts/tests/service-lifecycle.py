@@ -163,7 +163,11 @@ def setup_in_extension(launcher, arguments, env, definition):
             assert time.monotonic() < deadline, "local service setup never became ready"
             time.sleep(0.2)
         assert progress["state"] == "ready", progress
-        assert progress["registration"] == {"checked": []}, progress
+        companion_issues = progress["registration"]["checked"]
+        # Normal service uninstall preserves prior companion configs.
+        # An existing conflict is reported without blocking the Claude chat.
+        assert all(issue["agent"] not in ("codex", "claude-desktop")
+                   for issue in companion_issues), companion_issues
         assert not progress["claude_restart_required"]
         assert "notifications/tools/list_changed" in notifications
         assert tool("setup")["structuredContent"]["state"] == "ready"
