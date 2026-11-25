@@ -1606,6 +1606,132 @@ fn demo_payload(result: &Value) -> TestResult<Value> {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn managed_demo_tailors_books_over_cli_and_mcp() -> TestResult {
+    use beankeeper_cli::mcp::LEDGER_TARGET_META_KEY;
+
+    let fixture = LegacyService::new()?;
+    let _host = fixture.host()?;
+    let mut pipe = DemoPipe::new(&fixture)?;
+    let original = demo_payload(&pipe.tool("company_list", &json!({}))?)?;
+    let tools = pipe.request("tools/list", &json!({}))?;
+    let start = tools["tools"]
+        .as_array()
+        .ok_or("missing tools")?
+        .iter()
+        .find(|tool| tool["name"] == "demo_start")
+        .ok_or("missing demo_start")?;
+    assert!(start["inputSchema"]["properties"]["profile"].is_object());
+
+    let invalid = json!({
+        "currencies":{"primary":"CAD"},
+        "books":[{"accounts":[{"kind":"checking","currency":"USD"}]}]
+    });
+    let rejected = pipe.tool("demo_start", &json!({"profile":invalid}))?;
+    assert_eq!(rejected["structuredContent"]["code"], "DEMO_ARGUMENTS");
+    let cli = fixture
+        .command()
+        .args(["demo", "start", "--json", "--profile", &invalid.to_string()])
+        .output()?;
+    assert!(!cli.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli.stderr)?,
+        rejected["structuredContent"]
+    );
+
+    let profile = json!({
+        "work_shape":"business_owner",
+        "country":"CA",
+        "currencies":{"secondary":["USD"]},
+        "books":[{"kind":"llc","industry":"trades","accounts":[
+            {"kind":"checking"},{"kind":"payment_app","currency":"USD"}
+        ]}],
+        "features":{"include_investments":true}
+    });
+    let mut cli = fixture
+        .command()
+        .args(["demo", "start", "--json", "--profile", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    serde_json::to_writer(cli.stdin.take().ok_or("missing CLI stdin")?, &profile)?;
+    let cli = cli.wait_with_output()?;
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let cli_start: Value = serde_json::from_slice(&cli.stdout)?;
+    let resumed = pipe.tool("demo_start", &json!({}))?;
+    assert_eq!(resumed["structuredContent"], cli_start);
+    assert_eq!(
+        resumed["_meta"][LEDGER_TARGET_META_KEY],
+        cli_start["target"]
+    );
+
+    let tailored = demo_payload(&pipe.tool("company_list", &json!({}))?)?;
+    let companies = tailored.as_array().ok_or("missing tailored books")?;
+    assert_eq!(companies.len(), 1);
+    assert_eq!(companies[0]["slug"], "demo-book-1");
+    assert_eq!(companies[0]["name"], "Fictional Moonfern Studio 1 LLC");
+    assert_tailored_demo_accounts(&mut pipe)?;
+
+    let other = json!({"profile":{"books":[{"kind":"personal"}]}});
+    let rejected = pipe.tool("demo_start", &other)?;
+    assert_eq!(rejected["structuredContent"]["code"], "DEMO_ALREADY_ACTIVE");
+    let removed = pipe.tool("demo_remove", &json!({}))?;
+    assert_eq!(removed["structuredContent"]["target"], cli_start["target"]);
+    assert_eq!(
+        demo_payload(&pipe.tool("company_list", &json!({}))?)?,
+        original
+    );
+
+    let started = pipe.tool("demo_start", &other)?;
+    assert_eq!(started["structuredContent"]["state"], "active");
+    assert_ne!(started["structuredContent"]["target"], cli_start["target"]);
+    let new_books = demo_payload(&pipe.tool("company_list", &json!({}))?)?;
+    assert_eq!(new_books[0]["name"], "Fictional Household 1");
+    let removed = pipe.tool("demo_remove", &json!({}))?;
+    assert_eq!(removed["structuredContent"]["state"], "removed");
+    assert_eq!(
+        demo_payload(&pipe.tool("company_list", &json!({}))?)?,
+        original
+    );
+    assert!(
+        !std::fs::read_dir(fixture.books.parent().ok_or("books parent")?)?
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".beankeeper-demo-"))
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_tailored_demo_accounts(pipe: &mut DemoPipe) -> TestResult {
+    let book = json!({"company":"demo-book-1"});
+    let accounts = demo_payload(&pipe.tool("account_list", &book)?)?;
+    let accounts = accounts.as_array().ok_or("missing synthetic accounts")?;
+    for name in [
+        "Sample Checking 1 (CAD)",
+        "Sample Payment App 2 (USD)",
+        "Sample Brokerage (CAD)",
+    ] {
+        assert!(accounts.iter().any(|account| account["name"] == name));
+    }
+    let transactions = demo_payload(&pipe.tool("txn_list", &book)?)?;
+    let transactions = transactions
+        .as_array()
+        .ok_or("missing synthetic transactions")?;
+    for currency in ["CAD", "USD"] {
+        assert!(transactions.iter().any(|txn| txn["currency"] == currency));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> TestResult {
     use beankeeper_cli::mcp::LEDGER_TARGET_META_KEY;
     use std::{fs, io::Read};

@@ -134,8 +134,15 @@ until they start or remove the demo explicitly. A fresh demo receives a new
 target. The service discards the demo on graceful shutdown. An abrupt stop can
 leave an encrypted file whose key was lost with the process.
 
-Use `bk demo start --json` and `bk demo remove --json` to manage the same
-demo from shell automation. Owners can do both in chat.
+For a tailored demo, pass `{ "profile": { ... } }` to `demo_start`. In shell
+automation, pass the inner JSON object with `bk demo start --profile <JSON>
+--json`, or pipe it to `bk demo start --profile - --json`. The service
+validates both paths against the same profile type and uses the answers in
+memory to generate the fictional ledger. Omit the profile to start the quick
+demo or resume the active demo. A request with a profile returns
+`DEMO_ALREADY_ACTIVE` when there is already a demo, preserving any practice
+entries. Use `demo_remove` or `bk demo remove --json` to discard it before
+starting a different one. [Agent interview guide](../SKILL.md#tailor-a-demo-in-chat)
 
 ## Choose a write mode
 

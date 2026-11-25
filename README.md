@@ -294,9 +294,10 @@ commands and tab design](docs/navigation.md) for arguments, examples and tests.
 ## Try it with demo books
 
 Ask your connected agent, “Show me what Beankeeper can do with sample books.”
-The agent can read fictional reports and practice bookkeeping in encrypted
-demo books over the open chat connection. Ask it to discard the demo when
-you’re done. Practice entries stay in the demo. [Agent demo guide](SKILL.md#try-it-with-demo-books)
+You can start with a quick demo or answer a few questions in chat to get
+fictional books shaped around your work, account types, and currencies. Try
+reports and practice bookkeeping in the encrypted demo. Ask your agent to
+discard it when you’re done. [Agent demo guide](SKILL.md#try-it-with-demo-books)
 
 ## Browse your books
 
