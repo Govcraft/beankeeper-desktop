@@ -17,7 +17,10 @@ use axum::{
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
-    mcp::{LedgerTargets, StreamableHttpServerConfig, http_router_with_ledger_targets},
+    mcp::{
+        HttpLedgerTargets, LedgerTargets, StreamableHttpServerConfig,
+        http_router_with_ledger_targets,
+    },
     passphrase::resolve_passphrase,
 };
 
@@ -153,14 +156,18 @@ fn application_with_id(
         company: cli.company.clone(),
     };
     let request_limit = config.max_request_body_bytes;
-    let targets = LedgerTargets::new(backups.open()?);
-    let demo = tools.managed_books.as_ref().map(|managed_books| {
-        DemoBooks::new(
+    let startup = backups.open()?;
+    let (targets, demo) = if let Some(managed_books) = &tools.managed_books {
+        let targets = LedgerTargets::new(startup);
+        let demo = DemoBooks::new(
             targets.clone(),
             managed_books,
             config.cancellation_token.clone(),
-        )
-    });
+        );
+        (HttpLedgerTargets::from(targets), Some(demo))
+    } else {
+        (HttpLedgerTargets::from(startup), None)
+    };
     tools.demo.clone_from(&demo);
     let mcp = http_router_with_ledger_targets(cli, targets, read_only, config, tools)?;
     let db = Db::open_snapshot(&cli.db, key)?;

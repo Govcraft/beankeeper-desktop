@@ -1723,6 +1723,16 @@ fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
         .ok_or("missing demo target")?;
     assert_eq!(start["result"]["_meta"][LEDGER_TARGET_META_KEY], target);
     assert_eq!(created["target"], target);
+    let resume = host
+        .client
+        .get(format!("{}/mcp", host.base))
+        .bearer_auth(token)
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Session-Id", host.session.as_deref().ok_or("session")?)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .header("Last-Event-ID", "0")
+        .send()?;
+    assert_eq!(resume.status(), 405);
 
     let posting = demo_posting();
     let post = demo_http(&host, token, target, "txn_post", &posting)?;
