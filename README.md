@@ -123,6 +123,10 @@ Run `bk agents connect claude-code` to register or refresh the Claude Code
 connection and skill. Existing entries with the managed command and arguments
 can include `"type": "stdio"` and an empty `env`.
 
+If Beankeeper is already available, ask your agent to install or upgrade the
+Claude Desktop extension, or run `bk agents extension`. The command requires
+`cosign`. [Install or upgrade the signed extension](docs/claude-desktop.md#install-or-upgrade-from-beankeeper)
+
 ## Build and run
 
 Requires Rust 1.91 or newer and the C build tools needed by upstream's bundled

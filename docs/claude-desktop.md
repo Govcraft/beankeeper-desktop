@@ -30,6 +30,29 @@ books. Setup continues in the same chat. Other supported apps detected during
 setup can load their new connections the next time you open them.
 [Service storage and recovery](service.md#platform-behavior-and-files)
 
+## Install or upgrade from Beankeeper
+
+If you already have `bk` or a local Beankeeper agent connection, ask your agent
+to install or upgrade the Claude Desktop extension. The `agents_extension`
+tool is available in Claude's Beankeeper extension and on the local lifecycle
+connection. The command-line equivalent is `bk agents extension`.
+
+Beankeeper uses `cosign` to verify the newest published release for your computer.
+It verifies the Sigstore signatures on the checksums and extension, then requires
+the extension's SHA-256 to match the signed checksum. After your operating
+system opens the verified file, select **Install** in Claude Desktop.
+
+When opening the extension, Beankeeper removes its managed stdio entries from
+`claude_desktop_config.json` if they are present. It keeps other client settings
+and saves the original file as `claude_desktop_config.json.beankeeper-backup` if
+there is no backup yet. If you cancel installation and want the stdio connection
+back, run `bk agents connect claude-desktop`.
+
+Use `bk agents extension --path-only` for the local file path, or add `--json`
+for a structured result. The MCP equivalent is `{"path_only":true}`. Path-only
+mode leaves Claude's settings alone, so you can open the file later or select it
+from Claude's extension settings if your system has no file association.
+
 ## First-open messages
 
 During testing, Claude may show **Developer: unknown** until its extension
