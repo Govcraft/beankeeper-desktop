@@ -52,14 +52,9 @@ If a supported command fails, report and repair that step before continuing.
 
 Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
 if `cosign` is missing. Install it through the owner's trusted package channel
-or stop and explain what is missing. Guided setup selects the highest published
-version with signature bundles for this machine and checks that it provides
-managed service and agent registration commands. The shell installer uses
-`jq` when available, then macOS's built-in `osascript` or `python3`.
-If the shell already has `GH_TOKEN` or `GITHUB_TOKEN`, the installers use it
-for the GitHub release listing. If GitHub limits anonymous requests, the
-installer retries when the wait is short. Set `BK_VERSION` to a known signed
-release to bypass discovery if the limit persists.
+or stop and explain what is missing. Guided setup reads the latest release
+version from beankeeper.app and checks that the verified binary provides
+managed service and agent registration commands.
 
 ### Linux and macOS
 
@@ -73,7 +68,7 @@ detects Linux versus macOS and x86-64 versus Arm64.
     bk_download="$(mktemp -d)"
     trap 'rm -rf "$bk_download"' EXIT
     mkdir -p "$bk_bin"
-    curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh -o "$bk_download/install.sh"
+    curl -fsSL https://beankeeper.app/download/latest/install.sh -o "$bk_download/install.sh"
     BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$bk_bin" BK_NO_SERVICE=1 \
         sh "$bk_download/install.sh"
     "$bk_bin/bk" service install --no-agents
@@ -93,7 +88,7 @@ for x64 Windows before downloading the release.
     $bkDir = Join-Path $env:LOCALAPPDATA 'Programs\Beankeeper Desktop'
     $bkSetup = Join-Path ([IO.Path]::GetTempPath()) ("bk-install-" + [guid]::NewGuid() + ".ps1")
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1' -OutFile $bkSetup
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://beankeeper.app/download/latest/install.ps1' -OutFile $bkSetup
         & $bkSetup -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir
         $bk = Join-Path $bkDir 'bk.exe'
         & $bk service install --no-agents

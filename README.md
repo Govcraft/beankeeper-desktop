@@ -24,19 +24,18 @@ The packaging workflow produces Linux tarballs and `.deb` files, macOS `.pkg`
 files for both architectures, and an x64 Windows ZIP and EXE installer. Paid OS
 signing is disabled while the Apple and Azure accounts are pending. Tag releases
 include SHA-256 checksums, Sigstore bundles and build provenance. The shell and
-PowerShell installers verify checksums and use Sigstore when cosign is available.
-By default, a regular install picks the newest signed stable release for your
-platform. If none qualifies, it picks the newest signed release candidate.
+PowerShell installers read the latest release version from beankeeper.app and
+require cosign to verify both the platform archive and the checksum list.
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
 From an agent that can run commands on your computer, ask:
 
-> Set up Beankeeper from https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/SKILL.md
+> Set up Beankeeper from https://beankeeper.app/install.md
 
 The agent uses your existing installation when it supports setup. For a new
-install, it selects the newest release with signature bundles for your platform
-and verifies both signatures and SHA-256 before running the downloaded binary.
+install, it downloads the latest release for your platform and verifies both signatures
+and SHA-256 before running the downloaded binary.
 
 Once your books exist, your agent asks how you want recurring
 payees, sales tax and processor fees recorded, and how often you want updates.
@@ -81,12 +80,8 @@ gh attestation verify bk-desktop-VERSION-ASSET --repo Govcraft/beankeeper-deskto
   --source-ref refs/tags/beankeeper-desktop-vVERSION
 ```
 
-Exact archive names are in [docs/RELEASE.md](docs/RELEASE.md). `install.sh` and
-`install.ps1` already verify checksums and, when `cosign` is on `PATH`, the
-Sigstore bundles. The shell installer can find a release using `jq`, macOS's
-built-in `osascript`, or `python3`. If `cosign` is absent, regular installs can
-opt in to GitHub provenance verification with `BK_VERIFY_ATTESTATION=1` and an
-authenticated GitHub CLI. Guided setup requires `cosign`.
+Exact archive names and the `BK_DOWNLOAD_BASE` override are in the
+[release guide](docs/RELEASE.md).
 
 ## Run quietly in the background
 
