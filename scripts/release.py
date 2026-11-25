@@ -251,7 +251,7 @@ def universal_macos_bundle(output, release_version):
             slices.append(binary)
         universal = work / "bk"
         subprocess.run(["xcrun", "lipo", "-create", *slices, "-output", universal], check=True)
-        subprocess.run(["xcrun", "lipo", "-verify_arch", "arm64", "x86_64", universal], check=True)
+        subprocess.run(["xcrun", "lipo", universal, "-verify_arch", "arm64", "x86_64"], check=True)
         universal.chmod(0o755)
         reported = subprocess.check_output([universal, "--version"], text=True).strip()
         if reported != f"bk {release_version}":

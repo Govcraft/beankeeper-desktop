@@ -242,13 +242,15 @@ class PackagingTests(unittest.TestCase):
                 self.assertEqual([path.read_bytes() for path in arguments[3:5]],
                                  [target.encode() for target in targets])
                 arguments[-1].write_bytes(b"fat Mach-O fixture")
-            else:
-                self.assertEqual(arguments[2:5], ["-verify_arch", "arm64", "x86_64"])
 
         with (patch.object(release.subprocess, "run", side_effect=lipo) as run,
               patch.object(release.subprocess, "check_output", return_value="bk 1.2.3\n")):
             release.universal_macos_bundle(self.output, release_version)
             self.assertEqual(run.call_count, 2)
+            universal = run.call_args_list[0].args[0][-1]
+            run.assert_called_with(
+                ["xcrun", "lipo", universal, "-verify_arch", "arm64", "x86_64"], check=True,
+            )
 
         filename = "bk-1.2.3-universal-apple-darwin.mcpb"
         with zipfile.ZipFile(self.output / filename) as archive:
