@@ -399,10 +399,54 @@ to tag or settle a hold.
 
 ## Try it with demo books
 
-When the owner asks to try Beankeeper or see sample data, use `demo_start`
-on the managed Beankeeper connection. Wait for `state: active` before asking
-the books for anything. The owner can stay in chat. The service creates
+When the owner asks to try Beankeeper or see sample data, offer to tailor the
+demo in chat. If they want to get started right away, call `demo_start` with
+empty arguments to start the quick demo or resume the active one. Wait for
+`state: active` before asking the books for anything. The service creates
 encrypted fictional books and uses your existing access for every call.
+
+### Tailor a demo in chat
+
+Tell the owner that the demo uses made-up figures and stays separate from
+their real books. Ask only about the broad shape of their finances. Skip
+anything they already answered or prefer to leave out.
+
+- How do you earn your income? Are you employed, self-employed, running a
+  business, retired, or doing something else?
+- Which books would you like to see? For example, household finances,
+  freelance work, an LLC, or a corporation. Do you need more than one book?
+- Which account types should each book have? Ask about checking, savings,
+  credit cards, payment apps, loans, investments, and cash. Ask if they want
+  to see sample investment activity.
+- Which country and currency do you use most? If you have accounts in other
+  countries, which currencies should those accounts use in the demo?
+
+Use the `demo_start` tool schema to map answers to its `profile` object.
+This example describes an employee in Canada who wants a household book with
+checking and a credit card.
+
+```json
+{
+  "profile": {
+    "work_shape": "employee",
+    "country": "CA",
+    "books": [{
+      "kind": "personal",
+      "accounts": [{"kind": "checking"}, {"kind": "credit_card"}]
+    }]
+  }
+}
+```
+
+Send only supported categories and currency choices. The generator makes up
+company names, account names, and amounts. Keep real names, institution names,
+logins, account numbers, and amounts out of both the interview and the tool
+call. Never save the answers or profile to memory, notes, files, or real books.
+If `demo_start` returns `DEMO_ALREADY_ACTIVE`, explain that the existing demo
+contains their practice work. Resume it with empty arguments or use `demo_remove`
+when the owner asks to discard it, then start the new demo.
+
+### Use the fictional books
 
 1. On the managed connection, the next ledger calls use the demo automatically.
    If you are using HTTP directly, send `Beankeeper-Ledger-Target` with the
@@ -423,9 +467,10 @@ encrypted fictional books and uses your existing access for every call.
    demo becomes unavailable, resolve that with `demo_start` or `demo_remove`
    before making any more bookkeeping calls.
 
-For CLI automation, `bk demo start --json` and `bk demo remove --json` call
-the running service with its managed credential. A CLI call does not select
-books in an open chat.
+For CLI automation, use `bk demo start --profile - --json` to pipe the inner
+profile object on stdin. `bk demo start --json` and `bk demo remove --json`
+call the same running service with its managed credential. In a running chat,
+call `demo_start` to select the demo for that conversation.
 
 ## Guide the owner through book setup
 

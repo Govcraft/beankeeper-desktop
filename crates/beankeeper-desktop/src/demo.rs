@@ -10,8 +10,9 @@ use std::{
 
 use beankeeper_cli::{
     capability::Capability,
-    commands::init::create_demo_ledger,
+    commands::init::{create_demo_ledger, create_demo_ledger_from_profile},
     db::{Actor, Db, audit},
+    demo::DemoProfile,
     identity::{Admin, Granted},
     mcp::{
         DetachedLedger, HostTool, HostToolEffect, LEDGER_TARGET_META_KEY, LedgerTargets,
@@ -33,20 +34,83 @@ use tokio_util::sync::CancellationToken;
 #[derive(Args, Debug)]
 pub struct DemoOptions {
     #[command(subcommand)]
-    operation: DemoOperation,
+    command: DemoCommand,
 }
 
-#[derive(Clone, Copy, Debug, Subcommand)]
-pub(crate) enum DemoOperation {
+#[derive(Debug, Subcommand)]
+enum DemoCommand {
     /// Prepare sample books using the running managed service.
-    Start,
+    Start {
+        /// Synthetic profile as a JSON object, or '-' to read JSON from stdin.
+        #[arg(long, value_name = "JSON|-", verbatim_doc_comment)]
+        profile: Option<String>,
+    },
     /// Discard the sample books and their practice entries.
+    Remove,
+}
+
+/// CLI transport input. The managed service validates the profile on receipt.
+struct ProfileArguments(JsonObject);
+
+impl TryFrom<&str> for ProfileArguments {
+    type Error = DemoError;
+
+    fn try_from(input: &str) -> Result<Self, Self::Error> {
+        if input == "-" {
+            serde_json::from_reader(io::stdin().lock())
+        } else {
+            serde_json::from_str(input)
+        }
+        .map(Self)
+        .map_err(|_| DemoError::Arguments)
+    }
+}
+
+impl From<ProfileArguments> for JsonObject {
+    fn from(ProfileArguments(profile): ProfileArguments) -> Self {
+        JsonObject::from_iter([("profile".into(), Value::Object(profile))])
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DemoOperation {
+    Start,
     Remove,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct StartArguments {
+    /// Optional interview choices for generating fictional books. Omit for the quick demo.
+    profile: Option<DemoProfile>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct NoArguments {}
+
+enum DemoRequest {
+    Start(StartArguments),
+    Remove,
+}
+
+impl TryFrom<(DemoOperation, Option<JsonObject>)> for DemoRequest {
+    type Error = DemoError;
+
+    fn try_from(
+        (operation, arguments): (DemoOperation, Option<JsonObject>),
+    ) -> Result<Self, Self::Error> {
+        let value = Value::Object(arguments.unwrap_or_default());
+        match operation {
+            DemoOperation::Start => StartArguments::deserialize(value)
+                .map(Self::Start)
+                .map_err(|_| DemoError::Arguments),
+            DemoOperation::Remove => NoArguments::deserialize(value)
+                .map(|NoArguments {}| Self::Remove)
+                .map_err(|_| DemoError::RemoveArguments),
+        }
+    }
+}
 
 impl FromStr for DemoOperation {
     type Err = ();
@@ -70,36 +134,25 @@ impl DemoOperation {
     }
 
     pub(crate) fn definition(self) -> HostTool {
-        let description = match self {
-            Self::Start => {
-                "Try Beankeeper with fictional books. Creates or reuses encrypted sample books and selects them in a managed connection. Tell the owner that every figure is fictional. HTTP clients select the returned target on each ledger request."
-            }
-            Self::Remove => {
-                "Discard the fictional books, including any practice entries. A managed connection returns to the owner's books after this succeeds."
-            }
+        let (description, schema) = match self {
+            Self::Start => (
+                "Try Beankeeper with encrypted fictional books. Omit profile for a quick demo or to resume an active demo. To tailor a new demo, ask about work, book and account types, investments, country and currencies in chat, and pass only those categories. Tell the owner every figure is fictional. HTTP clients select the returned target on each ledger request.",
+                schemars::schema_for!(StartArguments),
+            ),
+            Self::Remove => (
+                "Discard the fictional books, including any practice entries. A managed connection returns to the owner's books after this succeeds.",
+                schemars::schema_for!(NoArguments),
+            ),
         };
         HostTool {
             tool: Tool::new(
                 self.name(),
                 description,
-                schemars::schema_for!(NoArguments)
-                    .to_value()
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
+                schema.to_value().as_object().cloned().unwrap_or_default(),
             ),
             capability: Capability::Read,
             effect: HostToolEffect::Mutation,
         }
-    }
-}
-
-impl TryFrom<Option<JsonObject>> for NoArguments {
-    type Error = DemoError;
-
-    fn try_from(arguments: Option<JsonObject>) -> Result<Self, Self::Error> {
-        serde_json::from_value(Value::Object(arguments.unwrap_or_default()))
-            .map_err(|_| DemoError::Arguments)
     }
 }
 
@@ -146,6 +199,8 @@ pub(crate) fn target_meta(target: &NamedLedgerTarget) -> MetaObject {
 #[derive(Debug)]
 pub(crate) enum DemoError {
     Arguments,
+    RemoveArguments,
+    AlreadyActive,
     Create,
     Detach,
     Cleanup,
@@ -155,7 +210,8 @@ pub(crate) enum DemoError {
 impl DemoError {
     fn code(&self) -> &'static str {
         match self {
-            Self::Arguments => "DEMO_ARGUMENTS",
+            Self::Arguments | Self::RemoveArguments => "DEMO_ARGUMENTS",
+            Self::AlreadyActive => "DEMO_ALREADY_ACTIVE",
             Self::Create => "DEMO_CREATE_FAILED",
             Self::Detach => "DEMO_DETACH_FAILED",
             Self::Cleanup => "DEMO_CLEANUP_FAILED",
@@ -175,7 +231,9 @@ impl DemoError {
 impl fmt::Display for DemoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Arguments => "Demo tools take no arguments.",
+            Self::Arguments => "Supply a JSON demo profile with supported interview choices, or omit it for the quick demo.",
+            Self::RemoveArguments => "Demo removal takes no arguments.",
+            Self::AlreadyActive => "Fictional books are already active. Resume them by starting without a profile, or discard them before starting a tailored demo.",
             Self::Create => "Beankeeper could not prepare the fictional books. Try starting the demo again.",
             Self::Detach => "Beankeeper could not safely detach the fictional books. The demo file was kept.",
             Self::Cleanup => "Beankeeper detached the fictional books but could not finish removing their files. Try removing the demo again.",
@@ -228,15 +286,16 @@ impl DemoBooks {
         operation: DemoOperation,
         request: CallToolRequestParams,
     ) -> CallToolResult {
-        if let Err(error) = NoArguments::try_from(request.arguments) {
-            return error.result();
-        }
+        let request = match DemoRequest::try_from((operation, request.arguments)) {
+            Ok(request) => request,
+            Err(error) => return error.result(),
+        };
         let host = self.clone();
         // Finish lifecycle work even if the client cancels or drops its request.
         match tokio::spawn(async move {
-            match operation {
-                DemoOperation::Start => host.start().await,
-                DemoOperation::Remove => host.remove().await,
+            match request {
+                DemoRequest::Start(arguments) => host.start(arguments).await,
+                DemoRequest::Remove => host.remove().await,
             }
         })
         .await
@@ -247,12 +306,16 @@ impl DemoBooks {
         }
     }
 
-    async fn start(&self) -> Result<DemoReport, DemoError> {
+    async fn start(
+        &self,
+        StartArguments { profile }: StartArguments,
+    ) -> Result<DemoReport, DemoError> {
         let mut state = self.0.state.lock().await;
         if self.0.shutdown.is_cancelled() {
             return Err(DemoError::Unavailable);
         }
         match &*state {
+            DemoState::Hosted(_) if profile.is_some() => return Err(DemoError::AlreadyActive),
             DemoState::Hosted(demo) => {
                 return Ok(DemoReport::Active {
                     target: demo.target.clone(),
@@ -263,7 +326,7 @@ impl DemoBooks {
             DemoState::Absent => {}
         }
         let host = Arc::clone(&self.0);
-        let demo = tokio::task::spawn_blocking(move || HostedDemo::create(&host))
+        let demo = tokio::task::spawn_blocking(move || HostedDemo::create(&host, profile.as_ref()))
             .await
             .map_err(|_| DemoError::Create)??;
         let report = DemoReport::Active {
@@ -299,7 +362,7 @@ impl DemoBooks {
 impl HostedDemo {
     const FILE_NAME: &str = "demo.db";
 
-    fn create(host: &Host) -> Result<Self, DemoError> {
+    fn create(host: &Host, profile: Option<&DemoProfile>) -> Result<Self, DemoError> {
         const PREFIX: &str = "demo";
         let id = PREFIX.create_type_id::<V7>();
         let target: NamedLedgerTarget = format!("{PREFIX}-{}", id.suffix())
@@ -321,11 +384,13 @@ impl HostedDemo {
 
         let actor = Actor::new("desktop-demo".parse().map_err(|_| DemoError::Create)?);
         let passphrase = crate::setup::generate_passphrase().map_err(|_| DemoError::Create)?;
-        let seeded = create_demo_ledger(
-            &staging.path().join(Self::FILE_NAME),
-            Some(&passphrase),
-            &actor,
-        )
+        let path = staging.path().join(Self::FILE_NAME);
+        let seeded = match profile {
+            Some(profile) => {
+                create_demo_ledger_from_profile(&path, Some(&passphrase), &actor, profile)
+            }
+            None => create_demo_ledger(&path, Some(&passphrase), &actor),
+        }
         .map_err(|_| DemoError::Create)?;
         let db =
             Db::open_existing(seeded.path(), Some(&passphrase)).map_err(|_| DemoError::Create)?;
@@ -379,7 +444,21 @@ fn remove_if_present(result: io::Result<()>) -> Result<(), DemoError> {
 /// Run a demo tool over the managed endpoint with its existing credential.
 #[must_use = "return this status to the CLI caller"]
 pub fn run(options: &DemoOptions, json_output: bool) -> ExitCode {
-    let result = match crate::bridge::call_demo(options.operation) {
+    let (operation, arguments) = match &options.command {
+        DemoCommand::Start { profile } => (
+            DemoOperation::Start,
+            profile
+                .as_deref()
+                .map(ProfileArguments::try_from)
+                .transpose(),
+        ),
+        DemoCommand::Remove => (DemoOperation::Remove, Ok(None)),
+    };
+    let arguments = match arguments {
+        Ok(arguments) => arguments.map(JsonObject::from).unwrap_or_default(),
+        Err(error) => return print_result(error.result(), json_output),
+    };
+    let result = match crate::bridge::call_demo(operation, &arguments) {
         Ok(result) => result,
         Err(error) => {
             let message = error.to_string();
@@ -394,6 +473,10 @@ pub fn run(options: &DemoOptions, json_output: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    print_result(result, json_output)
+}
+
+fn print_result(result: CallToolResult, json_output: bool) -> ExitCode {
     let output = if json_output {
         result.structured_content.unwrap_or(Value::Null).to_string()
     } else {

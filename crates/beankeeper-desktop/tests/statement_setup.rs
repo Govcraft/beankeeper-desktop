@@ -115,7 +115,8 @@ fn desktop_imports_a_reviewed_statement_once_and_preserves_provenance() -> TestR
         json!({"company":BOOK,"id":created,"date":"2026-05-03","reference":"correct-may-refund"}),
     )?;
     assert_eq!(reversed["created"], true);
-    assert_eq!(read_transactions()?.as_array().map(Vec::len), Some(4));
+    assert_eq!(read_transactions()?.as_array().map(Vec::len), Some(2));
+    verify_reversal_history(&server, reader, created, &reversed["id"])?;
     assert_eq!(call(&server, reader, RECEIPT, lookup)?, receipt);
     let after_reversal = summary()?;
     assert_eq!(after_reversal.committed_batches, imported.committed_batches);
@@ -131,6 +132,27 @@ fn desktop_imports_a_reviewed_statement_once_and_preserves_provenance() -> TestR
         call(&server, reader, "verify", json!({}))?["status"],
         "healthy"
     );
+    Ok(())
+}
+
+fn verify_reversal_history(
+    server: &Server,
+    reader: &str,
+    original: i64,
+    reversal: &Value,
+) -> TestResult {
+    let history = call(
+        server,
+        reader,
+        "txn_list",
+        json!({"company":BOOK,"include_reversed":true}),
+    )?;
+    let history = history
+        .as_array()
+        .ok_or("missing full transaction history")?;
+    assert_eq!(history.len(), 4);
+    assert!(history.iter().any(|row| row["id"] == original));
+    assert!(history.iter().any(|row| &row["id"] == reversal));
     Ok(())
 }
 

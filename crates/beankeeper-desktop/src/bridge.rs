@@ -21,7 +21,7 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
-use rmcp::model::{CallToolResult, ListToolsResult, Tool};
+use rmcp::model::{CallToolResult, JsonObject, ListToolsResult, Tool};
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -213,7 +213,10 @@ pub(crate) fn probe_service(
     result
 }
 
-pub(crate) fn call_demo(operation: DemoOperation) -> Result<CallToolResult, BridgeError> {
+pub(crate) fn call_demo(
+    operation: DemoOperation,
+    arguments: &JsonObject,
+) -> Result<CallToolResult, BridgeError> {
     let endpoint = service::connection()?;
     let mut transport = connected_transport(
         endpoint.url().clone(),
@@ -223,7 +226,7 @@ pub(crate) fn call_demo(operation: DemoOperation) -> Result<CallToolResult, Brid
     )?;
     let result = transport
         .initialize()
-        .and_then(|()| transport.request_tool(operation.name()));
+        .and_then(|()| transport.request_tool(operation.name(), arguments));
     transport.close();
     result
 }
@@ -608,7 +611,11 @@ impl Transport {
         Ok(())
     }
 
-    fn request_tool(&mut self, tool: &str) -> Result<CallToolResult, BridgeError> {
+    fn request_tool(
+        &mut self,
+        tool: &str,
+        arguments: &JsonObject,
+    ) -> Result<CallToolResult, BridgeError> {
         let mut output = io::sink();
         self.exchange(
             &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -616,7 +623,7 @@ impl Transport {
         )?;
         let replies = self.exchange(
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":tool, "arguments":{}
+                "name":tool, "arguments":arguments
             }}),
             &mut output,
         )?;
@@ -635,7 +642,7 @@ impl Transport {
             Probe::ReadOnlyTool => "company_list",
             Probe::AgentAccess => STATUS_TOOL,
         };
-        let result = self.request_tool(tool)?;
+        let result = self.request_tool(tool, &JsonObject::new())?;
         if result.is_error == Some(true) {
             return Err(BridgeError::ToolFailed);
         }
