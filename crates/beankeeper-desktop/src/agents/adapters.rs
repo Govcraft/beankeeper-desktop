@@ -19,6 +19,7 @@ const CLAUDE_PACKAGE_FAMILY: &str = "Claude_pzs8sxrjxfjjc";
 pub enum Agent {
     ClaudeDesktop,
     ClaudeCode,
+    #[value(alias = "chatgpt-codex")]
     Codex,
     Cursor,
     Gemini,
@@ -203,13 +204,24 @@ impl Agent {
         match self {
             Self::ClaudeDesktop => "Claude Desktop",
             Self::ClaudeCode => "Claude Code",
-            Self::Codex => "Codex CLI",
+            Self::Codex => "Codex (including ChatGPT desktop)",
             Self::Cursor => "Cursor",
             Self::Gemini => "Gemini CLI",
             Self::VsCode => "VS Code",
             Self::ChatGpt => "ChatGPT",
             Self::Grok => "Grok (hosted)",
             Self::GrokBuild => "Grok Build",
+        }
+    }
+
+    pub(super) fn unsupported_message(self) -> &'static str {
+        match self {
+            Self::ChatGpt => {
+                "Regular ChatGPT chat has no Beankeeper connection. In the ChatGPT desktop app, switch to Codex and ask it to install Beankeeper from https://beankeeper.app/install.md. To register an existing install, run bk agents connect chatgpt-codex."
+            }
+            _ => {
+                "No supported local MCP configuration is available. Use an agent that can connect to the local Beankeeper service."
+            }
         }
     }
 

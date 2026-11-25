@@ -444,7 +444,7 @@ fn assert_agent_reaches_service(
     endpoint: &Value,
 ) -> TestResult {
     let output = agent_command()
-        .args(["agents", "connect", "codex", "--json"])
+        .args(["agents", "connect", "chatgpt-codex", "--json"])
         .output()?;
     assert!(
         output.status.success(),
@@ -452,7 +452,7 @@ fn assert_agent_reaches_service(
         String::from_utf8_lossy(&output.stdout)
     );
     let output = agent_command()
-        .args(["agents", "doctor", "codex", "--json"])
+        .args(["agents", "doctor", "chatgpt-codex", "--json"])
         .output()?;
     let diagnostic: Value = serde_json::from_slice(&output.stdout)?;
     assert!(
@@ -460,10 +460,58 @@ fn assert_agent_reaches_service(
         "{diagnostic}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(diagnostic["data"]["agents"][0]["state"], "configured");
+    let agent = &diagnostic["data"]["agents"][0];
+    assert_eq!(agent["state"], "configured");
+    assert_eq!(agent["skill_installed"], true);
     assert_eq!(diagnostic["data"]["service"]["state"], "ready");
     assert_eq!(&diagnostic["data"]["service"]["endpoint"], endpoint);
+    let config = agent["config"].as_str().ok_or("missing Codex config")?;
+    let document: toml_edit::DocumentMut = std::fs::read_to_string(config)?.parse()?;
+    let servers = &document["mcp_servers"];
+    let mut ledger = McpPipe::start(&mut registered_stdio(
+        agent_command(),
+        &servers["beankeeper"],
+    )?)?;
+    let listed = ledger.request("tools/list", &json!({}))?;
+    let tools = listed["tools"].as_array().ok_or("missing ledger tools")?;
+    for name in [
+        "setup_status",
+        "txn_post",
+        "txn_recategorize",
+        "audit_undo",
+        "ui_get_link",
+    ] {
+        assert!(
+            tools.iter().any(|tool| tool["name"] == name),
+            "missing {name}"
+        );
+    }
+    let companies = ledger.tool("company_list", &json!({}))?;
+    assert_ne!(companies["isError"], true, "{companies}");
+    let mut lifecycle = McpPipe::start(&mut registered_stdio(
+        agent_command(),
+        &servers["beankeeper-service"],
+    )?)?;
+    let service = lifecycle.tool("service_status", &json!({}))?;
+    assert_eq!(service["structuredContent"]["mcp_endpoint"], *endpoint);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn registered_stdio(
+    mut command: std::process::Command,
+    entry: &toml_edit::Item,
+) -> TestResult<std::process::Command> {
+    let executable = entry["command"].as_str().ok_or("missing stdio command")?;
+    assert_eq!(command.get_program(), executable);
+    assert_eq!(
+        entry.as_table_like().ok_or("missing server table")?.len(),
+        2
+    );
+    for argument in entry["args"].as_array().ok_or("missing stdio arguments")? {
+        command.arg(argument.as_str().ok_or("invalid stdio argument")?);
+    }
+    Ok(command)
 }
 
 #[cfg(target_os = "linux")]

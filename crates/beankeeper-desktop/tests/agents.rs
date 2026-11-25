@@ -103,6 +103,36 @@ fn detection_and_doctor_distinguish_unsupported_unconfigured_and_stopped_service
 }
 
 #[test]
+fn chatgpt_codex_uses_the_shared_profile_and_chat_does_not_register()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let path = home.path();
+    let config = path.join(".codex/config.toml");
+    let (success, chat) = bk(path, &["agents", "connect", "chatgpt", "--json"])?;
+    assert!(!success, "{chat}");
+    let row = &chat["data"]["agents"][0];
+    assert_eq!(row["error"]["code"], "AGENT_UNSUPPORTED");
+    assert!(row["message"].as_str().is_some_and(|message| {
+        message.contains("install.md") && message.contains("agents connect chatgpt-codex")
+    }));
+    assert!(!config.exists());
+
+    let (success, connect) = bk(path, &["agents", "connect", "chatgpt-codex", "--json"])?;
+    assert!(success, "{connect}");
+    let row = &connect["data"]["agents"][0];
+    assert_eq!(row["agent"], "codex");
+    assert_eq!(row["config"], config.to_string_lossy().as_ref());
+    assert_eq!(row["state"], "configured");
+    let registered = fs::read(&config)?;
+    let (success, again) = bk(path, &["agents", "connect", "codex", "--json"])?;
+    assert!(success, "{again}");
+    assert_eq!(again["data"]["agents"][0], *row);
+    assert_eq!(fs::read(&config)?, registered);
+    assert!(!config.with_extension("toml.beankeeper-backup").exists());
+    Ok(())
+}
+
+#[test]
 fn claude_code_connect_adopts_stdio_defaults_and_reports_custom_env_consistently()
 -> Result<(), Box<dyn std::error::Error>> {
     let home = tempfile::tempdir()?;
