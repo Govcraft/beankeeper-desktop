@@ -7,25 +7,25 @@ use std::{
 };
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeRequestParams,
-    ListToolsResult, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, DiscoverResult,
+    Implementation, InitializeRequestParams, ListToolsResult, ProtocolVersion, ServerCapabilities,
+    ServerConfig, Tool,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    BridgeError, ManagedConnection, Transport, connected_transport, read_message, tools_changed,
-    write_message,
+    BridgeError, DISCOVER, InlineProtocol, ManagedConnection, Transport, connected_transport,
+    inline_protocol, read_message, rpc_reply, tools_changed, write_message,
 };
 use crate::{
+    agent_skill,
     service::{
         self, Endpoint, ExtensionCommand, ServiceError,
         extension::{self, ExtensionRequest, Progress, Registration},
     },
     setup::AgentAccess,
 };
-
-const INSTRUCTIONS: &str = "For ‘Set up my books’ or ‘Create demo books’, call setup_status first. +    If it reports not_started, call setup. While running, poll setup_status until ready or failed. +    If setup fails, use doctor and explain the error in plain words. Once ready, refresh the tool list in this chat. +    For real books, call setup_status again for the next onboarding step. For practice books, call demo_start +    with empty arguments and use the practice tools in this chat. Never ask for a terminal, token or passphrase.";
 
 pub(super) fn run(mut input: impl BufRead, output: &mut impl Write) -> Result<(), BridgeError> {
     let mut session = Session::default();
@@ -113,7 +113,18 @@ impl Session {
         if message["method"] == "initialize" {
             return self.initialize(message, id, output);
         }
-        if self.initialize.is_none() {
+        let inline = match inline_protocol(message) {
+            Ok(inline) => inline,
+            Err(error) => return rpc_reply(output, id, Err(error)),
+        };
+        if message["method"] == DISCOVER {
+            let discovery = DiscoverResult::from_server_info(
+                ProtocolVersion::KNOWN_VERSIONS.to_vec(),
+                server_config(),
+            );
+            return response(output, id, discovery);
+        }
+        if self.initialize.is_none() && inline.is_none() {
             return rpc_error(
                 output,
                 id,
@@ -121,7 +132,13 @@ impl Session {
                 "Initialize the Beankeeper extension first.",
             );
         }
-        if message["method"] == "ping" {
+        if let Some(method) = message["method"]
+            .as_str()
+            .filter(|method| agent_skill::handled(method))
+        {
+            return rpc_reply(output, id, agent_skill::result(method, &message["params"]));
+        }
+        if message["method"] == "ping" && inline.is_none() {
             return response(output, id, json!({}));
         }
         let command = (message["method"] == "tools/call")
@@ -137,8 +154,8 @@ impl Session {
             return self.call(command, None, message, id, output);
         }
         let was_attached = self.transport.is_some();
-        let unavailable = self.attach().err();
-        if !was_attached && self.transport.is_some() {
+        let unavailable = self.attach(inline.as_ref()).err();
+        if inline.is_none() && !was_attached && self.transport.is_some() {
             tools_changed(output)?;
         }
         let status_is_local = self.transport.is_none()
@@ -151,7 +168,7 @@ impl Session {
             Some(command @ ExtensionCommand::Status) if status_is_local => {
                 self.call(command, unavailable.as_ref(), message, id, output)
             }
-            _ => self.forward(message, id, output, unavailable.as_ref()),
+            _ => self.forward(message, id, output, unavailable.as_ref(), inline.as_ref()),
         }
     }
 
@@ -180,27 +197,24 @@ impl Session {
             latest
         };
         self.initialize = Some(message.clone());
-        let upstream = self.attach().ok().flatten().unwrap_or_default();
-        let info = ServerConfig::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_tool_list_changed()
-                .build(),
-        )
-        .with_protocol_version(protocol)
-        .with_server_info(Implementation::new("beankeeper", env!("CARGO_PKG_VERSION")))
-        .with_instructions(format!(
-            "{upstream} {INSTRUCTIONS} {}",
-            AgentAccess::mcp_instructions()
-        ));
+        let mut info = server_config().with_protocol_version(protocol);
+        if let Some(tools) = &mut info.capabilities.tools {
+            tools.list_changed = Some(true);
+        }
+        if let Ok(Some(upstream)) = self.attach(None)
+            && let Some(instructions) = &mut info.instructions
+        {
+            instructions.insert(0, ' ');
+            instructions.insert_str(0, &upstream);
+        }
         response(output, id, info)
     }
 
-    fn attach(&mut self) -> Result<Option<String>, BridgeError> {
+    fn attach(&mut self, inline: Option<&InlineProtocol>) -> Result<Option<String>, BridgeError> {
         if self.transport.is_some() || matches!(self.worker, Worker::Running(_)) {
             return Ok(None);
         }
-        let initialize = self.initialize.as_ref().ok_or(BridgeError::Protocol)?;
+        let initialize = self.initialize.as_ref().filter(|_| inline.is_none());
         let (transport, instructions) = connect(&service::connection()?, initialize)?;
         self.transport = Some(transport);
         Ok(instructions)
@@ -252,10 +266,14 @@ impl Session {
         id: &Value,
         output: &mut impl Write,
         unavailable: Option<&BridgeError>,
+        inline: Option<&InlineProtocol>,
     ) -> Result<(), BridgeError> {
         match message["method"].as_str() {
             Some("tools/list") if self.transport.is_none() => {
-                return response(output, id, ListToolsResult::with_all_items(tools(true)));
+                let result = ListToolsResult::with_all_items(tools(true))
+                    .with_ttl_ms(0)
+                    .with_cache_scope(CacheScope::Private);
+                return response(output, id, result);
             }
             Some("tools/call") if self.transport.is_none() => {
                 let result = match self.progress(unavailable) {
@@ -272,7 +290,7 @@ impl Session {
             _ => {}
         }
         if let Some(transport) = &mut self.transport {
-            transport.forward_message(message, output)
+            transport.forward_negotiated(message, inline, output)
         } else {
             rpc_error(
                 output,
@@ -282,6 +300,22 @@ impl Session {
             )
         }
     }
+}
+
+fn server_config() -> ServerConfig {
+    ServerConfig::new(
+        ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_skills()
+            .build(),
+    )
+    .with_server_info(Implementation::new("beankeeper", env!("CARGO_PKG_VERSION")))
+    .with_instructions(format!(
+        "{} {}",
+        agent_skill::claude_setup_summary(),
+        AgentAccess::mcp_instructions()
+    ))
 }
 
 fn readiness(unavailable: Option<&BridgeError>) -> Progress<'static> {
@@ -296,7 +330,7 @@ fn readiness(unavailable: Option<&BridgeError>) -> Progress<'static> {
 
 fn connect(
     endpoint: &Endpoint,
-    initialize: &Value,
+    initialize: Option<&Value>,
 ) -> Result<(Transport, Option<String>), BridgeError> {
     let mut transport = connected_transport(
         endpoint.url().clone(),
@@ -307,9 +341,12 @@ fn connect(
     transport.managed = Some(ManagedConnection {
         books: endpoint.books().into(),
         token_file: endpoint.token_file().into(),
-        initialize: Some(initialize.clone()),
+        initialize: initialize.cloned(),
     });
     transport.extension_tools = true;
+    let Some(initialize) = initialize else {
+        return Ok((transport, None));
+    };
     let replies = transport.exchange(initialize, &mut io::sink())?;
     let instructions = replies.iter().find_map(|reply| {
         if reply.get("id") != initialize.get("id") {

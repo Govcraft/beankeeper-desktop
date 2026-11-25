@@ -9,6 +9,8 @@ use std::{
 use jsonc_parser::cst::{CstObject, CstObjectProp, CstRootNode};
 use toml_edit::{DocumentMut, Item, Table, value};
 
+use crate::agent_skill::SKILL;
+
 use super::{
     AgentError,
     adapters::{Adapter, ConfigFormat},
@@ -21,7 +23,6 @@ pub(super) use json::ServerConflict;
 use json::{JsonClient, ManagedServer, ParsedServer};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
-const SKILL: &str = include_str!("../../../../SKILL.md");
 const SKILL_MARKER: &str = "\n<!-- Managed by Beankeeper Desktop agent registration. -->\n";
 
 #[derive(Clone, Copy, PartialEq, Eq)]

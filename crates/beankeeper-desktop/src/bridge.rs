@@ -15,7 +15,8 @@ use std::{
     time::Duration,
 };
 
-use beankeeper_cli::mcp::{LEDGER_TARGET_HEADER, NamedLedgerTarget};
+use base64::{Engine, prelude::BASE64_STANDARD};
+use beankeeper_cli::mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY, NamedLedgerTarget};
 use clap::Args;
 use reqwest::{
     StatusCode, Url,
@@ -23,12 +24,23 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
-use rmcp::model::{CallToolResult, JsonObject, ListToolsResult, Tool};
+use rmcp::{
+    ErrorData,
+    model::{
+        CacheScope, CallToolResult, ErrorCode, JsonObject, ListToolsResult, ProtocolVersion,
+        RequestMetaObject, Tool,
+    },
+    transport::common::http_header::{
+        BASE64_HEADER_PREFIX, BASE64_HEADER_SUFFIX, HEADER_MCP_METHOD, HEADER_MCP_NAME,
+        HEADER_MCP_PROTOCOL_VERSION,
+    },
+};
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    agent_skill,
     demo::{DemoError, DemoOperation, DemoReport, target_meta},
     onboarding::STATUS_TOOL,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
@@ -373,6 +385,116 @@ fn read_message(input: &mut impl BufRead) -> Result<Option<Value>, BridgeError> 
     }
 }
 
+const DISCOVER: &str = "server/discover";
+const INLINE_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const INLINE_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+fn inline_version(message: &Value) -> Option<&Value> {
+    message["params"]["_meta"].get(INLINE_VERSION)
+}
+
+fn is_inline_request(message: &Value) -> bool {
+    message["method"] == DISCOVER
+        || inline_version(message).is_some_and(|version| {
+            version
+                .as_str()
+                .is_none_or(|version| version >= ProtocolVersion::V_2026_07_28.as_str())
+                || message["params"]["_meta"]
+                    .get(INLINE_CAPABILITIES)
+                    .is_some()
+        })
+}
+
+fn inline_http_headers(
+    mut request: reqwest::blocking::RequestBuilder,
+    message: &Value,
+) -> reqwest::blocking::RequestBuilder {
+    let Some(version) = inline_version(message).and_then(Value::as_str) else {
+        return request;
+    };
+    request = request.header(HEADER_MCP_PROTOCOL_VERSION, version);
+    if let Some(method) = message["method"].as_str()
+        && version >= ProtocolVersion::STANDARD_HEADERS.as_str()
+    {
+        request = request.header(HEADER_MCP_METHOD, method);
+        let key = match method {
+            "tools/call" | "prompts/get" => "name",
+            "resources/subscribe" | "resources/unsubscribe" => "uri",
+            "tasks/get" | "tasks/update" | "tasks/cancel" => "taskId",
+            _ => return request,
+        };
+        if let Some(name) = message["params"][key].as_str() {
+            let value = if name.trim() == name
+                && name.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+                && !(name.starts_with(BASE64_HEADER_PREFIX) && name.ends_with(BASE64_HEADER_SUFFIX))
+            {
+                name.to_owned()
+            } else {
+                format!(
+                    "{BASE64_HEADER_PREFIX}{}{BASE64_HEADER_SUFFIX}",
+                    BASE64_STANDARD.encode(name)
+                )
+            };
+            request = request.header(HEADER_MCP_NAME, value);
+        }
+    }
+    request
+}
+
+// The legacy handshake lives in the connection. Modern requests carry their own context.
+struct InlineProtocol {
+    ledger_target: Option<NamedLedgerTarget>,
+}
+
+impl TryFrom<&Value> for InlineProtocol {
+    type Error = ErrorData;
+
+    fn try_from(message: &Value) -> Result<Self, Self::Error> {
+        let invalid = || ErrorData::invalid_params("Invalid MCP request metadata.", None);
+        let meta =
+            RequestMetaObject::deserialize(&message["params"]["_meta"]).map_err(|_| invalid())?;
+        let version = meta.protocol_version().ok_or_else(invalid)?;
+        if !meta
+            .missing_required_keys(&ProtocolVersion::V_2026_07_28)
+            .is_empty()
+        {
+            return Err(invalid());
+        }
+        if !ProtocolVersion::KNOWN_VERSIONS.contains(&version) {
+            return Err(ErrorData::unsupported_protocol_version(
+                version,
+                ProtocolVersion::KNOWN_VERSIONS,
+            ));
+        }
+        let ledger_target = meta
+            .get(LEDGER_TARGET_META_KEY)
+            .map(NamedLedgerTarget::deserialize)
+            .transpose()
+            .map_err(|_| ErrorData::invalid_params("Invalid Beankeeper ledger target.", None))?;
+        Ok(Self { ledger_target })
+    }
+}
+
+fn inline_protocol(message: &Value) -> Result<Option<InlineProtocol>, ErrorData> {
+    if is_inline_request(message) {
+        InlineProtocol::try_from(message).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn rpc_reply(
+    output: &mut impl Write,
+    id: &Value,
+    result: Result<Value, ErrorData>,
+) -> Result<(), BridgeError> {
+    let message = match result {
+        Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+        Err(error) => json!({"jsonrpc":"2.0", "id":id, "error":error}),
+    };
+    write_message(output, &message)
+}
+
 impl Transport {
     fn forward(
         &mut self,
@@ -390,6 +512,41 @@ impl Transport {
         message: &Value,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
+        let inline = match inline_protocol(message) {
+            Ok(inline) => inline,
+            Err(error) => {
+                return message
+                    .get("id")
+                    .map_or(Ok(()), |id| rpc_reply(output, id, Err(error)));
+            }
+        };
+        self.forward_negotiated(message, inline.as_ref(), output)
+    }
+
+    fn forward_negotiated(
+        &mut self,
+        message: &Value,
+        inline: Option<&InlineProtocol>,
+        output: &mut impl Write,
+    ) -> Result<(), BridgeError> {
+        if let Some(method) = message["method"]
+            .as_str()
+            .filter(|method| agent_skill::handled(method))
+            && self.instructions.is_some()
+        {
+            return message.get("id").map_or(Ok(()), |id| {
+                let result = if self.protocol.is_some() || inline.is_some() {
+                    agent_skill::result(method, &message["params"])
+                } else {
+                    Err(ErrorData::new(
+                        ErrorCode(-32002),
+                        "Initialize Beankeeper first.",
+                        None,
+                    ))
+                };
+                rpc_reply(output, id, result)
+            });
+        }
         self.refresh_access(output)?;
         let tool_request = message["method"] == "tools/call";
         let tool_list = message["method"] == "tools/list";
@@ -401,6 +558,10 @@ impl Transport {
             None
         };
         if let Some(operation) = operation {
+            if inline.is_some() {
+                self.exchange_startup(message, output)?;
+                return Ok(());
+            }
             let entering_demo = self.demo.begin(operation);
             let replies = self.exchange_startup(message, output)?;
             let changed = if let Some(reply) = replies
@@ -416,11 +577,21 @@ impl Transport {
             }
             return Ok(());
         }
-        if (tool_request || tool_list) && !matches!(self.demo, DemoSelection::Startup) {
-            return self.exchange_demo(message, tool_list, output);
+        if tool_request || tool_list {
+            let target = match inline {
+                Some(request) => request.ledger_target.as_ref(),
+                None if !matches!(self.demo, DemoSelection::Startup) => {
+                    let target = self.demo.named().cloned();
+                    return self.exchange_demo(message, tool_list, target.as_ref(), output);
+                }
+                None => None,
+            };
+            if let Some(target) = target {
+                return self.exchange_demo(message, tool_list, Some(target), output);
+            }
         }
         if let Some(managed) = &self.managed
-            && self.protocol.is_some()
+            && (self.protocol.is_some() || inline.is_some())
             && message["method"] == "tools/call"
             && matches!(
                 message["params"]["name"].as_str(),
@@ -468,10 +639,10 @@ impl Transport {
         &mut self,
         message: &Value,
         tool_list: bool,
+        target: Option<&NamedLedgerTarget>,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
-        let target = self.demo.named().cloned();
-        if let Some(target) = &target {
+        if let Some(target) = target {
             let result = match self.exchange_target(message, Some(target), output) {
                 Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
                     if self.refresh_access(output)? =>
@@ -487,13 +658,15 @@ impl Transport {
             }
         }
         if let Some(id) = message.get("id") {
-            let meta = target.as_ref().map(target_meta);
+            let meta = target.map(target_meta);
             let result = if tool_list {
                 let mut tools = demo_tools();
                 if self.extension_tools {
                     tools.extend(extension::tools(false));
                 }
-                let mut result = ListToolsResult::with_all_items(tools);
+                let mut result = ListToolsResult::with_all_items(tools)
+                    .with_ttl_ms(0)
+                    .with_cache_scope(CacheScope::Private);
                 result.meta = meta;
                 serde_json::to_value(result)
             } else {
@@ -568,11 +741,15 @@ impl Transport {
         if let Some(target) = target {
             request = request.header(LEDGER_TARGET_HEADER, target.as_ref());
         }
-        if let Some(session) = &self.session {
-            request = request.header("Mcp-Session-Id", session);
-        }
-        if let Some(protocol) = &self.protocol {
-            request = request.header("MCP-Protocol-Version", protocol);
+        if is_inline_request(message) {
+            request = inline_http_headers(request, message);
+        } else {
+            if let Some(session) = &self.session {
+                request = request.header("Mcp-Session-Id", session);
+            }
+            if let Some(protocol) = &self.protocol {
+                request = request.header("MCP-Protocol-Version", protocol);
+            }
         }
         if self.extension_tools
             && matches!(
@@ -590,10 +767,15 @@ impl Transport {
             self.session = Some(session.clone());
         }
         let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
+        let discovery = message["method"] == DISCOVER;
         let tool_list = message["method"] == "tools/list";
         let relay = ReplyContext {
             request_id: message.get("id"),
-            instructions: if initial { self.instructions } else { None },
+            instructions: if initial || discovery {
+                self.instructions
+            } else {
+                None
+            },
             managed_initialize: initial && self.managed.is_some(),
             supplemental_tools: match (tool_list, target, &self.managed) {
                 (true, Some(_), _) => SupplementalTools::Demo,
@@ -778,6 +960,9 @@ fn emit(
             existing.push(' ');
         }
         existing.push_str(instructions);
+        if let Some(capabilities) = result.get_mut("capabilities") {
+            agent_skill::advertise(capabilities);
+        }
     }
     if context
         .request_id

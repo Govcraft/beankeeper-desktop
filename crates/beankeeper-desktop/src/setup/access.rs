@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_with::{As, DisplayFromStr};
 
-use crate::service::ACCESS_TOOL;
+use crate::{agent_skill, service::ACCESS_TOOL};
 
 static READ_ONLY_NOTE: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -228,7 +228,7 @@ impl AgentAccess {
             format!(
                 "When the owner asks to set up their books or a posting tool is missing, call \
                  setup_status on the ledger connection if listed. For setup, explain the next step \
-                 and ask for any missing facts. For service readiness, use service_status on the \
+                 and ask for any missing facts. {demo} For service readiness, use service_status on the \
                  lifecycle connection if available. Explain the verified agent_access. \
                  If preset is read-only, follow this guidance: {read_only} \
                  Call {ACCESS_TOOL} only when the owner asks to change access to those managed \
@@ -246,7 +246,7 @@ impl AgentAccess {
                  through to changes_mark_seen if listed. If changes_since is unavailable after a \
                  post, tell the owner what was recorded and give the book and transaction ID. \
                  With preset bookkeeper, \
-                 follow this correction guidance. {AGENT_UNDO_GUIDANCE} If a typed rule blocks \
+                 use txn_recategorize when listed to fix a posted category. {AGENT_UNDO_GUIDANCE} If a typed rule blocks \
                  a correction, explain it in plain words and take the next authorized step named \
                  by the error. If neither tool is available, explain that in chat and check for \
                  the CLI equivalent or a newer signed release. If an earlier hand-made offset \
@@ -257,9 +257,11 @@ impl AgentAccess {
                  Use the listed tools within its signed write mode. If agent_access itself is null, \
                  use the status and its error code to explain why access is unverified. Never ask \
                  for, read, or share owner and approval credentials, recovery material, or \
-                 passphrases. Answer in plain words with chartable data when available. Offer \
+                 passphrases. {voice} Include chartable data when available. Offer \
                  ui_get_link for optional Desktop detail.",
-                read_only = READ_ONLY_NOTE.as_str()
+                read_only = READ_ONLY_NOTE.as_str(),
+                demo = agent_skill::demo_summary(),
+                voice = agent_skill::voice_summary(),
             )
         });
         &INSTRUCTIONS
