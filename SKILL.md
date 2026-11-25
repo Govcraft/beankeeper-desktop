@@ -10,9 +10,14 @@ description: Work with the user's encrypted local Beankeeper Desktop workspace o
 Choose the setup path for your client. For paths that use shell commands,
 run them from an authorized shell in the owner's logged-in OS session.
 
-- **Claude Desktop chat.** Use the verified `.mcpb` extension.
-  With the extension enabled, ask **Set up my books** and use the
-  [book setup tools](#guide-the-owner-through-book-setup) in the same chat.
+- **Claude Desktop chat.** Use the installed Beankeeper extension in this chat.
+  Call `setup_status` when the owner asks to set up books or try practice books.
+  If it returns `not_started`, call `setup` with no arguments. Poll
+  `setup_status` while it reports `running`. If it reports `failed`, call
+  `doctor` and explain the problem in plain words. When it reports `ready`,
+  refresh the tool list and continue in the same chat. Call `setup_status`
+  again for real books or `demo_start` for practice books. Follow the
+  [book setup tools](#guide-the-owner-through-book-setup) for real books.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
 - **Claude Code, local Codex, and Grok Build.** Follow the steps below when
   running on the owner's machine.
@@ -24,11 +29,12 @@ run them from an authorized shell in the owner's logged-in OS session.
   Grok Build or another supported local client. Grok Bot's Command MCP runs
   on its cloud computer.
   [Grok Bot computer access](https://docs.x.ai/grok-bot/computer-and-apps)
-- **Clients without local shell access.** If the owner uses Claude Desktop,
-  offer the verified `.mcpb` extension. Otherwise ask them to continue in a
-  supported local client. If they have no local client that can run setup,
-  give them the signed installation instructions below for their OS.
-  [Claude Desktop extension work](https://github.com/Govcraft/beankeeper-desktop/issues/43)
+- **Clients without local shell access.** If the owner uses Claude Desktop
+  and this chat lacks Beankeeper tools, direct them to **Get it for the Claude
+  app** on beankeeper.app when available. They open that one download and
+  click **Install** in Claude, then ask Claude to set up their books. If the
+  download is unavailable, explain that this install path is pending. For other
+  clients, ask the owner to continue in a supported local client.
 
 Run `bk service status --json` in the owner's logged-in user session. If
 `bk` is missing from PATH, check the per-user install location first.

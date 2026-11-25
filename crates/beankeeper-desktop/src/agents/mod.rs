@@ -364,23 +364,73 @@ fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write)
 }
 
 fn perform(operation: Operation, selected: Option<Agent>) -> Result<Report, AgentError> {
+    let binary = env::current_exe().map_err(AgentError::Binary)?;
+    perform_for(operation, selected, &binary, RegistrationSource::Command)
+}
+
+#[derive(Clone, Copy)]
+enum RegistrationSource {
+    Command,
+    ClaudeExtension,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ExtensionRegistrationIssue {
+    agent: Agent,
+    code: &'static str,
+}
+
+pub(crate) fn connect_from_extension(
+    binary: &std::path::Path,
+) -> Result<Vec<ExtensionRegistrationIssue>, &'static str> {
+    let report = perform_for(
+        Operation::Connect,
+        None,
+        binary,
+        RegistrationSource::ClaudeExtension,
+    )
+    .map_err(|error| error.code())?;
+    Ok(report
+        .agents
+        .into_iter()
+        .filter_map(|status| {
+            status.error.map(|error| ExtensionRegistrationIssue {
+                agent: status.agent,
+                code: error.code,
+            })
+        })
+        .collect())
+}
+
+fn perform_for(
+    operation: Operation,
+    selected: Option<Agent>,
+    binary: &std::path::Path,
+    source: RegistrationSource,
+) -> Result<Report, AgentError> {
     let locations = Locations::discover()
         .filter(|locations| locations.home.is_absolute())
         .ok_or(AgentError::Home)?;
-    let binary = env::current_exe().map_err(AgentError::Binary)?;
     let binary = binary
         .to_str()
         .filter(|_| binary.is_absolute())
-        .ok_or_else(|| AgentError::InvalidBinary(binary.clone()))?;
+        .ok_or_else(|| AgentError::InvalidBinary(binary.into()))?;
     let _lock = matches!(operation, Operation::Connect | Operation::Disconnect)
         .then(mutation_lock)
         .transpose()?;
     let agents: Vec<_> = Agent::ALL
         .into_iter()
+        .filter(|agent| {
+            !matches!(
+                (source, agent),
+                (RegistrationSource::ClaudeExtension, Agent::ClaudeDesktop)
+            )
+        })
         .filter(|agent| selected.is_none_or(|selected| selected == *agent))
         .map(|agent| check_agent(agent, &locations, binary, operation, selected.is_some()))
         .collect();
-    let claude_overlap = if !matches!(operation, Operation::Disconnect)
+    let claude_overlap = if matches!(source, RegistrationSource::Command)
+        && !matches!(operation, Operation::Disconnect)
         && matches!(
             selected,
             None | Some(Agent::ClaudeDesktop | Agent::ClaudeCode)

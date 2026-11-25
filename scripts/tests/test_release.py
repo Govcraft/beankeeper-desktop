@@ -228,6 +228,39 @@ class PackagingTests(unittest.TestCase):
                     self.assertEqual(archive.read("LICENSE.md"), (ROOT / "LICENSE.md").read_bytes())
                     self.assertTrue(archive.read(manifest["icon"]).startswith(b"\x89PNG"))
 
+    def test_universal_macos_bundle_uses_both_packaged_slices(self):
+        release_version = "1.2.3"
+        targets = ("aarch64-apple-darwin", "x86_64-apple-darwin")
+        for target in targets:
+            self.binary.write_bytes(target.encode())
+            staged = release.stage(self.binary, release_version, target, self.root / "work")
+            release.mcp_bundle(staged, release_version, target, self.output)
+
+        def lipo(arguments, *, check):
+            self.assertTrue(check)
+            if "-create" in arguments:
+                self.assertEqual([path.read_bytes() for path in arguments[3:5]],
+                                 [target.encode() for target in targets])
+                arguments[-1].write_bytes(b"fat Mach-O fixture")
+
+        with (patch.object(release.subprocess, "run", side_effect=lipo) as run,
+              patch.object(release.subprocess, "check_output", return_value="bk 1.2.3\n")):
+            release.universal_macos_bundle(self.output, release_version)
+            self.assertEqual(run.call_count, 2)
+            universal = run.call_args_list[0].args[0][-1]
+            run.assert_called_with(
+                ["xcrun", "lipo", universal, "-verify_arch", "arm64", "x86_64"], check=True,
+            )
+
+        filename = "bk-1.2.3-universal-apple-darwin.mcpb"
+        with zipfile.ZipFile(self.output / filename) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["compatibility"]["platforms"], ["darwin"])
+            self.assertEqual(manifest["server"]["entry_point"], "server/bk")
+            self.assertEqual(archive.read("server/bk"), b"fat Mach-O fixture")
+        release.checksums(self.output)
+        self.assertIn(f"  {filename}\n", (self.output / "checksums-sha256.txt").read_text())
+
     def test_checksums_cover_every_final_asset_and_exclude_bundles(self):
         for suffix in ("tar.gz", "deb", "pkg", "exe", "zip", "mcpb"):
             (self.output / f"bk-0.1.0-target.{suffix}").write_bytes(suffix.encode())

@@ -2,11 +2,13 @@
 """Exercise real per-user managers on disposable CI runners. Never run on an owner's machine."""
 
 import argparse
+from contextlib import contextmanager
 import filecmp
 import hashlib
 import json
 import os
 from pathlib import Path
+from queue import Queue
 import re
 import shutil
 import signal
@@ -15,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from threading import Thread
 import time
 import urllib.request
 import urllib.error
@@ -82,6 +85,112 @@ def extension_launcher(binary, cache, bundle):
     return launcher, tuple(config["args"]), manifest
 
 
+@contextmanager
+def extension_session(launcher, arguments, env):
+    """Keep the same stdio session open while setup runs and tools arrive."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errors:
+        with subprocess.Popen(
+            [str(launcher), *arguments], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=errors, text=True, encoding="utf-8",
+        ) as process:
+            replies = Queue()
+
+            def read():
+                try:
+                    for line in process.stdout:
+                        replies.put(json.loads(line))
+                except ValueError as error:
+                    replies.put(error)
+                finally:
+                    replies.put(None)
+
+            reader = Thread(target=read, daemon=True)
+            reader.start()
+            next_id = 0
+            notifications = []
+
+            def request(method, params, timeout=10):
+                nonlocal next_id
+                next_id += 1
+                frame = {"jsonrpc": "2.0", "id": next_id, "method": method, "params": params}
+                process.stdin.write(json.dumps(frame) + "\n")
+                process.stdin.flush()
+                deadline = time.monotonic() + timeout
+                while True:
+                    reply = replies.get(timeout=max(0, deadline - time.monotonic()))
+                    assert isinstance(reply, dict), "extension stopped or sent non-MCP stdout"
+                    if "id" in reply:
+                        assert reply["id"] == next_id and "error" not in reply
+                        return reply["result"]
+                    notifications.append(reply["method"])
+
+            def tool(name, arguments=None, timeout=10):
+                return request("tools/call", {"name": name, "arguments": arguments or {}}, timeout)
+
+            try:
+                initialized = request("initialize", {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "extension-ci", "version": "1"},
+                })
+                assert initialized["serverInfo"]["name"] == "beankeeper"
+                assert initialized["capabilities"]["tools"]["listChanged"]
+                assert "setup_status" in initialized["instructions"]
+                process.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+                yield request, tool, notifications
+                process.stdin.close()
+                assert process.wait(timeout=10) == 0, "extension exited unsuccessfully"
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                reader.join(timeout=10)
+
+
+def setup_in_extension(launcher, arguments, env, definition):
+    with extension_session(launcher, arguments, env) as (request, tool, notifications):
+        tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
+        assert tools == {"setup", "setup_status", "doctor"}
+        assert tool("setup_status")["structuredContent"]["state"] == "not_started"
+        rejected = tool("setup", {"url": "unexpected", "command": "unexpected"})
+        assert rejected["isError"] and rejected["structuredContent"]["code"] == "SERVICE_ARGUMENTS"
+        assert not definition.exists() and not definition.is_symlink()
+        assert tool("setup")["structuredContent"]["state"] == "running"
+
+        deadline = time.monotonic() + 100
+        while True:
+            progress = tool("setup_status")["structuredContent"]
+            if progress["state"] != "running":
+                break
+            assert time.monotonic() < deadline, "local service setup never became ready"
+            time.sleep(0.2)
+        assert progress["state"] == "ready", progress
+        companion_issues = progress["registration"]["checked"]
+        # Normal service uninstall preserves prior companion configs.
+        # An existing conflict is reported without blocking the Claude chat.
+        assert all(issue["agent"] not in ("codex", "claude-desktop")
+                   for issue in companion_issues), companion_issues
+        assert not progress["claude_restart_required"]
+        assert "notifications/tools/list_changed" in notifications
+        assert tool("setup")["structuredContent"]["state"] == "ready"
+        assert tool("doctor")["structuredContent"]["state"] == "ready"
+        tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
+        assert {"company_list", "setup", "setup_status", "doctor", "demo_start"} <= tools
+
+        # Set up my books uses the existing onboarding tool on this connection.
+        ledger = tool("setup_status")["structuredContent"]
+        expected = {key: ledger.get(key) for key in ("state", "next_step", "companies", "accounts")}
+        assert expected == {
+            "state": "installed", "next_step": "list_accounts", "companies": 1, "accounts": 0,
+        }, expected
+
+        # Create demo books uses the existing isolated practice ledger in the same chat.
+        practice = tool("demo_start", timeout=30)["structuredContent"]
+        assert practice["state"] == "active"
+        companies = tool("company_list")
+        assert companies["_meta"]["beankeeper/ledgerTarget"] == practice["target"]
+        assert tool("demo_remove")["structuredContent"]["state"] == "removed"
+        assert tool("setup_status")["structuredContent"]["companies"] == ledger["companies"]
+
+
 def exercise_extension(binary, root, base_env, bundle=None):
     """Exercise the MCPB launch command with a fresh native service registration."""
     parent = root / "fresh extension"
@@ -93,6 +202,7 @@ def exercise_extension(binary, root, base_env, bundle=None):
         "BEANKEEPER_SERVICE_DATA_DIR": str(parent / "data"),
         "BEANKEEPER_DESKTOP_STATE_DIR": str(parent / "state"),
         "BEANKEEPER_SERVICE_LOG_DIR": str(parent / "logs"),
+        "CODEX_HOME": str(parent / "codex"),
     }
     if sys.platform == "darwin":
         # Use the login session that prepared the native keychain. The ledger,
@@ -114,8 +224,15 @@ def exercise_extension(binary, root, base_env, bundle=None):
                    else Path(env.get("XDG_CONFIG_HOME") or home / ".config"))
         claude_directory = support / "Claude"
     claude_desktop = claude_directory / "claude_desktop_config.json"
-    client_configs = (home / ".claude.json", home / ".codex/config.toml", claude_desktop)
-    before = {path: path.read_bytes() if path.exists() else None for path in client_configs}
+    claude_desktop.parent.mkdir(parents=True, exist_ok=True)
+    # Even a detected Claude profile without a registry entry must be skipped.
+    # Never replace pre-existing configuration (native smoke also runs without a bundle).
+    had_claude_config = claude_desktop.exists()
+    if not had_claude_config:
+        claude_desktop.write_text('{"mcpServers":{}}', encoding="utf-8")
+    before = claude_desktop.read_bytes()
+    codex_home = Path(env["CODEX_HOME"])
+    codex_home.mkdir()
 
     def run(executable, *arguments, **kwargs):
         return subprocess.run(
@@ -133,26 +250,8 @@ def exercise_extension(binary, root, base_env, bundle=None):
     definition = Path(json.loads(baseline.stdout)["service_definition"])
     assert not definition.exists() and not definition.is_symlink(), "service must start unregistered"
 
-    requests = [
-        {"id": 1, "method": "initialize", "params": {
-            "protocolVersion": "2025-11-25", "capabilities": {},
-            "clientInfo": {"name": "extension-ci", "version": "1"},
-        }},
-        {"method": "notifications/initialized"},
-        {"id": 2, "method": "tools/list", "params": {}},
-        {"id": 3, "method": "tools/call", "params": {"name": "setup_status", "arguments": {}}},
-    ]
-    messages = "".join(json.dumps({"jsonrpc": "2.0", **request}) + "\n" for request in requests)
     try:
-        output = run(launcher, *arguments, input=messages)
-        assert output.returncode == 0, output.stderr + safe_log_tail(parent / "logs/service.log")
-        replies = {reply["id"]: reply["result"] for reply in map(json.loads, output.stdout.splitlines())}
-        assert replies[1]["serverInfo"]["name"] == "beankeeper"
-        assert "setup_status" in replies[1]["instructions"]
-        assert any(tool["name"] == "setup_status" for tool in replies[2]["tools"])
-        assert not replies[3].get("isError", False)
-        assert replies[3]["structuredContent"]["state"] == "installed"
-        assert replies[3]["structuredContent"]["summary"]
+        setup_in_extension(launcher, arguments, env, definition)
 
         # Startup points outside the extension cache, allowing the host app to
         # replace or remove the bundle while the service and books are intact.
@@ -169,7 +268,9 @@ def exercise_extension(binary, root, base_env, bundle=None):
         metadata = json.loads(books.with_suffix(".desktop.json").read_text(encoding="utf-8"))
         assert metadata["secret_store_file"] is None
         assert not books.read_bytes().startswith(b"SQLite format 3")
-        assert {path: path.read_bytes() if path.exists() else None for path in client_configs} == before
+        assert claude_desktop.read_bytes() == before
+        codex_config = (codex_home / "config.toml").read_text(encoding="utf-8")
+        assert installed.name in codex_config and "claude-extension" in codex_config
         if manifest is not None:
             assert status["version"] == manifest["version"]
             for action in ("stop", "start"):
@@ -184,7 +285,7 @@ def exercise_extension(binary, root, base_env, bundle=None):
             return
 
         # Exercise the same authenticated tool through the public doctor command.
-        agent_env = {**env, "CODEX_HOME": str(parent / "codex")}
+        agent_env = env.copy()
         if sys.platform.startswith("linux"):
             agent_env["XDG_CONFIG_HOME"] = env.get("XDG_CONFIG_HOME", str(home / ".config"))
             agent_env["HOME"] = str(parent / "agent-home")
@@ -200,9 +301,10 @@ def exercise_extension(binary, root, base_env, bundle=None):
         # An explicitly stopped service must stay stopped on the next launch.
         stopped = run(installed, "service", "stop")
         assert stopped.returncode == 0, stopped.stderr
-        output = run(installed, "mcp", "extension", input=messages)
-        assert output.returncode != 0 and "SERVICE_NOT_READY" in output.stderr
-        assert not output.stdout
+        with extension_session(installed, ("mcp", "extension"), env) as (_, tool, _):
+            unavailable = tool("doctor")
+            assert unavailable["isError"]
+            assert unavailable["structuredContent"]["code"] in ("SERVICE_NOT_READY", "SESSION_ENV_UNAVAILABLE")
         doctor = run(installed, "agents", "doctor", "codex", "--json", env=agent_env)
         assert doctor.returncode != 0, doctor.stdout + doctor.stderr
         assert json.loads(doctor.stdout)["data"]["service"]["error"]["code"] == "SERVICE_NOT_READY"
@@ -211,10 +313,12 @@ def exercise_extension(binary, root, base_env, bundle=None):
         print("Claude extension first launch, MCP tools, durable executable and persistent stop passed")
     finally:
         run(binary, "service", "uninstall")
+        if not had_claude_config:
+            claude_desktop.unlink()
 
 
 def exercise_claude_doctor(run, binary, directory, manifest, service):
-    directory.mkdir(parents=True)
+    directory.mkdir(parents=True, exist_ok=True)
     registry = directory / "extensions-installations.json"
     extension_id = "local.mcpb.govcraft.beankeeper"
     installations = {"extensions": {extension_id: {"id": extension_id, "manifest": manifest}}}

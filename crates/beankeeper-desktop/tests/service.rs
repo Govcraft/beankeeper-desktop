@@ -221,6 +221,43 @@ fn managed_bridge_fails_with_actionable_service_error_when_stopped() -> TestResu
     Ok(())
 }
 
+#[test]
+fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_commands() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut command = isolated(root.path());
+    command.args(["mcp", "extension"]);
+    let mut pipe = McpPipe::start(&mut command)?;
+    let listed = pipe.request("tools/list", &json!({}))?;
+    let tools = listed["tools"].as_array().ok_or("missing setup tools")?;
+    assert_eq!(
+        tools.iter().map(|tool| &tool["name"]).collect::<Vec<_>>(),
+        ["setup", "setup_status", "doctor"]
+    );
+    for tool in tools {
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
+    let status = pipe.tool("setup_status", &json!({}))?;
+    assert_eq!(status["structuredContent"]["state"], "not_started");
+    let cli = isolated(root.path())
+        .args(["--format", "json", "service", "extension", "status"])
+        .output()?;
+    assert!(cli.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli.stdout)?,
+        status["structuredContent"]
+    );
+    let rejected = pipe.tool("setup", &json!({"command":"fixture", "url":"fixture"}))?;
+    assert_eq!(rejected["structuredContent"]["code"], "SERVICE_ARGUMENTS");
+    let unavailable = pipe.tool("demo_start", &json!({}))?;
+    assert_eq!(
+        unavailable["structuredContent"]["code"],
+        "EXTENSION_SETUP_REQUIRED"
+    );
+    assert!(!root.path().join("state").exists());
+    assert!(!root.path().join("data").exists());
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn managed_host_publishes_fallback_endpoint_and_rejects_stale_runtime_identity() -> TestResult {
@@ -1611,7 +1648,7 @@ fn managed_demo_tailors_books_over_cli_and_mcp() -> TestResult {
 
     let fixture = LegacyService::new()?;
     let _host = fixture.host()?;
-    let mut pipe = DemoPipe::new(&fixture)?;
+    let mut pipe = McpPipe::new(&fixture)?;
     let original = demo_payload(&pipe.tool("company_list", &json!({}))?)?;
     let tools = pipe.request("tools/list", &json!({}))?;
     let start = tools["tools"]
@@ -1709,7 +1746,7 @@ fn managed_demo_tailors_books_over_cli_and_mcp() -> TestResult {
 }
 
 #[cfg(target_os = "linux")]
-fn assert_tailored_demo_accounts(pipe: &mut DemoPipe) -> TestResult {
+fn assert_tailored_demo_accounts(pipe: &mut McpPipe) -> TestResult {
     let book = json!({"company":"demo-book-1"});
     let accounts = demo_payload(&pipe.tool("account_list", &book)?)?;
     let accounts = accounts.as_array().ok_or("missing synthetic accounts")?;
@@ -1738,7 +1775,7 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
 
     let fixture = LegacyService::new()?;
     let _host = fixture.host()?;
-    let mut pipe = DemoPipe::new(&fixture)?;
+    let mut pipe = McpPipe::new(&fixture)?;
     let malformed = pipe.tool("demo_start", &json!({"path":fixture.books}))?;
     assert_eq!(malformed["structuredContent"]["code"], "DEMO_ARGUMENTS");
     let unavailable = pipe.tool("txn_post", &demo_posting())?;
@@ -1802,19 +1839,21 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-struct DemoPipe {
+struct McpPipe {
     child: std::process::Child,
     input: std::process::ChildStdin,
     frames: mpsc::Receiver<std::io::Result<String>>,
     id: u64,
 }
 
-#[cfg(target_os = "linux")]
-impl DemoPipe {
+impl McpPipe {
+    #[cfg(target_os = "linux")]
     fn new(fixture: &LegacyService) -> TestResult<Self> {
-        let mut child = fixture
-            .bridge()
+        Self::start(&mut fixture.bridge())
+    }
+
+    fn start(command: &mut std::process::Command) -> TestResult<Self> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -1873,8 +1912,7 @@ impl DemoPipe {
     }
 }
 
-#[cfg(target_os = "linux")]
-impl Drop for DemoPipe {
+impl Drop for McpPipe {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

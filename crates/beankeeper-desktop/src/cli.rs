@@ -87,7 +87,7 @@ pub fn command() -> Command {
                 ))
                 .subcommand(
                     Command::new("extension")
-                        .about("Start an installed MCP bundle and serve it over stdio")
+                        .about("Serve the Claude extension's setup and ledger tools over stdio")
                         .hide(true),
                 )
         })

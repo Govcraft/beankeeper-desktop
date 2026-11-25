@@ -5,6 +5,8 @@
 //! stdout. Current upstream tools use request/response traffic; a separate GET
 //! notification stream is not needed for them.
 
+mod extension;
+
 use std::{
     error::Error,
     fmt,
@@ -156,17 +158,12 @@ pub fn run(options: &BridgeOptions) -> Result<(), BridgeError> {
     }
 }
 
-/// Start the service when launched from an accepted extension, then bridge MCP.
+/// Serve the Claude extension's first-run tools and bridge to the managed ledger.
 ///
 /// # Errors
 /// Returns actionable setup, service discovery, credential and transport errors.
 pub fn run_extension() -> Result<(), BridgeError> {
-    let endpoint = service::extension_connection()?;
-    run_connected(
-        endpoint.url().clone(),
-        endpoint.token_file(),
-        Some(endpoint.books()),
-    )
+    extension::run(io::stdin().lock(), &mut io::stdout().lock())
 }
 
 fn run_connected(
@@ -252,6 +249,7 @@ fn connected_transport(
         managed: None,
         demo: DemoSelection::default(),
         instructions,
+        extension_tools: false,
     })
 }
 
@@ -351,6 +349,28 @@ struct Transport {
     session: Option<HeaderValue>,
     protocol: Option<String>,
     instructions: Option<&'static str>,
+    extension_tools: bool,
+}
+
+fn read_message(input: &mut impl BufRead) -> Result<Option<Value>, BridgeError> {
+    loop {
+        let mut line = String::new();
+        let read = io::Read::take(&mut *input, MAX_MESSAGE_BYTES + 1).read_line(&mut line)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if exceeds_message_limit(read) {
+            return Err(BridgeError::Protocol);
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: Value = serde_json::from_str(&line).map_err(|_| BridgeError::Protocol)?;
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || !message.is_object() {
+            return Err(BridgeError::Protocol);
+        }
+        return Ok(Some(message));
+    }
 }
 
 impl Transport {
@@ -359,25 +379,10 @@ impl Transport {
         mut input: impl BufRead,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
-        loop {
-            let mut line = String::new();
-            let read = io::Read::take(&mut input, MAX_MESSAGE_BYTES + 1).read_line(&mut line)?;
-            if read == 0 {
-                return Ok(());
-            }
-            if exceeds_message_limit(read) {
-                return Err(BridgeError::Protocol);
-            }
-            if line.trim().is_empty() {
-                continue;
-            }
-            let message: Value = serde_json::from_str(&line).map_err(|_| BridgeError::Protocol)?;
-            if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || !message.is_object()
-            {
-                return Err(BridgeError::Protocol);
-            }
+        while let Some(message) = read_message(&mut input)? {
             self.forward_message(&message, output)?;
         }
+        Ok(())
     }
 
     fn forward_message(
@@ -484,7 +489,11 @@ impl Transport {
         if let Some(id) = message.get("id") {
             let meta = target.as_ref().map(target_meta);
             let result = if tool_list {
-                let mut result = ListToolsResult::with_all_items(demo_tools());
+                let mut tools = demo_tools();
+                if self.extension_tools {
+                    tools.extend(extension::tools(false));
+                }
+                let mut result = ListToolsResult::with_all_items(tools);
                 result.meta = meta;
                 serde_json::to_value(result)
             } else {
@@ -565,6 +574,14 @@ impl Transport {
         if let Some(protocol) = &self.protocol {
             request = request.header("MCP-Protocol-Version", protocol);
         }
+        if self.extension_tools
+            && matches!(
+                message["method"].as_str(),
+                Some("initialize" | "notifications/initialized")
+            )
+        {
+            request = request.timeout(Duration::from_secs(5));
+        }
         let response = request.send()?;
         if !response.status().is_success() {
             return Err(BridgeError::Rejected(response.status()));
@@ -573,14 +590,17 @@ impl Transport {
             self.session = Some(session.clone());
         }
         let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
+        let tool_list = message["method"] == "tools/list";
         let relay = ReplyContext {
             request_id: message.get("id"),
             instructions: if initial { self.instructions } else { None },
             managed_initialize: initial && self.managed.is_some(),
-            managed_tools: message["method"] == "tools/list"
-                && self.managed.is_some()
-                && target.is_none(),
-            demo_tools: message["method"] == "tools/list" && target.is_some(),
+            supplemental_tools: match (tool_list, target, &self.managed) {
+                (true, Some(_), _) => SupplementalTools::Demo,
+                (true, None, Some(_)) => SupplementalTools::Managed,
+                _ => SupplementalTools::None,
+            },
+            extension_tools: tool_list && self.extension_tools,
         };
         let replies = relay_response(response, relay, output)?;
         if initial {
@@ -688,12 +708,20 @@ fn lost_session(error: &BridgeError) -> bool {
 }
 
 #[derive(Clone, Copy, Default)]
+enum SupplementalTools {
+    #[default]
+    None,
+    Managed,
+    Demo,
+}
+
+#[derive(Clone, Copy, Default)]
 struct ReplyContext<'a> {
     request_id: Option<&'a Value>,
     instructions: Option<&'static str>,
     managed_initialize: bool,
-    managed_tools: bool,
-    demo_tools: bool,
+    supplemental_tools: SupplementalTools,
+    extension_tools: bool,
 }
 
 fn relay_response(
@@ -767,17 +795,21 @@ fn emit(
         if result.get("nextCursor").is_none_or(Value::is_null)
             && let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut)
         {
-            let supplemental = if context.demo_tools {
-                demo_tools()
-            } else if context.managed_tools {
-                service::access_tool()
+            let supplemental = match context.supplemental_tools {
+                SupplementalTools::Demo => demo_tools(),
+                SupplementalTools::Managed => service::access_tool()
                     .into_iter()
                     .chain(service::open_tool())
-                    .collect()
-            } else {
-                Vec::new()
+                    .collect(),
+                SupplementalTools::None => Vec::new(),
             };
-            for tool in supplemental {
+            for tool in supplemental.into_iter().chain(
+                context
+                    .extension_tools
+                    .then(|| extension::tools(false))
+                    .into_iter()
+                    .flatten(),
+            ) {
                 tools.push(serde_json::to_value(tool).map_err(|_| BridgeError::Protocol)?);
             }
         }
@@ -982,6 +1014,7 @@ mod tests {
             session: None,
             protocol: None,
             instructions: None,
+            extension_tools: false,
         };
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
         let mut output = Vec::new();

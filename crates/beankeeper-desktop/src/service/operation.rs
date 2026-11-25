@@ -157,7 +157,7 @@ impl TryFrom<ServiceCommand> for ServiceOperation {
                 .map(Self::AccessSet)
                 .map_err(|_| ServiceError::Arguments)?,
             ServiceCommand::InstallExtension => Self::InstallExtension,
-            ServiceCommand::Mcp | ServiceCommand::Run => {
+            ServiceCommand::Mcp | ServiceCommand::Run | ServiceCommand::Extension { .. } => {
                 return Err(ServiceError::Configuration(
                     "service entry point is not a lifecycle operation",
                 ));
@@ -232,6 +232,9 @@ mod tests {
         let mut operations = ServiceOperation::all().to_vec();
         for subcommand in service.get_subcommands() {
             let name = subcommand.get_name();
+            if name == "extension" {
+                continue;
+            }
             let mut arguments = vec!["bk", "service", name];
             if name == "access-set" {
                 arguments.extend(["--preset", "read-only"]);

@@ -41,8 +41,50 @@ Inspect the compiled-in values with `bk license trust --json`; the release smoke
 
 Each target also produces `bk-VERSION-TARGET.mcpb` for Claude Desktop. These
 bundles contain the final native binary, manifest, icon, license, and agent
-skill. They use the same SHA-256, Sigstore bundle and provenance as the other
-release assets. Verify and install using the [Claude Desktop guide](claude-desktop.md).
+skill. Full builds also produce `bk-VERSION-universal-apple-darwin.mcpb` with
+both Mac architectures. All bundles use the same SHA-256, Sigstore bundle and
+provenance as the other release assets.
+
+### Deliver the Claude extension from beankeeper.app
+
+The site’s **Get it for the Claude app** action can serve one release asset per
+download. Use the universal Mac asset for Apple Silicon and Intel and
+`bk-VERSION-x86_64-pc-windows-msvc.mcpb` for Windows x64. Linux has separate
+x64 and arm64 bundles for compatible Claude Desktop builds with a systemd user
+session, glibc 2.35 or newer, and a native Secret Service. Confirm Linux client
+availability before offering the Linux download. Windows ARM64 has no native
+bundle.
+
+Resolve the newest signed release with the universal Mac bundle and the
+requested platform asset at delivery time. The universal bundle identifies
+releases with this first-run flow. Verify the download against the release
+checksum and Sigstore identity before serving it from the site with its
+`.mcpb` filename intact. Verify with the `.sigstore` file on the release side
+so the owner receives one file. Link to Anthropic’s install instructions next
+to the button. [Anthropic’s extension installation instructions](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
+
+Sigstore verifies release origin. Claude’s own publisher display depends on
+working MCPB signature verification and a trusted signing certificate
+([#134](https://github.com/Govcraft/beankeeper-desktop/issues/134)). OS signing
+uses the Apple and Azure signing paths below. Confirm the actual install
+messages in the Claude app before enabling the site download.
+
+### Verify the chat-only walkthrough
+
+In a disposable, standard user profile with only Claude Desktop installed,
+download the site’s single file, double-click it, and click **Install**.
+In Claude, say **Set up my books** and check that Claude reaches the first
+bookkeeping question in the same chat. Say **Create demo books** and check
+that Claude can show fictional accounts. Record any OS or Claude warning and
+whether Claude had to reopen before it listed the tools. Repeat on each
+platform offered by the site. The packaging smoke test covers the bundled
+executable and the same setup and practice tools over stdio.
+
+After the path ships, record the YouTube walkthrough on a clean Mac using
+the released download. Show the download, double-click, Claude's **Install**
+prompt, and **Create demo books** in chat. Then ask for a summary of the
+practice accounts to show the result. Link the video near the download on
+beankeeper.app.
 
 Linux binaries are built natively in Ubuntu 22.04 containers on both Linux
 runner architectures. The release verifies a glibc 2.35 ceiling, then installs

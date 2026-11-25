@@ -194,7 +194,8 @@ jobs:
 
   collect:
     needs: build
-    runs-on: ubuntu-24.04
+    # A full matrix can produce a single download for both Mac architectures.
+    runs-on: ${{ contains(inputs.matrix, 'aarch64-apple-darwin') && contains(inputs.matrix, 'x86_64-apple-darwin') && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -208,6 +209,9 @@ jobs:
           pattern: bk-*
           path: dist
           merge-multiple: true
+      - name: Bundle a universal Claude extension for macOS
+        if: runner.os == 'macOS'
+        run: python scripts/release.py mcpb-macos
       - name: Hash all final archives and installers
         run: python scripts/release.py checksums
       - name: Generate signed-update metadata

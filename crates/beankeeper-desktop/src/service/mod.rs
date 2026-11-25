@@ -1,6 +1,6 @@
 //! Per-user background hosting. No ledger schema or accounting operations live here.
 
-mod extension;
+pub(crate) mod extension;
 mod manager;
 mod mcp;
 mod operation;
@@ -33,7 +33,7 @@ use crate::{
 };
 
 pub use crate::instance::PortWarning;
-pub(crate) use extension::connection as extension_connection;
+pub use extension::ExtensionCommand;
 pub(crate) use mcp::local_call;
 pub use operation::InstallOptions;
 use operation::ServiceOperation;
@@ -58,6 +58,12 @@ pub enum ServiceCommand {
     /// Internal first-launch install for an MCP bundle that manages its own client registration.
     #[command(hide = true)]
     InstallExtension,
+    /// Set up or diagnose the Claude extension's local service.
+    Extension {
+        /// Extension operation.
+        #[command(subcommand)]
+        command: ExtensionCommand,
+    },
     /// Disable and remove the service, preserving books, recovery material and credentials.
     Uninstall,
     /// Enable login startup and start the installed service.
@@ -125,6 +131,8 @@ pub enum ServiceError {
     EndpointMcp(Box<crate::bridge::BridgeError>),
     /// Encrypted provisioning failed.
     Setup(Box<setup::SetupError>),
+    /// The extension's private installer failed.
+    ExtensionInstall,
     /// Desktop hosting failed.
     Desktop(Box<crate::DesktopError>),
     /// A live authenticated server did not become ready in time.
@@ -153,6 +161,7 @@ impl ServiceError {
             Self::MultipleInstances => "DESKTOP_MULTIPLE_INSTANCES",
             Self::EndpointMcp(error) => error.diagnostic_code(),
             Self::Setup(_) => "SERVICE_SETUP",
+            Self::ExtensionInstall => "EXTENSION_INSTALL_FAILED",
             Self::Desktop(_) => "SERVICE_HOST",
             Self::NotReady => "SERVICE_NOT_READY",
         }
@@ -177,6 +186,7 @@ impl fmt::Display for ServiceError {
             Self::MultipleInstances => f.write_str("Multiple Desktop instances serve these books. Select the intended listener with --bind."),
             Self::EndpointMcp(error) => error.fmt(f),
             Self::Setup(error) => write!(f, "{error}"),
+            Self::ExtensionInstall => f.write_str("Beankeeper could not set up local hosting for the extension. Check the extension log and unlock your OS keychain before trying again."),
             Self::Desktop(error) => write!(f, "{error}"),
             Self::NotReady => f.write_str("service did not become ready; inspect the private service log and run `bk service status --json`"),
         }
@@ -260,6 +270,9 @@ impl Paths {
     }
     fn config(&self) -> PathBuf {
         self.state.join("service.json")
+    }
+    fn extension_pending(&self) -> PathBuf {
+        self.state.join("extension-install.pending")
     }
     pub fn runtime(&self) -> PathBuf {
         self.state.join("service-runtime.json")
@@ -643,6 +656,7 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
     match options.command {
         ServiceCommand::Mcp => return mcp::serve(),
         ServiceCommand::Run => return host(&Paths::discover()?),
+        ServiceCommand::Extension { command } => return extension::run(command, cli.is_json()),
         _ => {}
     }
     let operation = ServiceOperation::try_from(options.command)?;
@@ -685,7 +699,10 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         ServiceCommand::Uninstall => println!(
             "Service removed. Books, credentials, MCP configs and recovery material were preserved."
         ),
-        ServiceCommand::Mcp | ServiceCommand::Run | ServiceCommand::Open => {}
+        ServiceCommand::Mcp
+        | ServiceCommand::Run
+        | ServiceCommand::Open
+        | ServiceCommand::Extension { .. } => {}
     }
     Ok(())
 }
@@ -715,13 +732,19 @@ fn execute(
                 previous.as_ref(),
                 InstallMode::Command(options),
             )?;
+            remove_if_exists(&paths.extension_pending())?;
         }
         ServiceOperation::InstallExtension => {
             // An explicit service installation racing the extension takes
             // precedence. Reuse it and leave its registration untouched.
             if previous.is_none() {
                 install(&paths, ledger, None, InstallMode::Extension)?;
+            } else if let Some(config) = previous.as_ref()
+                && paths.extension_pending().try_exists()?
+            {
+                finish_extension_install(&paths, config)?;
             }
+            remove_if_exists(&paths.extension_pending())?;
         }
         ServiceOperation::Start => {
             let config = previous.as_ref().ok_or(ServiceError::NotInstalled)?;
@@ -734,6 +757,7 @@ fn execute(
                 // A native manager can terminate the host before it removes
                 // its descriptor, notably when Windows stops the task.
                 remove_if_exists(&paths.runtime())?;
+                remove_if_exists(&paths.extension_pending())?;
             }
         }
         ServiceOperation::Uninstall => {
@@ -741,6 +765,7 @@ fn execute(
                 manager::uninstall(&paths, &UserSessionEnv::discover()?)?;
                 remove_if_exists(&paths.config())?;
                 remove_if_exists(&paths.runtime())?;
+                remove_if_exists(&paths.extension_pending())?;
             }
         }
         ServiceOperation::AccessSet(access) => {
@@ -849,11 +874,31 @@ fn install(
         books: fs::canonicalize(&cli.db)?,
         port,
     };
+    if matches!(mode, InstallMode::Extension) {
+        private_write(&paths.extension_pending(), b"")?;
+    }
     private_json(&paths.config(), &config)?;
-    manager::install(paths, &config)?;
-    manager::start(paths, &session)?;
-    wait_ready(paths, &config.books)?;
-    Ok(())
+    start_install(paths, &config, &session)
+}
+
+fn finish_extension_install(paths: &Paths, config: &Config) -> Result<(), ServiceError> {
+    if matches!(
+        authenticated_endpoint(paths, &config.books, bridge::Probe::Authentication),
+        Ok(Some(_))
+    ) {
+        return Ok(());
+    }
+    start_install(paths, config, &UserSessionEnv::discover()?)
+}
+
+fn start_install(
+    paths: &Paths,
+    config: &Config,
+    session: &UserSessionEnv,
+) -> Result<(), ServiceError> {
+    manager::install(paths, config)?;
+    manager::start(paths, session)?;
+    wait_ready(paths, &config.books)
 }
 
 fn service_ledger_options() -> Result<Cli, ServiceError> {

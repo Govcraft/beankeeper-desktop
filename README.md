@@ -46,14 +46,10 @@ Ask in chat any time to see or change those instructions.
 
 ## Claude Desktop extension
 
-Install the matching `bk-VERSION-TARGET.mcpb` release asset in Claude Desktop,
-then say **Set up my books** in Claude. On the existing Direct bookkeeper
-connection, Claude can create books and accounts, post opening balances and
-import a statement you share in chat. It reports each change, and you can ask
-it to undo supported changes in the same chat. If Claude reports read-only
-access and you want it to make changes, say **Let my agent post** in chat.
-Claude Desktop only needs the extension. If you also use Claude Code, Desktop
-may show its Beankeeper connections under **Local dev**.
+When **Get it for the Claude app** is available on beankeeper.app, download
+the Beankeeper extension, double-click it, and click **Install** in Claude.
+Then say **Set up my books** or **Create demo books**. Claude sets up encrypted
+books on your computer and continues in the same chat.
 [Claude Desktop setup and removal](docs/claude-desktop.md)
 
 ## Unsigned builds
