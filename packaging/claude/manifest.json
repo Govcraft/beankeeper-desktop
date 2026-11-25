@@ -3,7 +3,7 @@
   "name": "beankeeper",
   "display_name": "Beankeeper",
   "description": "Let Claude help with your encrypted, local Beankeeper books.",
-  "long_description": "Ask Claude about your accounts and reports. On first use the extension installs Beankeeper hosting for your OS user if needed. Claude connects to Beankeeper over stdio. Your ledger database and credentials stay on your machine.",
+  "long_description": "After installing, say “Set up my books” or “Create demo books” in Claude. Beankeeper sets up encrypted local books and runs in the background under your computer account. Your ledger and credentials stay on your machine.",
   "author": {
     "name": "Govcraft",
     "url": "https://github.com/Govcraft"

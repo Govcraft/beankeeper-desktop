@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 
@@ -233,7 +234,36 @@ def mcp_bundle(directory, release_version, target, output):
     stem = name(release_version, target)
     platform = "win32" if "windows" in target else "darwin" if "darwin" in target else "linux"
     executable = "bk.exe" if platform == "win32" else "bk"
-    entry_point = f"server/{executable}"
+    write_mcp_bundle(directory / executable, release_version, platform, output / f"{stem}.mcpb")
+
+
+def universal_macos_bundle(output, release_version):
+    """Combine the two tested, byte-for-byte Mach-O slices for a single Mac download."""
+    with tempfile.TemporaryDirectory() as temporary:
+        work = Path(temporary)
+        slices = []
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            bundle = output / f"{name(release_version, target)}.mcpb"
+            binary = work / target
+            with zipfile.ZipFile(bundle) as archive:
+                with archive.open("server/bk") as source, binary.open("xb") as destination:
+                    shutil.copyfileobj(source, destination)
+            slices.append(binary)
+        universal = work / "bk"
+        subprocess.run(["xcrun", "lipo", "-create", *slices, "-output", universal], check=True)
+        subprocess.run(["xcrun", "lipo", "-verify_arch", "arm64", "x86_64", universal], check=True)
+        universal.chmod(0o755)
+        reported = subprocess.check_output([universal, "--version"], text=True).strip()
+        if reported != f"bk {release_version}":
+            raise ValueError("universal macOS extension binary has the wrong version")
+        write_mcp_bundle(
+            universal, release_version, "darwin",
+            output / f"bk-{release_version}-universal-apple-darwin.mcpb",
+        )
+
+
+def write_mcp_bundle(binary, release_version, platform, output):
+    entry_point = f"server/{binary.name}"
     packaging = ROOT / "packaging/claude"
     manifest = json.loads((packaging / "manifest.json").read_text(encoding="utf-8"))
     manifest.update(
@@ -253,19 +283,19 @@ def mcp_bundle(directory, release_version, target, output):
         entry.compress_type = zipfile.ZIP_DEFLATED
         return entry
 
-    output.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(output / f"{stem}.mcpb", "w") as archive:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w") as archive:
         archive.writestr(
             zip_entry("manifest.json", 0o644),
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         )
-        with (directory / executable).open("rb") as source:
+        with binary.open("rb") as source:
             with archive.open(zip_entry(entry_point, 0o755), "w") as packed:
                 shutil.copyfileobj(source, packed)
         for path, source in (
             ("icon.png", packaging / "icon.png"),
             ("SKILL.md", ROOT / "SKILL.md"),
-            ("LICENSE.md", directory / "LICENSE.md"),
+            ("LICENSE.md", ROOT / "LICENSE.md"),
         ):
             archive.writestr(zip_entry(path, 0o644), source.read_bytes())
 
@@ -333,7 +363,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--tag")
     parser.add_argument(
         "--check-changelog", action="store_true",
@@ -366,6 +396,8 @@ def main():
         update_manifest(args.output, release_version)
     elif args.command == "checksums":
         checksums(args.output)
+    elif args.command == "mcpb-macos":
+        universal_macos_bundle(args.output, release_version)
     else:
         if args.target is None:
             parser.error("--target is required")
