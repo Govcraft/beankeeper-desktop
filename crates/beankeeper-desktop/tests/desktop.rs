@@ -415,6 +415,25 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
 
     let migrated = Db::open_snapshot(&path, Some(&passphrase))?;
     assert_eq!(get_schema_version(migrated.read())?, expected_version);
+    let catalog = dir.path().join(".beankeeper-backups/books.db");
+    let backup = std::fs::read_dir(catalog)?
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .ok_or("missing pre-migration backup")?
+        .path();
+    let manifest: Value = serde_json::from_slice(&std::fs::read(backup.join("backup.json"))?)?;
+    assert_eq!(manifest["reason"], "before_migration");
+    assert_eq!(manifest["schema_version"], 1);
+    let snapshot = rusqlite::Connection::open_with_flags(
+        backup.join("books.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    snapshot.pragma_update(None, "key", fixture_passphrase)?;
+    assert_eq!(
+        snapshot.query_row("SELECT version FROM schema_version", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
     // Assert the internal schema only in this explicit migration fixture.
     let schema =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -434,6 +453,43 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
         .error_for_status()?
         .text()?;
     assert!(accounts.contains("Legacy Checking"));
+    Ok(())
+}
+
+#[test]
+fn failed_backup_blocks_migration_and_leaves_no_completed_copy() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    let passphrase_file = dir.path().join("passphrase");
+    let secret = "migration-fixture-passphrase";
+    std::fs::write(&passphrase_file, secret)?;
+    let fixture = rusqlite::Connection::open(&path)?;
+    fixture.pragma_update(None, "key", secret)?;
+    fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
+    std::fs::write(
+        dir.path().join("attachments"),
+        b"obstruct the attachment archive",
+    )?;
+
+    let output = clean_command()
+        .args(["--db"])
+        .arg(&path)
+        .args(["--passphrase-file"])
+        .arg(&passphrase_file)
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("attachment store"));
+    assert_eq!(
+        fixture.query_row("SELECT version FROM schema_version", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
+    assert!(
+        std::fs::read_dir(dir.path().join(".beankeeper-backups/books.db"))?
+            .filter_map(Result::ok)
+            .all(|entry| entry.file_name() == "catalog.lock")
+    );
     Ok(())
 }
 

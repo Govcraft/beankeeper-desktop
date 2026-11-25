@@ -96,7 +96,8 @@ fn encrypted_setup_preserves_configs_keeps_secrets_private_and_reads_keychain_on
     assert!(!agent.allows(Capability::Admin)?);
     let kit = fs::read_to_string(setup.path("books.recovery.txt"))?;
     assert!(kit.contains(SECRET));
-    assert!(kit.contains("restore --input"));
+    assert!(kit.contains("recover --input"));
+    assert!(setup.path(".beankeeper-backups/books.db").is_dir());
     assert!(kit.contains("no backdoor"));
     for bytes in [&output.stdout, &output.stderr] {
         let text = String::from_utf8_lossy(bytes);
