@@ -25,6 +25,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    backups::{BackupTool, LocalBackups},
     changes,
     demo::{DemoBooks, DemoOperation},
     instance::BooksPath,
@@ -236,6 +237,7 @@ impl StatusInput {
 }
 
 pub(crate) struct DesktopTools {
+    pub(crate) backups: LocalBackups,
     pub(crate) bound: SocketAddr,
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
@@ -250,6 +252,7 @@ impl HostToolHandler for DesktopTools {
         let mut tools = self.navigation.tools();
         tools.push(link_tool::definition());
         tools.extend(changes::definitions());
+        tools.extend(BackupTool::ALL.map(BackupTool::definition));
         tools.push(HostTool {
             tool: Tool::new(
                 STATUS_TOOL,
@@ -270,6 +273,9 @@ impl HostToolHandler for DesktopTools {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Ok(tool) = request.name.parse::<BackupTool>() {
+            return Ok(tool.call(request, self.backups.clone(), identity).await);
+        }
         if let Some(demo) = &self.demo
             && let Ok(operation) = request.name.parse::<DemoOperation>()
         {
@@ -335,7 +341,7 @@ impl HostToolHandler for DesktopTools {
     }
 }
 
-fn tool_error(error: &CliError) -> CallToolResult {
+pub(crate) fn tool_error(error: &CliError) -> CallToolResult {
     CallToolResult::structured_error(serde_json::json!({
         "code": error.error_code(),
         "message": error.to_string(),

@@ -504,7 +504,7 @@ fn store_ledger_secret(
     };
     // Verify supplied recovery credentials before replacing a stored credential.
     if matches!(mode, SetupMode::Resume) {
-        Db::open_existing(&cli.db, Some(&secret))?;
+        crate::backups::open(&cli.db, Some(&secret))?;
     }
     // Establish a recoverable credential before initialization.
     let automatic_file = match (store.store(&cli.db, &secret), storage, mode) {
@@ -542,6 +542,11 @@ fn finish_setup(
     temporary: &tempfile::NamedTempFile,
     mode: SetupMode,
 ) -> Result<(), SetupError> {
+    if matches!(mode, SetupMode::Fresh) {
+        let backups =
+            crate::backups::LocalBackups::new(cli.db.as_path().try_into()?, Some(secret.clone()));
+        backups.automatic();
+    }
     eprintln!(
         "Agent token is a secret: {}. Owner credential stays separate: {}.",
         paths.token_file.display(),
@@ -840,7 +845,7 @@ pub(crate) fn generate_passphrase() -> Result<SecretString, SetupError> {
 
 fn recovery_kit(ledger: &Path, owner: &Path, passphrase: &str) -> String {
     format!(
-        "Beankeeper Desktop recovery kit\nKEEP PRIVATE. Store an offline copy separately from the ledger.\nLedger: {}\nPassphrase: {passphrase}\nOwner token file: {} (never share with agents; back this file up separately too)\n\nBack up with bk --db <ledger> backup --output <backup>. With policy enforcement, supply the owner token through BK_AGENT_TOKEN.\nRestore with bk --db <new-ledger> --passphrase-file <private-passphrase-file> restore --input <backup>.\nIf keychain access is lost, copy ONLY the Passphrase value to a private file and use --passphrase-file, then rerun setup --force.\nA backup is encrypted and still needs this passphrase. There is no backdoor.\nTokens expire after one year; use upstream agent issue/revoke to renew them.\n",
+        "Beankeeper Desktop recovery kit\nKEEP PRIVATE. Store an offline copy separately from the ledger.\nLedger: {}\nPassphrase: {passphrase}\nOwner token file: {} (never share with agents; back this file up separately too)\n\nDesktop saves automatic local backups. Ask your agent to list or restore a backup while your books are available.\nIf the ledger file is missing, recover with bk --db <new-ledger> --passphrase-file <private-passphrase-file> recover --input <backup-dir>/books.db. With policy enforcement, supply the matching private owner credential through BK_AGENT_TOKEN. Keep the sibling attachments directory with the recovered ledger.\nIf keychain access is lost, copy ONLY the Passphrase value to a private file and use --passphrase-file, then rerun setup --force.\nA backup is encrypted and still needs this passphrase. There is no backdoor.\nTokens expire after one year; use upstream agent issue/revoke to renew them.\n",
         ledger.display(),
         owner.display()
     )

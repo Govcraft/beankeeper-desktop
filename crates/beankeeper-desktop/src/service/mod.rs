@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use beankeeper_cli::{cli::Cli, db::Db, passphrase};
+use beankeeper_cli::{cli::Cli, passphrase};
 use clap::{Args, Subcommand};
 use reqwest::Url;
 use secrecy::ExposeSecret;
@@ -918,7 +918,7 @@ fn change_access(cli: &Cli, change: AccessChange) -> Result<(), ServiceError> {
         false,
     )
     .map_err(setup::SetupError::from)?;
-    let db = Db::open_existing(&cli.db, passphrase.as_ref()).map_err(setup::SetupError::from)?;
+    let db = crate::backups::open(&cli.db, passphrase.as_ref()).map_err(setup::SetupError::from)?;
     setup::managed::reconcile(&db, &cli.db, change)?;
     Ok(())
 }

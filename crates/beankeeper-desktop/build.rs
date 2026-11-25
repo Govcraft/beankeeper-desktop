@@ -25,7 +25,15 @@ fn main() -> Result<(), std::env::VarError> {
     let manifest_dir =
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or(std::env::VarError::NotPresent)?;
     let embed_path =
-        std::path::PathBuf::from(manifest_dir).join("../../packaging/license-embed.json");
+        std::path::PathBuf::from(&manifest_dir).join("../../packaging/license-embed.json");
+    let lock_path = std::path::PathBuf::from(manifest_dir).join("../../Cargo.lock");
+    println!("cargo:rerun-if-changed={}", lock_path.display());
+    let lock = std::fs::read_to_string(lock_path).unwrap_or_default();
+    let core_revision = lock.lines().find_map(|line| {
+        line.strip_prefix("source = \"git+https://github.com/Govcraft/beankeeper?branch=main#")
+            .and_then(|line| line.strip_suffix('"'))
+    });
+    rustc_env("BK_CORE_REVISION", core_revision.unwrap_or("unknown"));
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");

@@ -1,13 +1,8 @@
 use std::process::ExitCode;
 
-use beankeeper_cli::{
-    cli::{Cli, Command},
-    commands,
-    db::companies::CompanySlug,
-    error::CliError,
-};
+use beankeeper_cli::{cli::Cli, commands, db::companies::CompanySlug};
 use beankeeper_desktop::{
-    DesktopError, agents, bridge, browser, changes,
+    DesktopError, agents, backups, bridge, browser, changes,
     cli::{self, OpenOptions, ServeOptions},
     demo, imports, links, onboarding, product, server, service, setup, updates,
 };
@@ -29,6 +24,7 @@ enum DesktopCommand {
     Bridge(bridge::BridgeOptions),
     Extension,
     Demo(demo::DemoOptions),
+    Backups(backups::BackupOptions),
     Import(Box<imports::command::ImportOptions>),
     Ledger,
 }
@@ -54,6 +50,9 @@ impl DesktopCommand {
             }
             Some(("service", options)) => {
                 service::ServiceOptions::from_arg_matches(options).map(Self::Service)
+            }
+            Some(("backups", options)) => {
+                backups::BackupOptions::from_arg_matches(options).map(Self::Backups)
             }
             Some(("demo", options)) => demo::DemoOptions::from_arg_matches(options).map(Self::Demo),
             Some(("import", options)) => imports::command::ImportOptions::from_arg_matches(options)
@@ -88,6 +87,7 @@ fn main() -> ExitCode {
     let matches = cli::command().get_matches();
     let command = DesktopCommand::from_matches(&matches).unwrap_or_else(|error| error.exit());
     let result = match command {
+        DesktopCommand::Backups(options) => return run_backups(options, &matches),
         DesktopCommand::Import(options) => {
             let ledger = desktop_ledger_options(&matches);
             return imports::command::run(&options, &ledger, selected_books(&matches, &ledger));
@@ -181,6 +181,22 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_backups(options: backups::BackupOptions, matches: &clap::ArgMatches) -> ExitCode {
+    let mut ledger = desktop_ledger_options(matches);
+    // Preserve upstream's typed ledger bindings when dispatching a Desktop subcommand.
+    let mut globals = matches.clone();
+    globals.remove_subcommand();
+    ledger
+        .update_from_arg_matches(&globals)
+        .unwrap_or_else(|error| error.exit());
+    backups::run(
+        options,
+        ledger,
+        matches.value_source("db") == Some(ValueSource::DefaultValue)
+            && !matches.contains_id("ledger_target"),
+    )
+}
+
 fn desktop_ledger_options(matches: &clap::ArgMatches) -> Cli {
     let mut ledger = cli::ledger_options(matches).unwrap_or_else(|error| error.exit());
     ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(matches)
@@ -256,16 +272,7 @@ fn upstream(matches: &clap::ArgMatches) -> ExitCode {
             cli.company.as_ref().map(CompanySlug::as_str),
         )
     });
-    // Preserve upstream's explicit restore-destination safety check.
-    let result = if matches!(cli.command, Command::Restore { .. })
-        && matches.value_source("db") != Some(ValueSource::CommandLine)
-    {
-        Err(CliError::Usage(
-            "restore requires an explicit --db destination".into(),
-        ))
-    } else {
-        commands::dispatch(&cli, meta.clone())
-    };
+    let result = commands::dispatch(&cli, meta.clone());
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
