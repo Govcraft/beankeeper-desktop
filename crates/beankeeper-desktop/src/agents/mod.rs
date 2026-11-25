@@ -50,7 +50,8 @@ struct Selection {
     /// Apply to all detected clients, instead of selecting a single client.
     #[arg(long, conflicts_with = "agent")]
     all: bool,
-    /// Select one client. Without a selection, checks all detected clients.
+    /// Select one client. Use `chatgpt-codex` for local Codex in the `ChatGPT` app.
+    /// Without a selection, checks all detected clients.
     #[arg(value_enum)]
     agent: Option<Agent>,
 }
@@ -499,7 +500,7 @@ fn check_agent(
         Err(error) => return ClientStatus::new(agent, State::Error, "").failure(error.into()),
     };
     let Some(adapter) = adapter else {
-        let message = "No supported local MCP configuration is available. Use an agent that can connect to the local Beankeeper service.";
+        let message = agent.unsupported_message();
         let status = ClientStatus::new(agent, State::Unsupported, message);
         return if explicit {
             status.failure(Failure::new("AGENT_UNSUPPORTED", message))
