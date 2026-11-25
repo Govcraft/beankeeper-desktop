@@ -595,27 +595,46 @@ fn assert_managed_skill_discovery(command: &mut std::process::Command) -> TestRe
     )?;
     assert_ne!(companies["isError"], true, "{companies}");
     assert_eq!(companies["content"][0]["type"], "text");
-    assert_inline_demo_target(&mut pipe)?;
+    assert_inline_demo_target(&mut pipe, &companies)?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn assert_inline_demo_target(pipe: &mut McpPipe) -> TestResult {
+fn assert_inline_demo_target(pipe: &mut McpPipe, original_companies: &Value) -> TestResult {
     use beankeeper_cli::mcp::LEDGER_TARGET_META_KEY;
 
+    let transactions = inline_params(json!({"name":"txn_list","arguments":{"company":"personal"}}));
+    let original_transactions = demo_payload(&pipe.request("tools/call", &transactions)?)?;
     let started = pipe.request("tools/call", &inline_params(json!({"name":"demo_start"})))?;
     assert_eq!(started["structuredContent"]["state"], "active", "{started}");
     let target = &started["structuredContent"]["target"];
     let request = inline_params(json!({"name":"company_list"}));
-    let startup = pipe.request("tools/call", &request)?;
-    assert!(startup["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
-
-    let mut demo_request = request;
-    demo_request["_meta"][LEDGER_TARGET_META_KEY] = target.clone();
-    let demo = pipe.request("tools/call", &demo_request)?;
+    let demo = pipe.request("tools/call", &request)?;
     assert_eq!(demo["_meta"][LEDGER_TARGET_META_KEY], *target);
+    assert_ne!(demo_payload(&demo)?, demo_payload(original_companies)?);
+
+    let post = inline_params(json!({"name":"txn_post","arguments":demo_posting()}));
+    let posted = pipe.request("tools/call", &post)?;
+    assert_eq!(posted["_meta"][LEDGER_TARGET_META_KEY], *target);
+    assert_eq!(demo_payload(&posted)?["created"], true, "{posted}");
+
+    let mut demo_request = request.clone();
+    demo_request["_meta"][LEDGER_TARGET_META_KEY] = json!("missing-demo");
+    let missing = pipe.request("tools/call", &demo_request)?;
+    assert_eq!(missing["structuredContent"]["code"], "DEMO_UNAVAILABLE");
+    assert_eq!(missing["_meta"][LEDGER_TARGET_META_KEY], "missing-demo");
+    demo_request["_meta"][LEDGER_TARGET_META_KEY] = target.clone();
+    let explicit = pipe.request("tools/call", &demo_request)?;
+    assert_eq!(explicit["_meta"][LEDGER_TARGET_META_KEY], *target);
+
     let removed = pipe.request("tools/call", &inline_params(json!({"name":"demo_remove"})))?;
     assert_eq!(removed["structuredContent"]["state"], "removed");
+    let startup = pipe.request("tools/call", &request)?;
+    assert!(startup["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    assert_eq!(demo_payload(&startup)?, demo_payload(original_companies)?);
+    let startup = pipe.request("tools/call", &transactions)?;
+    assert!(startup["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    assert_eq!(demo_payload(&startup)?, original_transactions);
     let stale = pipe.request("tools/call", &demo_request)?;
     assert_eq!(stale["structuredContent"]["code"], "DEMO_UNAVAILABLE");
     Ok(())

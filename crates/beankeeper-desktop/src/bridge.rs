@@ -298,7 +298,7 @@ struct ManagedConnection {
     initialize: Option<Value>,
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 enum DemoSelection {
     #[default]
     Startup,
@@ -307,11 +307,8 @@ enum DemoSelection {
 }
 
 impl DemoSelection {
-    fn named(&self) -> Option<&NamedLedgerTarget> {
-        match self {
-            Self::Active(target) => Some(target),
-            Self::Startup | Self::Unavailable => None,
-        }
+    fn for_request(&self, explicit: Option<&NamedLedgerTarget>) -> Self {
+        explicit.cloned().map_or_else(|| self.clone(), Self::Active)
     }
 
     fn begin(&mut self, operation: DemoOperation) -> bool {
@@ -456,10 +453,6 @@ impl Transport {
             None
         };
         if let Some(operation) = operation {
-            if inline.is_some() {
-                self.exchange_startup(request, output)?;
-                return Ok(());
-            }
             let entering_demo = self.demo.begin(operation);
             let replies = self.exchange_startup(request, output)?;
             let changed = if let Some(reply) = replies
@@ -470,22 +463,21 @@ impl Transport {
             } else {
                 false
             };
-            if entering_demo || changed {
+            if inline.is_none() && (entering_demo || changed) {
                 tools_changed(output)?;
             }
             return Ok(());
         }
         if tool_request || tool_list {
-            let target = match inline {
-                Some(inline) => inline.ledger_target(),
-                None if !matches!(self.demo, DemoSelection::Startup) => {
-                    let target = self.demo.named().cloned();
-                    return self.exchange_demo(request, tool_list, target.as_ref(), output);
+            let explicit_target = inline.and_then(protocol::InlineProtocol::ledger_target);
+            match self.demo.for_request(explicit_target) {
+                DemoSelection::Startup => {}
+                DemoSelection::Unavailable => {
+                    return self.exchange_demo(request, tool_list, None, output);
                 }
-                None => None,
-            };
-            if let Some(target) = target {
-                return self.exchange_demo(request, tool_list, Some(target), output);
+                DemoSelection::Active(target) => {
+                    return self.exchange_demo(request, tool_list, Some(&target), output);
+                }
             }
         }
         if let Some(managed) = &self.managed

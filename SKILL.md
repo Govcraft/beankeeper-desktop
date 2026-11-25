@@ -521,13 +521,12 @@ when the owner asks to discard it, then start the new demo.
 
 ### Use the fictional books
 
-1. Target the demo on every call that uses it. On a managed connection using
-   the `initialize` handshake, the next ledger calls use the demo automatically.
-   On stdio using `server/discover`, send the returned `target` in
-   `params._meta["beankeeper/ledgerTarget"]` on each demo tool call and tool
-   discovery request. Over HTTP, send it in the `Beankeeper-Ledger-Target`
-   header. If the client cannot send the target, keep practice writes out
-   of that connection.
+1. On a managed stdio connection, a successful `demo_start` selects the demo
+   for subsequent tool calls and tool discovery until `demo_remove` succeeds.
+   An explicit `params._meta["beankeeper/ledgerTarget"]` takes precedence on
+   inline requests. Over HTTP, send the returned `target` in the
+   `Beankeeper-Ledger-Target` header for each practice request. If the HTTP
+   client cannot send the header, skip practice writes on that connection.
 2. Use `company_list` and choose a sample book. Try a report, explain the
    numbers in plain words, and label the figures and any chart **fictional**.
    Check that `_meta["beankeeper/ledgerTarget"]` matches the demo target.
