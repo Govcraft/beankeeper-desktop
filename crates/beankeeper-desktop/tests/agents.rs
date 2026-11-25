@@ -33,6 +33,20 @@ fn bk_command(home: &Path) -> Command {
 }
 
 #[test]
+fn extension_help_explains_verified_path_only_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let output = bk_command(home.path())
+        .args(["agents", "extension", "--help"])
+        .output()?;
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout)?;
+    assert!(help.contains("latest signed Claude Desktop extension"));
+    assert!(help.contains("--path-only"));
+    assert!(!home.path().join("state").exists());
+    Ok(())
+}
+
+#[test]
 fn detection_and_doctor_distinguish_unsupported_unconfigured_and_stopped_service()
 -> Result<(), Box<dyn std::error::Error>> {
     let home = tempfile::tempdir()?;

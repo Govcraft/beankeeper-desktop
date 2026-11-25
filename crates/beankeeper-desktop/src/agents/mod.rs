@@ -2,6 +2,7 @@
 
 mod adapters;
 mod config;
+pub(crate) mod extension;
 
 use std::{
     env,
@@ -40,6 +41,8 @@ enum AgentCommand {
     Disconnect(Selection),
     /// Verify client configuration and make an authenticated read-only MCP call.
     Doctor(Selection),
+    /// Verify and open the latest signed Claude Desktop extension (requires cosign).
+    Extension(extension::Options),
 }
 
 #[derive(Args, Debug)]
@@ -281,6 +284,7 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
         AgentCommand::Connect(selection) => (Operation::Connect, selected_agent(&selection)),
         AgentCommand::Disconnect(selection) => (Operation::Disconnect, selected_agent(&selection)),
         AgentCommand::Doctor(selection) => (Operation::Doctor, selected_agent(&selection)),
+        AgentCommand::Extension(options) => return extension::run(options, json, quiet),
     };
     let output_meta = Metadata::new(operation);
     let output = match perform(operation, selected) {

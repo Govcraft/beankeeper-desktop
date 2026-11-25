@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ServiceError, ServiceOperation, ServiceReply, execute};
-use crate::setup::AgentAccess;
+use crate::{agents::extension, setup::AgentAccess};
 
 struct Lifecycle {
     instructions: &'static str,
@@ -40,6 +40,7 @@ impl ServerHandler for Lifecycle {
             ServiceOperation::all()
                 .into_iter()
                 .filter_map(ServiceOperation::tool)
+                .chain(extension::mcp_tool())
                 .collect(),
         )))
     }
@@ -48,6 +49,12 @@ impl ServerHandler for Lifecycle {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == extension::TOOL {
+            let result = tokio::task::spawn_blocking(move || extension::mcp_call(request)).await;
+            return Ok(result
+                .unwrap_or_else(|_| failure(&ServiceError::Worker))
+                .into());
+        }
         let operation = match ServiceOperation::try_from(request) {
             Ok(operation) => operation,
             Err(error) => return Ok(failure(&error).into()),

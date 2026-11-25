@@ -62,7 +62,8 @@ conflict and preserve the entry. Remove `env` if the overrides are no longer
 needed, or rename the entry to keep them, then retry.
 
 The lifecycle tools are `service_install`, `service_uninstall`, `service_start`,
-`service_stop`, `service_status`, `service_open` and `access_set`. They return
+`service_stop`, `service_status`, `service_open`, `access_set` and
+`agents_extension`. They return
 a plain-language answer plus a structured result or a named error. `service_install` accepts
 optional boolean arguments `file_store` and `no_agents`, equivalent to `--file-store` and
 `--no-agents`. Both default to false. MCP installs use the managed books path.
@@ -75,6 +76,12 @@ companion apps and leaves Claude Desktop’s own configuration to Claude.
 Use `service_open` when the owner asks for help opening a Desktop link. It works
 after startup and when the managed service uses a fallback port. It reports a
 browser launch and hands the one-time link directly to the OS browser.
+
+Use `agents_extension` when the owner asks to install or upgrade the signed
+Claude Desktop extension, including before setting up books. Pass
+`{"path_only":true}` to return the verified local file without opening it or
+changing Claude's settings.
+[Install or upgrade the signed extension](claude-desktop.md#install-or-upgrade-from-beankeeper)
 
 This separate local stdio connection can restart a stopped HTTP server and
 change the managed agent’s access. Configure the local stdio connections in

@@ -254,6 +254,14 @@ local Codex chat.
 
 For Grok Build, run `bk agents connect grok-build --json` and restart the client.
 
+When the owner asks to install or upgrade the Claude Desktop extension, call
+`agents_extension` on the local lifecycle or native extension connection, or
+run `bk agents extension --json`. Verification requires `cosign`. Report
+whether the verified installer opened and tell the owner to select **Install**
+in Claude Desktop when it does. Use `path_only: true` in MCP or `--path-only`
+on the CLI to get the verified file without opening it or changing Claude's
+settings. If verification fails, explain the named error in plain words.
+
 For Claude Code, run `bk agents connect claude-code --json`. The command can
 adopt entries with the managed command and arguments even if they specify stdio
 transport or an empty environment. If it reports a custom `env`, tell the owner

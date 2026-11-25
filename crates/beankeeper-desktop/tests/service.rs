@@ -231,7 +231,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     let tools = listed["tools"].as_array().ok_or("missing setup tools")?;
     assert_eq!(
         tools.iter().map(|tool| &tool["name"]).collect::<Vec<_>>(),
-        ["setup", "setup_status", "doctor"]
+        ["setup", "setup_status", "doctor", "agents_extension"]
     );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
@@ -255,6 +255,43 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     );
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("data").exists());
+    Ok(())
+}
+
+#[test]
+fn local_mcp_connections_advertise_extension_install_and_reject_custom_download_sources()
+-> TestResult {
+    let root = tempfile::tempdir()?;
+    for args in [["service", "mcp"], ["mcp", "extension"]] {
+        let mut command = isolated(root.path());
+        command.args(args);
+        let mut pipe = McpPipe::start(&mut command)?;
+        let listed = pipe.request("tools/list", &json!({}))?;
+        let tool = listed["tools"]
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["name"] == "agents_extension"))
+            .ok_or("missing agents_extension")?;
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            tool["inputSchema"]["properties"]["path_only"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]["path_only"]["default"],
+            false
+        );
+        for args in [
+            json!({"url": "https://example.invalid/file.mcpb"}),
+            json!({"path_only": "true"}),
+        ] {
+            let reply = pipe.tool("agents_extension", &args)?;
+            assert_eq!(reply["isError"], true);
+            assert_eq!(
+                reply["structuredContent"]["code"],
+                "AGENT_EXTENSION_ARGUMENTS"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1884,6 +1921,7 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
     let tools = list["tools"].as_array().ok_or("missing list")?;
     assert!(tools.iter().any(|tool| tool["name"] == "demo_remove"));
     assert!(tools.iter().all(|tool| tool["name"] != "setup_status"));
+    assert!(tools.iter().all(|tool| tool["name"] != "agents_extension"));
     assert!(tools.iter().all(|tool| tool["name"] != "changes_since"));
     assert!(tools.iter().all(|tool| tool["name"] != "changes_mark_seen"));
     let listed = pipe.tool("company_list", &json!({}))?;
