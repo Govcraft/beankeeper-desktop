@@ -212,8 +212,9 @@ stable or `-rc.N` tag, and it lists the platform archive,
 `checksums-sha256.txt`, and a Sigstore bundle for each. Regular installs choose
 the highest qualifying stable version, or the highest qualifying release
 candidate if no stable release qualifies. Guided setup chooses the highest
-qualifying version across both. Automatic selection on Linux and macOS
-requires `jq`.
+qualifying version across both. The shell installer reads release metadata
+with `jq` when available, then macOS's built-in `osascript` or `python3`. If
+none of these tools is available, set `BK_VERSION` to a known signed release.
 
 Set `BK_VERSION` without the tag prefix to select a specific published release.
 Both scripts also accept `BK_INSTALL`. They always require a matching SHA-256

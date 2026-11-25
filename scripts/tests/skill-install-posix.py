@@ -132,9 +132,10 @@ def native_config(env, sandbox):
 def fixture_path(sandbox, original_path):
     directory = sandbox / "commands"
     directory.mkdir()
-    required = ("sh", "uname", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id", "jq")
+    required = ("sh", "uname", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "grep", "id")
     manager = "launchctl" if sys.platform == "darwin" else "systemctl"
-    for name in (*required, manager):
+    reader = "osascript" if sys.platform == "darwin" else "python3"
+    for name in (*required, manager, reader):
         path = shutil.which(name, path=original_path)
         if path is None:
             raise RuntimeError(f"the fixture needs {name}")
