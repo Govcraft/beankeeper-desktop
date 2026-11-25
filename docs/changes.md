@@ -46,3 +46,13 @@ to view the individual receipt.
 The CLI includes links when it finds a running Desktop instance for the
 selected books. The receipts and summary are also available while Desktop is
 stopped.
+
+## Correct a posted category
+
+Ask your agent to move a posted transaction line to the right category,
+including a statement line that landed in a fallback account. With direct
+posting access, `txn_recategorize` or `bk txn recategorize` records one audited
+move and preserves the original transaction. The agent tells you what moved
+and can undo the move in chat using its receipt. Beankeeper refuses to
+recategorize a transaction with any reconciled line.
+[Agent instructions and arguments](../SKILL.md#fix-a-posted-category)

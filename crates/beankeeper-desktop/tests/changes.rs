@@ -7,10 +7,13 @@ use std::{path::Path, process::Command, time::Duration};
 use beankeeper::types::AccountType;
 use beankeeper_cli::{
     db::{
-        self, audit::receipts::ReceiptPageLimit, companies::CompanySlug,
+        self,
+        audit::receipts::ReceiptPageLimit,
+        companies::{Company, CompanySlug},
+        ids::TransactionId,
         verification::VerifiedLedger,
     },
-    identity::{self, Admin, Granted, IssueRequest},
+    identity::{self, Admin, Granted, IssueRequest, Reconcile},
 };
 use common::{Ledger, Server, TestResult, rpc, token};
 use serde_json::{Value, json};
@@ -332,6 +335,136 @@ fn issue_direct_bookkeeper(ledger: &Ledger, db: &db::Db) -> TestResult<Value> {
             },
         )
     })?)
+}
+
+#[test]
+fn direct_bookkeeper_recategorizes_and_undoes_in_chat() -> TestResult {
+    let ledger = Ledger::new()?;
+    let db = ledger.db()?;
+    let company = "acme".parse()?;
+    account(&ledger, &db, &company, "1000", "Bank")?;
+    account(&ledger, &db, &company, "3150", "Statement fallback")?;
+    Granted::<Admin>::with_db(&db, ledger.owner(), |grant| {
+        db::create_account(
+            grant,
+            &db::CreateAccountParams {
+                company_slug: &company,
+                code: "5100",
+                name: "Office supplies",
+                account_type: AccountType::Expense,
+                default_tax_category: None,
+            },
+        )
+    })?;
+    let bookkeeper = issue_direct_bookkeeper(&ledger, &db)?;
+    let bearer = token(&bookkeeper)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(bearer))?;
+    let tool = |name: &str, arguments| call(&server, bearer, name, &arguments);
+    let original = tool(
+        "txn_post",
+        json!({
+            "company":"acme","reference":"BANK-42","date":"2026-01-02",
+            "description":"Statement purchase","currency":"USD",
+            "debits":[{"account":"3150","amount":"3.45"}],
+            "credits":[{"account":"1000","amount":"3.45"}]
+        }),
+    )?;
+    let read_original = || tool("txn_show", json!({"company":"acme","id":original["id"]}));
+    let before = read_original()?;
+    let mut request = json!({
+        "company":"acme","reference":"BANK-42","from_account":"3150","to_account":"5100",
+        "posting_reference":"category-fix"
+    });
+    let moved = tool("txn_recategorize", request.clone())?;
+    assert_eq!(moved["original_id"], original["id"]);
+    assert_eq!(moved["from_account"], "3150");
+    assert_eq!(moved["to_account"], "5100");
+    assert_eq!(moved["amount"], 345);
+    assert_eq!(moved["currency"], "USD");
+    assert!(moved["desktop_path"].is_string());
+    assert_eq!(read_original()?, before);
+
+    let retry = cli_data(ledger.command().env("BK_AGENT_TOKEN", bearer).args([
+        "--company",
+        "acme",
+        "--json",
+        "txn",
+        "recategorize",
+        "--reference",
+        "BANK-42",
+        "--from-account",
+        "3150",
+        "--to-account",
+        "5100",
+        "--posting-reference",
+        "category-fix",
+        "--on-conflict",
+        "skip",
+    ]))?;
+    assert_eq!(retry["id"], moved["id"]);
+    assert!(moved["receipt_id"].is_i64());
+    assert_eq!(retry["receipt_id"], moved["receipt_id"]);
+    assert_eq!(retry["skipped"], true);
+    let undo = tool(
+        "audit_undo",
+        json!({"company":"acme","receipt":moved["receipt_id"]}),
+    )?;
+    assert_eq!(undo["undo_of"], moved["receipt_id"]);
+    assert_eq!(undo["transaction"], moved["id"]);
+    assert_eq!(undo["kind"], "reversed");
+    assert_eq!(read_original()?, before);
+
+    reconcile_bank_entry(
+        &ledger,
+        &db,
+        &company,
+        serde_json::from_value(original["id"].clone())?,
+    )?;
+    request["posting_reference"] = json!("blocked-category-fix");
+    let blocked = tool("txn_recategorize", request)?;
+    assert_eq!(blocked["code"], "RECATEGORIZE_BLOCKED");
+    assert!(
+        blocked["message"]
+            .as_str()
+            .ok_or("missing error message")?
+            .contains("reconciled")
+    );
+    assert_eq!(
+        beankeeper_cli::commands::setup::status(&db)?.transactions,
+        3
+    );
+    VerifiedLedger::read(&db)?;
+    Ok(())
+}
+
+fn reconcile_bank_entry(
+    ledger: &Ledger,
+    db: &db::Db,
+    company: &CompanySlug,
+    transaction_id: TransactionId,
+) -> TestResult {
+    let book = Company::bind(db.read(), company.clone())?;
+    let entry = db::get_entries_for_transaction(&book, transaction_id)?
+        .into_iter()
+        .find(|entry| entry.account_code == "1000")
+        .ok_or("missing bank entry")?;
+    let date = "2026-01-03".parse()?;
+    Granted::<Reconcile>::with_db(db, ledger.owner(), |grant| {
+        db::clear_entry(
+            grant,
+            &db::ClearRequest {
+                company_slug: company,
+                transaction_id,
+                entry_id: entry.id,
+                amount: None,
+                date,
+                statement: None,
+                status: db::ClearingStatus::Reconciled,
+            },
+        )
+    })?;
+    Ok(())
 }
 
 fn set_up_books(receipt: impl Fn(&str, Value) -> TestResult<Value>) -> TestResult<[Value; 5]> {

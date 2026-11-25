@@ -282,6 +282,50 @@ identify both receipts and explain the proposed cleanup. Use `audit_undo`
 on each receipt only when the owner asks you in chat to undo both. Report
 each result, including if one is pending or blocked.
 
+### Fix a posted category
+
+When the owner asks to fix a wrong category or move a statement posting out of
+its fallback account, find the original in the book with `txn_list` and inspect
+its lines with `txn_show` (`bk txn list` and `bk txn show ID` on the CLI).
+Call `txn_recategorize` with `company`, exactly one of `id` or `reference` for
+the original transaction, and `to_account` for the destination account code.
+Pass `from_account` for the fallback or old category account. If it occurs
+more than once, select the exact line with `entry_id`.
+Omit both line selectors only if exactly one line outside the destination is
+neither an asset nor a liability. Never create manual clearing-account offsets
+for a category correction.
+
+This request moves a line from fallback account `3150` to category `5100`.
+
+```json
+{"company":"acme","reference":"BANK-42","from_account":"3150","to_account":"5100"}
+```
+
+With local shell access, run the equivalent command using the same bookkeeper
+credential.
+
+```sh
+bk --db BOOKS --company acme --json txn recategorize --reference BANK-42 --from-account 3150 --to-account 5100
+```
+
+Use `--id ID` to select by transaction ID or `--entry-id ENTRY_ID` to identify
+the exact line. If the MCP tool is unavailable, check for the CLI command with
+`bk txn recategorize --help`. If neither is available, explain what is missing
+and offer to check for a newer signed release.
+
+With direct access, the ledger posts an audited move immediately and preserves
+the original transaction. Tell the owner the amount and the old and new
+categories in plain words. The returned `amount` is in minor units and comes
+with `currency`. Use the movement data for a chart when helpful. Offer the
+optional `desktop_path` link using the running origin from `desktop_url` in
+`changes_since`. Keep the returned `receipt_id` for one-step undo in chat.
+Pass it as `receipt` to `audit_undo` or use `bk audit undo RECEIPT`. If the
+owner's existing access is propose-only, report the returned proposal as pending.
+
+The ledger refuses the move if any line of the original transaction is
+reconciled. Explain that the transaction was already reconciled and follow
+the authorized next step, if any, from the tool error.
+
 ### Change managed access in chat
 
 If a posting tool is missing, check `agent_access` in `setup_status` or
@@ -461,7 +505,8 @@ fields are `date_col`, `description_col`, `amount_col`, `reference_col`,
 reference for each import and reuse the unchanged request for retries.
 Report the `created` and `preexisting` counts. Use `txn_show` with `company`
 and the returned transaction `id` to identify postings to suspense that
-still need categorization.
+still need categorization. Use the [posted category correction](#fix-a-posted-category)
+when the right category is known.
 
 ### Report each setup change and offer undo
 
@@ -581,7 +626,7 @@ chosen categories and transaction IDs. When resuming, find them for the
 update's date range with `txn_list` and
 `meta: ["categorization_confidence=low"]`, or
 `txn list --filter-metadata categorization_confidence=low` on the CLI.
-Explain how the owner can ask for a correction or
+Explain how the owner can ask to [fix the category](#fix-a-posted-category) or
 [undo the posting](#tell-the-owner-what-changed-and-offer-undo). Use the saved
 cadence when the client can deliver later updates. When it cannot, tell the
 owner what you can deliver in chat and offer a summary on request. Use the

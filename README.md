@@ -1,9 +1,9 @@
 # Beankeeper Desktop
 
 Your AI agent keeps your books through MCP or the `bk` command line. It can
-post transactions, reverse them, and run reports through either interface. When
-you ask about your finances, your agent answers in plain words with data it can
-chart.
+post, recategorize, and reverse transactions through either interface. When you
+ask about your finances, it runs reports and answers in plain words with data
+it can chart.
 
 Beankeeper Desktop is the paid, self-hosted layer. It runs as a local service
 with signed updates and offline licensing.
