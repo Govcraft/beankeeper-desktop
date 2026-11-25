@@ -10,6 +10,7 @@
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
 #   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
+#   BK_VERIFY_ATTESTATION=1 - require GitHub provenance for both files if cosign is absent
 #   BK_REQUIRE_AGENT_SETUP=1 - require managed service and registration commands
 #   GH_TOKEN or GITHUB_TOKEN - optional GitHub authentication for release discovery
 
@@ -20,6 +21,7 @@ INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
 NO_SERVICE="${BK_NO_SERVICE:-0}"
 NO_AGENTS="${BK_NO_AGENTS:-0}"
 REQUIRE_AGENT_SETUP="${BK_REQUIRE_AGENT_SETUP:-0}"
+VERSION_PATTERN='^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][0-9]+)?$'
 
 main() {
     while [ "$#" -gt 0 ]; do
@@ -103,40 +105,119 @@ list_published_releases() (
     fatal "could not list published releases; retry or set BK_VERSION to a signed release"
 )
 
-resolve_version() {
-    if [ -n "${BK_VERSION:-}" ]; then
-        VERSION="$BK_VERSION"
-        case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
-        printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || fatal "invalid version: $VERSION"
-        return
-    fi
-    prefer_stable=true
-    if [ "$REQUIRE_AGENT_SETUP" = 1 ]; then
-        prefer_stable=false
-    fi
+# Each JSON reader emits one record per non-draft release: the prerelease
+# boolean, tag, and asset names. Restrict fields to filename characters so
+# metadata cannot inject a record or split a field.
+read_release_records() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -rs '
+            def filename: type == "string" and test("\\A[A-Za-z0-9._-]+\\z");
+            if length != 1 or (.[0] | type != "array") then error("expected a release list") else .[0][] end
+            | objects
+            | select(.draft == false and (.prerelease | type == "boolean")
+                     and (.tag_name | filename) and (.assets | type == "array"))
+            | [(.prerelease | tostring), .tag_name, (.assets[] | objects | .name | select(filename))]
+            | join(" ")
+        '
+    elif [ "$OS" = Darwin ] && command -v osascript >/dev/null 2>&1; then
+        osascript -l JavaScript -e '
+            ObjC.import("Foundation");
+            function filename(value) {
+                return typeof value === "string" && value.length > 0 && !/[^A-Za-z0-9._-]/.test(value);
+            }
+            function run() {
+                const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+                const releases = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)));
+                if (!Array.isArray(releases)) throw new Error("expected a release list");
+                return releases.filter(release =>
+                    release && release.draft === false && typeof release.prerelease === "boolean" &&
+                    filename(release.tag_name) && Array.isArray(release.assets)
+                ).map(release => [
+                    String(release.prerelease), release.tag_name,
+                    ...release.assets.map(asset => asset && asset.name).filter(filename)
+                ].join(" ")).join("\n");
+            }
+        '
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import json
+import re
+import sys
 
-    command -v jq >/dev/null 2>&1 || fatal "jq is required to find a signed release; install jq or set BK_VERSION"
-    info "finding the latest published release with signature bundles for ${TARGET}..."
-    releases="$(list_published_releases)"
-    # GitHub metadata selects a tag. Only cosign authenticates the artifacts.
-    VERSION="$(printf '%s\n' "$releases" | jq -r --arg target "$TARGET" --argjson prefer_stable "$prefer_stable" '
-        [ .[] | select(.draft == false)
-          | (.tag_name | capture("\\Abeankeeper-desktop-v(?<version>[0-9]+\\.[0-9]+\\.[0-9]+(?:-rc\\.[0-9]+)?)\\z").version) as $version
-          | select(.prerelease == ($version | contains("-rc.")))
-          | ("bk-\($version)-\($target).tar.gz") as $archive
-          | [.assets[].name] as $assets
-          | select(all($archive, "\($archive).sigstore", "checksums-sha256.txt", "checksums-sha256.txt.sigstore";
-              . as $required | $assets | index($required) != null))
-          | $version ]
-        | max_by(split("-rc.") | [
-            ($prefer_stable and (length == 1)),
-            (.[0] | split(".") | map(tonumber)),
-            (length == 1),
-            (.[1] | tonumber? // 0)
-          ])
-        // empty
-    ')" || fatal "could not read published release metadata"
-    [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"
+def filename(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]+", value)
+
+try:
+    releases = json.load(sys.stdin.buffer)
+    if not isinstance(releases, list):
+        raise ValueError("expected a release list")
+except ValueError as error:
+    sys.exit(str(error))
+
+for release in releases:
+    if not isinstance(release, dict) or release.get("draft") is not False:
+        continue
+    prerelease, tag, assets = (release.get(field) for field in ("prerelease", "tag_name", "assets"))
+    if not isinstance(prerelease, bool) or not filename(tag) or not isinstance(assets, list):
+        continue
+    names = (asset.get("name") for asset in assets if isinstance(asset, dict))
+    print(str(prerelease).lower(), tag, *(name for name in names if filename(name)))
+'
+    else
+        fatal "release discovery needs python3 or jq; install one or set BK_VERSION to a known signed release"
+    fi
+}
+
+select_release_version() {
+    prefer_stable=1
+    if [ "$REQUIRE_AGENT_SETUP" = 1 ]; then
+        prefer_stable=0
+    fi
+    LC_ALL=C awk -v target="$TARGET" -v prefer_stable="$prefer_stable" -v version_pattern="$VERSION_PATTERN" '
+        function compare_digits(left, right) {
+            sub(/^0+/, "", left)
+            sub(/^0+/, "", right)
+            if (length(left) != length(right)) return length(left) - length(right)
+            if (("v" left) == ("v" right)) return 0
+            return ("v" left) > ("v" right) ? 1 : -1
+        }
+        function is_newer(version, best,    left, right, left_stable, right_stable, i, order) {
+            left_stable = split(version, left, /[.-]/) == 3
+            right_stable = split(best, right, /[.-]/) == 3
+            if (prefer_stable && left_stable != right_stable) return left_stable
+            for (i = 1; i <= 3; i++) {
+                order = compare_digits(left[i], right[i])
+                if (order != 0) return order > 0
+            }
+            if (left_stable != right_stable) return left_stable
+            return !left_stable && compare_digits(left[5], right[5]) > 0
+        }
+        function has_asset(name) { return index(" " $0 " ", " " name " ") != 0 }
+        $2 ~ /^beankeeper-desktop-v/ {
+            version = substr($2, length("beankeeper-desktop-v") + 1)
+            if (version !~ version_pattern || ($1 == "true") != (version ~ /-rc\./)) next
+            archive = "bk-" version "-" target ".tar.gz"
+            if (!has_asset(archive) || !has_asset(archive ".sigstore") ||
+                !has_asset("checksums-sha256.txt") || !has_asset("checksums-sha256.txt.sigstore")) next
+            if (best == "" || is_newer(version, best)) best = version
+        }
+        END { if (best != "") print best }
+    '
+}
+
+resolve_version() {
+    VERSION="${BK_VERSION:-}"
+    if [ -z "$VERSION" ]; then
+        info "finding the latest published release with signature bundles for ${TARGET}..."
+        releases="$(list_published_releases)"
+        records="$(printf '%s\n' "$releases" | read_release_records)" ||
+            fatal "could not read published release metadata"
+        # Metadata selects a tag. Artifact verification happens after download.
+        VERSION="$(printf '%s\n' "$records" | select_release_version)"
+        [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"
+    fi
+    case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
+    printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq "$VERSION_PATTERN" || fatal "invalid version: $VERSION"
 }
 
 download_and_install() {
@@ -190,13 +271,26 @@ download_and_install() {
 }
 
 verify_signatures() {
+    ref="refs/tags/beankeeper-desktop-v${VERSION}"
+    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@${ref}"
     if ! command -v cosign >/dev/null 2>&1; then
-        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] || fatal "cosign is required to verify this release"
-        warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
+        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] ||
+            fatal "cosign is required to verify this release; install it from a trusted package source and retry"
+        if [ "${BK_VERIFY_ATTESTATION:-0}" = 1 ]; then
+            command -v gh >/dev/null 2>&1 ||
+                fatal "GitHub provenance verification requires gh; install it and authenticate with gh auth login"
+            for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
+                info "verifying GitHub build provenance for ${ARTIFACT}..."
+                gh attestation verify "${BK_TEMP_DIR}/${ARTIFACT}" --hostname github.com --repo "$REPO" \
+                    --cert-identity "$IDENTITY" --source-ref "$ref" ||
+                    fatal "GitHub build provenance verification failed for ${ARTIFACT}"
+            done
+        else
+            warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
+        fi
         return
     fi
 
-    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v${VERSION}"
     for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
         info "verifying Sigstore bundle for ${ARTIFACT}..."
         if BUNDLE_STATUS="$(curl -fsSL "${URL%/*}/${ARTIFACT}.sigstore" \

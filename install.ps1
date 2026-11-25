@@ -8,6 +8,7 @@ param(
     [switch]$NoService = ($env:BK_NO_SERVICE -eq '1'),
     [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1'),
     [switch]$RequireSignatures = ($env:BK_REQUIRE_SIGNATURES -eq '1'),
+    [switch]$VerifyAttestation = ($env:BK_VERIFY_ATTESTATION -eq '1'),
     [switch]$RequireAgentSetup = ($env:BK_REQUIRE_AGENT_SETUP -eq '1')
 )
 $ErrorActionPreference = 'Stop'
@@ -88,12 +89,7 @@ function Resolve-ReleaseVersion {
     Find-SignedReleaseVersion -PreferStable:(-not $RequireAgentSetup)
 }
 
-function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Directory, [string]$ReleaseVersion) {
-    if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
-        if ($RequireSignatures) { throw 'cosign is required to verify this release' }
-        Write-Warning 'cosign not found: only SHA-256 will be checked; release authenticity is not verified'
-        return
-    }
+function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Directory, [string]$Identity) {
     $bundle = Join-Path $Directory "$Artifact.sigstore"
     try {
         Get-ReleaseFile "$BaseUrl/$Artifact.sigstore" $bundle
@@ -105,10 +101,33 @@ function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Dir
         }
         throw
     }
-    $identity = "https://github.com/$Repository/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$ReleaseVersion"
-    & cosign verify-blob --bundle $bundle --certificate-identity $identity `
+    & cosign verify-blob --bundle $bundle --certificate-identity $Identity `
         --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' (Join-Path $Directory $Artifact)
     if ($LASTEXITCODE -ne 0) { throw "Sigstore verification failed for $Artifact" }
+}
+
+function Test-ReleaseSignatures([string]$BaseUrl, [string]$Archive, [string]$Directory, [string]$ReleaseVersion) {
+    $releaseRef = "refs/tags/beankeeper-desktop-v$ReleaseVersion"
+    $identity = "https://github.com/$Repository/.github/workflows/release.yml@$releaseRef"
+    $artifacts = @($Archive, 'checksums-sha256.txt')
+    if (Get-Command cosign -ErrorAction SilentlyContinue) {
+        foreach ($artifact in $artifacts) { Test-ReleaseSignature $BaseUrl $artifact $Directory $identity }
+        return
+    }
+    if ($RequireSignatures) { throw 'cosign is required to verify this release. Install it from a trusted package source and retry.' }
+    if (-not $VerifyAttestation) {
+        Write-Warning 'cosign not found: only SHA-256 will be checked; release authenticity is not verified'
+        return
+    }
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw 'GitHub provenance verification requires gh. Install it and authenticate with gh auth login.'
+    }
+    foreach ($artifact in $artifacts) {
+        Write-Host "Verifying GitHub build provenance for $artifact..."
+        & gh attestation verify (Join-Path $Directory $artifact) --hostname github.com --repo $Repository `
+            --cert-identity $identity --source-ref $releaseRef
+        if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance verification failed for $artifact" }
+    }
 }
 
 function Install-Beankeeper {
@@ -126,8 +145,7 @@ function Install-Beankeeper {
     try {
         Get-ReleaseFile "$url/$artifact" (Join-Path $temporary $artifact)
         Get-ReleaseFile "$url/checksums-sha256.txt" (Join-Path $temporary 'checksums-sha256.txt')
-        Test-ReleaseSignature $url $artifact $temporary $releaseVersion
-        Test-ReleaseSignature $url 'checksums-sha256.txt' $temporary $releaseVersion
+        Test-ReleaseSignatures $url $artifact $temporary $releaseVersion
         $checksums = @(Get-Content (Join-Path $temporary 'checksums-sha256.txt') | Where-Object {
             $_ -match ('^[a-fA-F0-9]{64}  ' + [regex]::Escape($artifact) + '$')
         })

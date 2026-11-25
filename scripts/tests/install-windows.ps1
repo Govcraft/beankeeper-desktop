@@ -125,6 +125,59 @@ function Test-ReleaseDiscovery {
 
 Test-ReleaseDiscovery
 Write-Host 'Windows installer release discovery tests passed'
+
+function Test-AttestationFallback {
+    $releaseVersion = '0.2.0-rc.10'
+    $expectedRef = "refs/tags/beankeeper-desktop-v$releaseVersion"
+    $archive = "bk-$releaseVersion-x86_64-pc-windows-msvc.zip"
+    $directory = [IO.Path]::GetTempPath()
+    . "$root/install.ps1" -Version $releaseVersion -InstallDir $directory -VerifyAttestation -RequireSignatures:$false
+    $state = @{
+        HasGh = $false
+        FailOn = $null
+        Checked = [System.Collections.Generic.List[string]]::new()
+    }
+    function Get-Command([string]$Name, [string]$ErrorAction) {
+        if ($Name -eq 'gh' -and $state.HasGh) { return 'gh' }
+        if ($Name -notin 'gh', 'cosign') { throw "Unexpected executable check: $Name" }
+    }
+    function gh {
+        $artifact = Split-Path $args[2] -Leaf
+        $expected = @(
+            'attestation', 'verify', (Join-Path $directory $artifact), '--hostname', 'github.com',
+            '--repo', 'Govcraft/beankeeper-desktop', '--cert-identity',
+            "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@$expectedRef",
+            '--source-ref', $expectedRef
+        )
+        if (($args -join '|') -cne ($expected -join '|')) { throw 'Unexpected provenance verification arguments' }
+        $state.Checked.Add($artifact)
+        $global:LASTEXITCODE = if ($state.FailOn -ceq $artifact) { 1 } else { 0 }
+    }
+    function Assert-Failure([string]$Message) {
+        try { Test-ReleaseSignatures 'unused' $archive $directory $releaseVersion }
+        catch {
+            if ($_.Exception.Message -notlike "*$Message*") { throw }
+            return
+        }
+        throw "Expected failure: $Message"
+    }
+
+    Assert-Failure 'requires gh'
+    $state.HasGh = $true
+    $RequireSignatures = $true
+    Assert-Failure 'cosign is required'
+    $RequireSignatures = $false
+    if ($state.Checked.Count -ne 0) { throw 'Strict signature mode attempted the provenance fallback' }
+
+    Test-ReleaseSignatures 'unused' $archive $directory $releaseVersion
+    if (($state.Checked -join ',') -cne "$archive,checksums-sha256.txt") { throw 'Expected both files to be attested' }
+    $state.FailOn = 'checksums-sha256.txt'
+    Assert-Failure 'GitHub build provenance verification failed for checksums-sha256.txt'
+    $global:LASTEXITCODE = 0
+}
+
+Test-AttestationFallback
+Write-Host 'Windows installer provenance tests passed'
 if ($DiscoveryOnly) { return }
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())

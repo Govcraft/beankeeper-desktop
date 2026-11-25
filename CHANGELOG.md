@@ -4,6 +4,7 @@
 
 - Build Desktop against current Beankeeper main, preserving named setup and audit errors and exposing structured statement discrepancy details through the upstream CLI and MCP tools.
 - The transaction register hides reversed and cancelled pairs by default, with a checkbox and shareable links to include both entries.
+- Discover signed Desktop releases on Linux and macOS without `jq`, and opt in to GitHub provenance verification when `cosign` is unavailable for a regular install.
 - Tailor encrypted fictional demo books to a short chat interview with `demo_start` or `bk demo start --profile`.
 - Open and pair the default browser on demand with `bk open` or the local `service_open` MCP tool. Desktop restores the requested view after pairing.
 - Agents can correct posted categories in chat with `txn_recategorize` or `bk txn recategorize`, then undo the audited move by receipt.

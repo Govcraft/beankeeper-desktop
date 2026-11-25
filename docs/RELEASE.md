@@ -212,8 +212,9 @@ stable or `-rc.N` tag, and it lists the platform archive,
 `checksums-sha256.txt`, and a Sigstore bundle for each. Regular installs choose
 the highest qualifying stable version, or the highest qualifying release
 candidate if no stable release qualifies. Guided setup chooses the highest
-qualifying version across both. Automatic selection on Linux and macOS
-requires `jq`.
+qualifying version across both. The shell installer reads release metadata
+with `jq` when available, then macOS's built-in `osascript` or `python3`. If
+none of these tools is available, set `BK_VERSION` to a known signed release.
 
 Set `BK_VERSION` without the tag prefix to select a specific published release.
 Both scripts also accept `BK_INSTALL`. They always require a matching SHA-256
@@ -227,11 +228,21 @@ https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@ref
 
 The OIDC issuer must be `https://token.actions.githubusercontent.com`. A bundle
 HTTP 404 permits checksum-only verification for older unsigned releases and
-prints a warning. Missing cosign also warns and uses checksums. An invalid
-bundle, verification failure, or any other bundle download error stops installation.
-Checksum-only installation detects corruption but does not authenticate the
-release publisher. These scripts never change the user's execution policy or
-PATH, and do not start `bk serve`.
+prints a warning. A regular install without `cosign` defaults to checksum
+verification and warns that checksum verification alone cannot authenticate the
+publisher. An invalid bundle, verification failure, or any other bundle
+download error stops installation.
+The installers leave the user's execution policy and PATH as configured.
+
+For a regular install without `cosign`, authenticate the GitHub CLI with
+`gh auth login` and opt in to build provenance with
+`BK_VERIFY_ATTESTATION=1 sh install.sh` or `./install.ps1 -VerifyAttestation`.
+Both installers accept the environment variable. They run
+`gh attestation verify` on the platform archive and checksum list, requiring
+the Govcraft repository, the exact workflow identity above, and the selected
+tag ref. A missing GitHub CLI or failed attestation stops installation.
+`BK_REQUIRE_SIGNATURES=1` and `-RequireSignatures` require `cosign` even when
+the provenance option is enabled.
 
 The [agent-led guide](../SKILL.md) requires both signatures and checks that the
 verified binary provides managed service and agent registration commands. A

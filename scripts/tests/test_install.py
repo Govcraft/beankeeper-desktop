@@ -25,9 +25,11 @@ class ShellInstallerTests(unittest.TestCase):
         self.destination = self.root / "installed"
         self.destination.mkdir()
         self.stage_shell_fixture("0.1.0")
-        for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep", "jq"):
+        for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
+        # Exercise release discovery without exposing jq from the host.
+        (self.bin / "python3").symlink_to(sys.executable)
         self.script("uname", 'print("Linux" if "-s" in sys.argv else "x86_64")')
         self.script("curl", '''
 import shutil
@@ -102,6 +104,22 @@ sys.exit({1 if fail else 0})
         for name in (f"{self.stem}.tar.gz", "checksums-sha256.txt"):
             (self.fixtures / f"{name}.sigstore").write_text("fixture bundle")
 
+    def github_cli(self, fail_on=None):
+        self.script("gh", f'''
+artifact = Path(sys.argv[3])
+ref = "refs/tags/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"]
+assert sys.argv[1:] == [
+    "attestation", "verify", str(artifact), "--hostname", "github.com",
+    "--repo", "Govcraft/beankeeper-desktop", "--cert-identity",
+    "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@" + ref,
+    "--source-ref", ref,
+]
+assert artifact.is_file()
+with (Path(os.environ["FIXTURES"]) / "attested").open("a") as log:
+    print(artifact.name, file=log)
+sys.exit(artifact.name == {fail_on!r})
+''')
+
     @staticmethod
     def release_entry(version, target, *, missing=None, **overrides):
         archive = f"bk-{version}-{target}.tar.gz"
@@ -111,10 +129,45 @@ sys.exit({1 if fail else 0})
                 "assets": [{"name": name} for name in names if name != missing], **overrides}
 
     def test_no_cosign_checks_checksum_and_installs(self):
+        self.github_cli()
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("cosign not found", result.stderr)
         self.assertTrue((self.destination / "bk").exists())
+        self.assertFalse((self.fixtures / "attested").exists())
+
+    def test_attestation_opt_in_checks_archive_and_checksum_manifest(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
+        missing_gh = self.run_installer()
+        self.assertNotEqual(missing_gh.returncode, 0)
+        self.assertIn("requires gh", missing_gh.stderr)
+        self.assertFalse((self.destination / "bk").exists())
+
+        self.github_cli()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.fixtures / "attested").read_text().splitlines(),
+                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
+        self.assertTrue((self.destination / "bk").exists())
+
+    def test_failed_attestation_preserves_installed_binary(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
+        self.github_cli(fail_on="checksums-sha256.txt")
+        installed = self.destination / "bk"
+        installed.write_text("previous version")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub build provenance verification failed for checksums-sha256.txt", result.stderr)
+        self.assertEqual(installed.read_text(), "previous version")
+
+    def test_required_signatures_take_precedence_over_attestation_opt_in(self):
+        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_VERIFY_ATTESTATION="1")
+        self.github_cli()
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cosign is required", result.stderr)
+        self.assertFalse((self.fixtures / "attested").exists())
+        self.assertFalse((self.destination / "bk").exists())
 
     def test_service_is_installed_by_default_and_reinstall_stops_before_upgrading(self):
         result = self.run_installer()
@@ -178,6 +231,7 @@ sys.exit({1 if fail else 0})
         self.assertFalse((self.destination / "bk").exists())
 
     def test_present_bundles_verify_both_with_exact_release_identity(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
         self.cosign()
         self.bundles()
         result = self.run_installer()
@@ -244,9 +298,30 @@ sys.exit({1 if fail else 0})
         self.assertFalse((self.destination / "bk").exists())
 
     def use_discovery(self, **overrides):
-        self.env.pop("BK_VERSION")
-        self.env.update(FIXTURE_RELEASES=json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]),
-                        **overrides)
+        self.env.pop("BK_VERSION", None)
+        self.env.update({"FIXTURE_RELEASES": json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]),
+                         **overrides})
+
+    def test_discovery_rejects_malformed_metadata(self):
+        for body in ('[{"draft":false}', '{"message":"not a release list"}', '[] []'):
+            with self.subTest(body=body):
+                self.use_discovery(FIXTURE_RELEASES=body)
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("could not read published release metadata", result.stderr)
+                self.assertFalse((self.destination / "bk").exists())
+
+    def test_discovery_explains_missing_json_reader_and_explicit_version_still_works(self):
+        (self.bin / "python3").unlink()
+        self.use_discovery()
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release discovery needs python3 or jq", result.stderr)
+        self.assertIn("set BK_VERSION", result.stderr)
+        self.assertFalse((self.destination / "bk").exists())
+        self.env["BK_VERSION"] = "0.1.0"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_authenticates_release_discovery_using_either_token(self):
         self.use_discovery(GITHUB_TOKEN="fallback", GH_TOKEN="preferred")
@@ -287,7 +362,7 @@ sys.exit({1 if fail else 0})
         self.stage_shell_fixture(version)
         self.cosign()
         self.bundles()
-        self.env.pop("BK_VERSION")
+        self.env.pop("BK_VERSION", None)
         self.env.update(BK_REQUIRE_AGENT_SETUP="0", FIXTURE_VERSION=version,
                         FIXTURE_RELEASES=json.dumps(releases))
 
@@ -313,6 +388,27 @@ sys.exit({1 if fail else 0})
             self.release_entry("0.0.9", target),
             self.release_entry("0.1.0", target),
         ])
+
+    def test_release_selection_matches_across_available_json_readers(self):
+        target = "x86_64-unknown-linux-gnu"
+        version = "0.10.0"
+        corrupted = self.release_entry("0.99.0", target, missing="checksums-sha256.txt.sigstore")
+        corrupted["assets"].append({"name": "junk checksums-sha256.txt.sigstore"})
+        corrupted["assets"].append({"name": "checksums-sha256.txt.sigstore\n"})
+        candidates = [
+            self.release_entry("0.9.0", target),
+            self.release_entry("0.101.0", target, tag_name="beankeeper-desktop-v0.101.0\n"),
+            self.release_entry("0.100.0", target, draft=True),
+            self.release_entry("0.100.0", target, prerelease=True),
+            self.release_entry("0.100.0", "aarch64-unknown-linux-gnu"),
+            corrupted, self.release_entry(version, target),
+        ]
+        if jq := shutil.which("jq"):
+            (self.bin / "jq").symlink_to(jq)
+            self.assert_regular_release_selection(version, candidates)
+            (self.bin / "jq").unlink()
+            (self.fixtures / "verified").unlink()
+        self.assert_regular_release_selection(version, candidates)
 
     def test_install_documentation_has_no_hard_coded_desktop_release(self):
         for path, heading in (
@@ -367,6 +463,9 @@ else:
                 self.cosign()
                 arch = "aarch64" if platform == "Darwin" else "x86_64"
                 self.script("uname", f'print({platform!r} if "-s" in sys.argv else {arch!r})')
+                if platform == "Darwin" and sys.platform == "darwin":
+                    (self.bin / "python3").unlink()
+                    (self.bin / "osascript").symlink_to("/usr/bin/osascript")
                 candidates = [
                     self.release_entry("0.3.0-rc.1", target, draft=True),
                     self.release_entry("0.3.0", target, missing=f"bk-0.3.0-{target}.tar.gz"),
