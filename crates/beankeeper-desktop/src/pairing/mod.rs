@@ -55,7 +55,7 @@ impl fmt::Display for PairingError {
             Self::InvalidLink => "Pairing link expired or already used. Ask your assistant to open Beankeeper Desktop again, or run `bk open`.",
             Self::Unauthorized => "A paired browser and valid request credentials are required.",
             Self::Capacity => "Too many pairing links or browser sessions. Wait for a link to expire or sign out a browser.",
-            Self::Unavailable => "Browser session state is unavailable. Restart `bk serve`.",
+            Self::Unavailable => "Browser session state is unavailable. Restart Beankeeper Desktop.",
             Self::Entropy(_) => "Could not generate a browser credential.",
         })
     }

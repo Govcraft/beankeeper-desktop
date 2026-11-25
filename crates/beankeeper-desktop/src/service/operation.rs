@@ -110,7 +110,7 @@ impl ServiceOperation {
             },
             Self::Open => Exposure::Mcp {
                 name: OPEN_TOOL,
-                description: "At the owner's request, open Beankeeper Desktop in their default browser. If prompted, select Pair this browser. Desktop restores the view the owner just tried to open. This action does not post to the ledger.",
+                description: "At the owner's request, open Beankeeper Desktop in their default browser. If prompted, select Pair this browser. Desktop restores the view the owner just tried to open.",
             },
             Self::AccessSet(_) => Exposure::Mcp {
                 name: ACCESS_TOOL,

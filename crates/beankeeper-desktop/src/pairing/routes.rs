@@ -519,7 +519,7 @@ mod destination_tests {
             .to_owned();
         let body = response.text().await?;
         assert!(body.contains("Pair this browser"));
-        assert!(body.contains("Your requested view will open automatically"));
+        assert!(body.contains("Pair in this browser to return to your requested view"));
         assert!(!body.contains("Too many pairing links"));
         assert!(!body.contains("protected view"));
         {
