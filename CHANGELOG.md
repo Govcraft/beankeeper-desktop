@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Open and pair the default browser on demand with `bk open` or the local `service_open` MCP tool. Desktop restores the requested view after pairing.
+- Agents can correct posted categories in chat with `txn_recategorize` or `bk txn recategorize`, then undo the audited move by receipt.
 
 ## [0.1.0-rc.29] - 2026-11-24
 
