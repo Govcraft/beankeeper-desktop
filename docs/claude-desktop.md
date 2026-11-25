@@ -37,6 +37,10 @@ to install or upgrade the Claude Desktop extension. The `agents_extension`
 tool is available in Claude's Beankeeper extension and on the local lifecycle
 connection. The command-line equivalent is `bk agents extension`.
 
+Before setup, the extension lists `setup`, `setup_status`, `doctor`, and
+`agents_extension`. You can prepare the verified installer before creating
+books or starting the local service.
+
 Beankeeper uses `cosign` to verify the newest published release for your computer.
 It verifies the Sigstore signatures on the checksums and extension, then requires
 the extension's SHA-256 to match the signed checksum. After your operating

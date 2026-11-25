@@ -148,10 +148,13 @@ def extension_session(launcher, arguments, env):
 def setup_in_extension(launcher, arguments, env, definition):
     with extension_session(launcher, arguments, env) as (request, tool, notifications):
         tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
-        assert tools == {"setup", "setup_status", "doctor"}
+        assert tools == {"setup", "setup_status", "doctor", "agents_extension"}, tools
         assert tool("setup_status")["structuredContent"]["state"] == "not_started"
         rejected = tool("setup", {"url": "unexpected", "command": "unexpected"})
         assert rejected["isError"] and rejected["structuredContent"]["code"] == "SERVICE_ARGUMENTS"
+        rejected = tool("agents_extension", {"url": "https://example.invalid/file.mcpb"})
+        assert rejected["isError"]
+        assert rejected["structuredContent"]["code"] == "AGENT_EXTENSION_ARGUMENTS"
         assert not definition.exists() and not definition.is_symlink()
         assert tool("setup")["structuredContent"]["state"] == "running"
 
@@ -173,7 +176,9 @@ def setup_in_extension(launcher, arguments, env, definition):
         assert tool("setup")["structuredContent"]["state"] == "ready"
         assert tool("doctor")["structuredContent"]["state"] == "ready"
         tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
-        assert {"company_list", "setup", "setup_status", "doctor", "demo_start"} <= tools
+        assert {
+            "company_list", "setup", "setup_status", "doctor", "agents_extension", "demo_start",
+        } <= tools, tools
 
         # Set up my books uses the existing onboarding tool on this connection.
         ledger = tool("setup_status")["structuredContent"]

@@ -78,8 +78,9 @@ after startup and when the managed service uses a fallback port. It reports a
 browser launch and hands the one-time link directly to the OS browser.
 
 Use `agents_extension` when the owner asks to install or upgrade the signed
-Claude Desktop extension. Pass `{"path_only":true}` to return the verified
-local file without opening it or changing Claude's settings.
+Claude Desktop extension, including before setting up books. Pass
+`{"path_only":true}` to return the verified local file without opening it or
+changing Claude's settings.
 [Install or upgrade the signed extension](claude-desktop.md#install-or-upgrade-from-beankeeper)
 
 This separate local stdio connection can restart a stopped HTTP server and
