@@ -1,6 +1,6 @@
 ---
 name: beankeeper-desktop
-description: Keep your Beankeeper books and get answers about your money in chat.
+description: Ask your AI to check your accounts, record what's new, and answer questions about your money.
 ---
 
 # Beankeeper Desktop
