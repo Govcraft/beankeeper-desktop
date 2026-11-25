@@ -16,7 +16,9 @@ use serde_json::json;
 use super::{ServiceError, ServiceOperation, ServiceReply, execute};
 use crate::setup::AgentAccess;
 
-struct Lifecycle;
+struct Lifecycle {
+    instructions: &'static str,
+}
 
 impl ServerHandler for Lifecycle {
     fn get_info(&self) -> ServerConfig {
@@ -25,7 +27,7 @@ impl ServerHandler for Lifecycle {
         info.server_info = Implementation::new("beankeeper-service", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(format!(
             "This connection manages the local per-user service. {}",
-            AgentAccess::mcp_instructions()
+            self.instructions
         ));
         info
     }
@@ -105,12 +107,14 @@ fn failure(error: &ServiceError) -> CallToolResult {
 }
 
 pub(super) fn serve() -> Result<(), ServiceError> {
+    let instructions = AgentAccess::mcp_instructions()
+        .map_err(|_| ServiceError::Configuration("invalid embedded agent skill guidance"))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let service = Lifecycle
+        let service = Lifecycle { instructions }
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|_| ServiceError::Configuration("cannot initialize service MCP transport"))?;

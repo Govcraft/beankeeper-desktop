@@ -6,17 +6,21 @@ use std::{
     time::Duration,
 };
 
-use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, DiscoverResult,
-    Implementation, InitializeRequestParams, ListToolsResult, ProtocolVersion, ServerCapabilities,
-    ServerConfig, Tool,
+use rmcp::{
+    ErrorData,
+    model::{
+        CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, DiscoverResult,
+        Implementation, InitializeRequestParams, ListToolsResult, ProtocolVersion,
+        ServerCapabilities, ServerConfig, Tool,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    BridgeError, DISCOVER, InlineProtocol, ManagedConnection, Transport, connected_transport,
-    inline_protocol, read_message, rpc_reply, tools_changed, write_message,
+    BridgeError, ManagedConnection, Transport, connected_transport,
+    protocol::{BridgeRequest, InlineProtocol, MethodKind},
+    read_message, rpc_reply, tools_changed, write_message,
 };
 use crate::{
     agent_skill,
@@ -113,15 +117,18 @@ impl Session {
         if message["method"] == "initialize" {
             return self.initialize(message, id, output);
         }
-        let inline = match inline_protocol(message) {
-            Ok(inline) => inline,
+        let request = match BridgeRequest::try_from(message) {
+            Ok(request) => request,
             Err(error) => return rpc_reply(output, id, Err(error)),
         };
-        if message["method"] == DISCOVER {
-            let discovery = DiscoverResult::from_server_info(
-                ProtocolVersion::KNOWN_VERSIONS.to_vec(),
-                server_config(),
-            );
+        let inline = request.inline();
+        if request.kind() == MethodKind::Discover {
+            let config = match server_config() {
+                Ok(config) => config,
+                Err(error) => return rpc_reply(output, id, Err(error)),
+            };
+            let discovery =
+                DiscoverResult::from_server_info(ProtocolVersion::KNOWN_VERSIONS.to_vec(), config);
             return response(output, id, discovery);
         }
         if self.initialize.is_none() && inline.is_none() {
@@ -132,16 +139,13 @@ impl Session {
                 "Initialize the Beankeeper extension first.",
             );
         }
-        if let Some(method) = message["method"]
-            .as_str()
-            .filter(|method| agent_skill::handled(method))
-        {
+        if let MethodKind::Skill(method) = request.kind() {
             return rpc_reply(output, id, agent_skill::result(method, &message["params"]));
         }
-        if message["method"] == "ping" && inline.is_none() {
+        if request.kind() == MethodKind::Ping && inline.is_none() {
             return response(output, id, json!({}));
         }
-        let command = (message["method"] == "tools/call")
+        let command = (request.kind() == MethodKind::ToolsCall)
             .then(|| {
                 message["params"]["name"]
                     .as_str()?
@@ -154,7 +158,7 @@ impl Session {
             return self.call(command, None, message, id, output);
         }
         let was_attached = self.transport.is_some();
-        let unavailable = self.attach(inline.as_ref()).err();
+        let unavailable = self.attach(inline).err();
         if inline.is_none() && !was_attached && self.transport.is_some() {
             tools_changed(output)?;
         }
@@ -168,7 +172,7 @@ impl Session {
             Some(command @ ExtensionCommand::Status) if status_is_local => {
                 self.call(command, unavailable.as_ref(), message, id, output)
             }
-            _ => self.forward(message, id, output, unavailable.as_ref(), inline.as_ref()),
+            _ => self.forward(&request, id, output, unavailable.as_ref()),
         }
     }
 
@@ -196,8 +200,11 @@ impl Session {
         } else {
             latest
         };
+        let mut info = match server_config() {
+            Ok(config) => config.with_protocol_version(protocol),
+            Err(error) => return rpc_reply(output, id, Err(error)),
+        };
         self.initialize = Some(message.clone());
-        let mut info = server_config().with_protocol_version(protocol);
         if let Some(tools) = &mut info.capabilities.tools {
             tools.list_changed = Some(true);
         }
@@ -210,7 +217,10 @@ impl Session {
         response(output, id, info)
     }
 
-    fn attach(&mut self, inline: Option<&InlineProtocol>) -> Result<Option<String>, BridgeError> {
+    fn attach(
+        &mut self,
+        inline: Option<&InlineProtocol<'_>>,
+    ) -> Result<Option<String>, BridgeError> {
         if self.transport.is_some() || matches!(self.worker, Worker::Running(_)) {
             return Ok(None);
         }
@@ -262,20 +272,19 @@ impl Session {
 
     fn forward(
         &mut self,
-        message: &Value,
+        request: &BridgeRequest<'_>,
         id: &Value,
         output: &mut impl Write,
         unavailable: Option<&BridgeError>,
-        inline: Option<&InlineProtocol>,
     ) -> Result<(), BridgeError> {
-        match message["method"].as_str() {
-            Some("tools/list") if self.transport.is_none() => {
+        match request.kind() {
+            MethodKind::ToolsList if self.transport.is_none() => {
                 let result = ListToolsResult::with_all_items(tools(true))
                     .with_ttl_ms(0)
                     .with_cache_scope(CacheScope::Private);
                 return response(output, id, result);
             }
-            Some("tools/call") if self.transport.is_none() => {
+            MethodKind::ToolsCall if self.transport.is_none() => {
                 let result = match self.progress(unavailable) {
                     progress @ Progress::Failed { .. } => {
                         progress.result().map_err(|_| BridgeError::Protocol)?
@@ -290,7 +299,7 @@ impl Session {
             _ => {}
         }
         if let Some(transport) = &mut self.transport {
-            transport.forward_negotiated(message, inline, output)
+            transport.forward_negotiated(request, output)
         } else {
             rpc_error(
                 output,
@@ -302,8 +311,9 @@ impl Session {
     }
 }
 
-fn server_config() -> ServerConfig {
-    ServerConfig::new(
+fn server_config() -> Result<ServerConfig, ErrorData> {
+    let skill = agent_skill::EmbeddedSkill::get()?;
+    Ok(ServerConfig::new(
         ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -313,9 +323,9 @@ fn server_config() -> ServerConfig {
     .with_server_info(Implementation::new("beankeeper", env!("CARGO_PKG_VERSION")))
     .with_instructions(format!(
         "{} {}",
-        agent_skill::claude_setup_summary(),
-        AgentAccess::mcp_instructions()
-    ))
+        skill.claude_setup(),
+        AgentAccess::mcp_instructions()?
+    )))
 }
 
 fn readiness(unavailable: Option<&BridgeError>) -> Progress<'static> {
