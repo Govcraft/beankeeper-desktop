@@ -270,6 +270,7 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
         "/api/session/logout",
         "/api/session/pairing",
         "/api/session/associate",
+        "/api/local/browser-link",
         "/mcp",
     ] {
         let url = format!("{}{path}", server.base);
@@ -351,6 +352,35 @@ fn every_route_rejects_rebinding_hosts_and_cross_origin_requests() -> TestResult
             .is_none()
     );
     assert_duplicate_hosts_rejected(authority)?;
+    Ok(())
+}
+
+#[test]
+fn ledger_bearers_have_no_owner_browser_open_authority() -> TestResult {
+    let ledger = Ledger::new()?;
+    let endpoint = "/api/local/browser-link";
+    for identity in [&ledger.reader, &ledger.writer] {
+        let mut server = Server::start(&ledger, &["serve"], None)?;
+        let bearer = token(identity)?;
+        server.initialize(Some(bearer))?;
+        let tools = rpc(server.request("tools/list", json!({}), Some(bearer))?)?;
+        assert!(
+            tools["result"]["tools"]
+                .as_array()
+                .ok_or("tool list")?
+                .iter()
+                .all(|tool| tool["name"] != "service_open")
+        );
+        let response = server
+            .client
+            .post(format!("{}{endpoint}", server.base))
+            .bearer_auth(bearer)
+            .send()?;
+        assert_eq!(response.status(), 401);
+        assert!(response.headers().get("set-cookie").is_none());
+        let response = server.client.get(&server.base).send()?;
+        assert_eq!(response.status(), 401);
+    }
     Ok(())
 }
 
@@ -438,21 +468,25 @@ fn read_only_ceiling_and_process_fallback_are_preserved() -> TestResult {
 #[test]
 fn open_probes_before_launching_and_reports_absent_or_unrelated_servers() -> TestResult {
     let ledger = Ledger::new()?;
-    let server = Server::start(&ledger, &["serve"], None)?;
+    let state = tempfile::tempdir()?;
+    let mut command = ledger.command();
+    command
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("BEANKEEPER_DESKTOP_STATE_DIR", state.path());
+    let server = Server::launch(command)?;
     let bind: SocketAddr = server.base.trim_start_matches("http://").parse()?;
     let mut launched = None;
-    browser::open_with(bind, |url| {
+    browser::open_with(bind, state.path(), |url| {
         launched = Some(url.to_owned());
         Ok(())
     })?;
-    assert_eq!(
-        launched.as_deref(),
-        Some(format!("{}/", server.base).as_str())
-    );
+    let url = launched.ok_or("browser was not launched")?;
+    assert!(url.starts_with(&format!("{}/pair?token=", server.base)));
+    assert_eq!(server.client.get(url).send()?.status(), 200);
     assert!(
-        browser::open_with(bind, |_| Err(beankeeper_desktop::DesktopError::Io(
-            std::io::Error::other("launcher failed")
-        )))
+        browser::open_with(bind, state.path(), |_| Err(
+            beankeeper_desktop::service::ServiceError::BrowserLaunch
+        ))
         .is_err()
     );
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -471,13 +505,21 @@ fn open_probes_before_launching_and_reports_absent_or_unrelated_servers() -> Tes
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nother")
     });
     assert!(
-        browser::open_with(unrelated, |_| panic!("must not launch for another service")).is_err()
+        browser::open_with(unrelated, state.path(), |_| panic!(
+            "must not launch for another service"
+        ))
+        .is_err()
     );
     thread.join().map_err(|_| "probe thread panicked")??;
     let reserved = TcpListener::bind("127.0.0.1:0")?;
     let absent = reserved.local_addr()?;
     drop(reserved);
-    assert!(browser::open_with(absent, |_| panic!("must not launch without a server")).is_err());
+    assert!(
+        browser::open_with(absent, state.path(), |_| panic!(
+            "must not launch without a server"
+        ))
+        .is_err()
+    );
     let output = clean_command()
         .args(["open", "--bind", &absent.to_string()])
         .output()?;

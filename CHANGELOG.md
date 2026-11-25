@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Open and pair the default browser on demand with `bk open` or the local `service_open` MCP tool. Desktop restores the requested view after pairing.
+
 ## [0.1.0-rc.29] - 2026-11-24
 
 - Desktop now uses Beankeeper where the bookkeeper agent can undo its own changes by receipt with `audit_undo` and reverse postings with `txn_reverse` in chat (Govcraft/beankeeper#287); propose-only agents get pending corrections for sign-off.

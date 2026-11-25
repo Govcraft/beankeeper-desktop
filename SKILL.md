@@ -590,11 +590,13 @@ transaction link when available.
 
 ## Offer Desktop views
 
-When the owner wants to open a view, offer the browser pairing page if needed.
-The agent can obtain the one-time pairing URL from the running server when
-authorized. The owner selects **Pair this browser** within five minutes.
-Opening or refreshing the page leaves the link usable; only the confirmation
-POST consumes it. A paired browser can browse the financial snapshot, accounts, transactions,
+If the owner wants help opening a Desktop link, call `service_open` on the
+local `beankeeper-service` connection or in the Beankeeper Claude Desktop
+extension. It opens the owner's default browser. If asked, the owner selects
+**Pair this browser** within five minutes. If the local tool is unavailable,
+suggest `bk open`. The ledger connection can generate a detail link, and local
+OS-user authority issues the pairing link directly to the browser.
+A paired browser can browse the financial snapshot, accounts, transactions,
 financial reports, tax summaries and read-only reconciliation. Use the stable
 view IDs and query filters in [docs/reports.md](docs/reports.md) for saved report
 links. Tax CSV/JSON downloads require the human browser session; agent bearer
@@ -641,7 +643,7 @@ Example after answering an October spending question:
 Each running Desktop listener serves one books file. Use the ledger connection
 for the books being discussed. A browser paired with that listener can open its
 detail links for the life of the session. A separate listener needs an initial
-pairing. After the owner pairs the browser, Desktop restores the requested
+pairing. When the owner pairs in the same browser, Desktop restores the requested
 view. Keep pairing and bearer credentials out of shared detail URLs. A saved
 view URL conveys no authority. Use `ui_show_view` only when the owner wants you
 to change their connected tab, with the separate navigation connection described

@@ -1,24 +1,25 @@
 # Browser pairing and sessions
 
-Start `bk serve` and open the one-time URL it prints to the terminal. The URL
-contains a fresh 256-bit secret from the operating system. It expires after five
-minutes and can be redeemed only once. Opening or refreshing the URL displays
-a confirmation page without consuming the secret or issuing a cookie. Select
-**Pair this browser** before the link expires to submit its token by POST.
-Only a successful POST consumes the token, issues a cookie and redirects to `/`.
-Duplicate or speculative GET/HEAD requests leave the link usable; confirmation
-requires an explicit click and is never submitted automatically.
-Opening `/` directly, including through `bk open`, displays a pairing screen
-until the browser has paired. Health and static CSS remain public; ledger tools
-remain available through authenticated MCP even before any browser pairs.
+Ask your assistant to open Beankeeper Desktop or run `bk open`. The local
+`service_open` tool and CLI request a fresh link from the running server and
+open it in your default browser. The background service starts without a
+pairing link in its logs. For foreground `bk serve`, the terminal's initial
+link also works.
+
+A link has a fresh 256-bit secret, expires after five minutes and can be
+redeemed once. Selecting **Pair this browser** submits a same-origin POST.
+A successful POST consumes the token, issues a cookie and opens the pending
+destination or `/`. Opening or refreshing the link leaves it usable.
+If the browser already sends a valid session cookie, the link opens the view
+using that session. Health and static CSS remain public, and authenticated
+ledger tools are available before any browser pairs.
 
 The paired workspace provides **Pair another browser** and **Unpair this
 browser** controls. Each new browser link is also single-use and expires after
-five minutes. If all links expire and no browser is paired, restart `bk serve`.
-Pairing links are secrets: keep terminal output private. No pairing secret,
-cookie credential or agent bearer token is stored on disk or placed in the
-public shell. Secrets are redacted from Debug output. A link necessarily appears
-in the confirmation page's address and hidden form field. The server disables
+five minutes. Run `bk open` again or ask your assistant to reopen Desktop when
+a link expires. Keep pairing links private. The server keeps browser link
+secrets and session cookies in memory. A link appears in the confirmation
+page's address and hidden form field. The server disables
 caching, restricts referrers to the same origin on the confirmation page so the
 form can send its Origin, and disables referrers on errors and the redirect after
 redemption. It installs no request URL logger. Do not put a proxy or
@@ -35,8 +36,21 @@ Each Desktop listener serves one books file. A separately hosted books file
 needs an initial pairing with its listener. A paired browser can keep sessions
 for multiple listeners at the same time and reuse each one until it expires.
 Unpairing revokes the server-side session, even if a client keeps the cookie.
-Expired entries are pruned on access. There are at most 64 pending links and
-64 active browser sessions per launch.
+Expired entries are pruned on access. Browser links, agent association
+invitations and active browser sessions each have a 64-entry limit per launch.
+
+## Local owner authority
+
+Each listener reachable through canonical loopback publishes a per-launch key
+under the owner's private Desktop state directory. The CLI and local stdio
+tool read it through a handle checked for ownership, permissions and symlink
+safety. The issuing endpoint checks the socket peer is loopback and requires
+the private key and the expected launch identity. Desktop rejects requests
+with browser Origin or Cookie headers, ledger Authorization headers, or
+duplicate owner credentials. The key is separate
+from the one-time link, browser cookie and agent bearer credentials. It is
+removed on normal shutdown and replaced on the next launch. The opener hands
+the one-time link to the default browser. MCP returns only the launch outcome.
 
 Desktop uses plain HTTP exclusively on its local UI origin. It omits the
 `Secure` attribute for compatibility with browsers' HTTP loopback behavior,
@@ -83,8 +97,8 @@ After a successful authenticated MCP response, Desktop returns a
 browser. This is an agent association invite, not a browser login link. It
 expires in five minutes and is single-use. A human opens it in an already paired
 browser and selects **Connect agent to this browser**. Opening the invite in an
-unpaired browser instructs the human to pair from the terminal first, then reopen
-the invite. If Strict cookies were withheld when following a link from an
+unpaired browser instructs the human to ask their assistant to open Desktop or
+run `bk open`, then reopen the invite. If Strict cookies were withheld when following a link from an
 external site, **Continue in this browser** starts a same-origin navigation and
 shows the confirmation form. An agent cannot exchange its own invite for a
 human session. A paired browser with an open event stream still needs this
@@ -124,8 +138,8 @@ entries and expires each entry five minutes after its first creation. Repeated
 visits in the same browser replace that browser's pending destination; the most
 recent view wins. A server restart clears the registry.
 
-The human opens the existing terminal pairing URL in the same browser and
-confirms its form. Only a valid, exact-Origin pairing POST creates the session,
+The owner opens a fresh pairing link in the same browser and confirms its
+form. Only a valid, exact-Origin pairing POST creates the session,
 consumes the pending destination and redirects there with HTTP 303. The response
 clears the return cookie. Failed pairing attempts leave the destination intact.
 Expired or forged lookup values fall back to `/`; reopening the original detail

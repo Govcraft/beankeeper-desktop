@@ -566,7 +566,9 @@ fn finish_setup(
                 .into());
             }
         }
-        crate::browser::open(options.bind)?;
+        crate::browser::open(crate::cli::OpenOptions {
+            bind: Some(options.bind.try_into().map_err(SetupError::Invalid)?),
+        })?;
     }
     Ok(())
 }
@@ -1006,7 +1008,11 @@ pub(crate) fn running_for_ledger(
     bind: SocketAddr,
     token: &SecretString,
 ) -> Result<bool, SetupError> {
-    if crate::browser::open_with(bind, |_| Ok(())).is_err() {
+    if crate::instance::ListenerAddress::try_from(bind)
+        .ok()
+        .and_then(|address| crate::instance::Health::probe(address).ok())
+        .is_none()
+    {
         return Ok(false);
     }
     let client = reqwest::blocking::Client::builder()

@@ -17,7 +17,7 @@ pub(crate) fn definition() -> HostTool {
     HostTool {
         tool: Tool::new(
             NAME,
-            "Return an optional Desktop detail URL for the books on this ledger connection. For other books, use their own ledger connection or answer in words without a link. Offer the link after answering in words, when a view helps. Accepts view_id and an optional state object, including financial_summary's desktop_view.link. Generating it requires no pairing or navigation grant. The browser pairs once with each running instance.",
+            "Return an optional Desktop detail URL for the books on this ledger connection. For other books, use their own ledger connection or answer in words without a link. Offer the link after answering in words, when a view helps. Accepts view_id and optional state, including financial_summary's desktop_view.link. The link contains no pairing credential. If the owner wants help opening it, use service_open on the local service connection when available, or suggest bk open.",
             schemars::schema_for!(ViewAddress)
                 .to_value()
                 .as_object()

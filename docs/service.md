@@ -29,6 +29,7 @@ passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-
 | `bk service start` | Enable login startup and start installed hosting. |
 | `bk service stop` | Stop hosting and disable login startup and automatic restarts until `start`. |
 | `bk service status --json` | Report installed/running state, running Desktop version, PID, MCP endpoint, optional Desktop URL, books and log paths, and the running agent's preset and write mode. |
+| `bk service open` | Open the running managed service in the default browser with a fresh pairing link. `bk open` also discovers the running service. |
 | `bk service access-set --preset read-only --json` | Change the managed agent’s grant under the local owner’s authority. See the write modes below. |
 | `bk service uninstall` | Stop and remove hosting. Preserve all books, secrets, recovery material and MCP configuration. |
 | `bk service mcp` | Serve local lifecycle tools over stdio, including while the HTTP service is stopped. |
@@ -58,14 +59,18 @@ conflict and preserve the entry. Remove `env` if the overrides are no longer
 needed, or rename the entry to keep them, then retry.
 
 The lifecycle tools are `service_install`, `service_uninstall`, `service_start`,
-`service_stop`, `service_status` and `access_set`. They return a plain-language
-answer plus structured status or a named error. `service_install` accepts
+`service_stop`, `service_status`, `service_open` and `access_set`. They return
+a plain-language answer plus a structured result or a named error. `service_install` accepts
 optional boolean arguments `file_store` and `no_agents`, equivalent to `--file-store` and
 `--no-agents`. Both default to false. MCP installs use the managed books path.
 Use `bk --db BOOKS service install` to select a particular ledger on first
 install. The internal `install-extension` command is reserved for the native
 bundle's first launch, when the bundle owns client registration and uses the
 OS keychain.
+
+Use `service_open` when the owner asks for help opening a Desktop link. It works
+after startup and when the managed service uses a fallback port. It reports a
+browser launch and hands the one-time link directly to the OS browser.
 
 This separate local stdio connection can restart a stopped HTTP server and
 change the managed agent’s access. Configure the local stdio connections in

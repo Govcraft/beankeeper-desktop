@@ -23,7 +23,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bridge,
+    bridge, browser,
     instance::{self, BooksPath, Health, InstanceId, ListenerAddress, LiveListener},
     private_file::PrivateFile,
     setup::{
@@ -34,10 +34,10 @@ use crate::{
 
 pub use crate::instance::PortWarning;
 pub(crate) use extension::connection as extension_connection;
-pub(crate) use mcp::access_call;
+pub(crate) use mcp::local_call;
 pub use operation::InstallOptions;
 use operation::ServiceOperation;
-pub(crate) use operation::{ACCESS_TOOL, access_tool};
+pub(crate) use operation::{ACCESS_TOOL, OPEN_TOOL, access_tool, open_tool};
 use session::UserSessionEnv;
 
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -70,6 +70,8 @@ pub enum ServiceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Open the installed service in the default browser.
+    Open,
     /// Change the managed agent's access with the local owner's authority.
     AccessSet {
         /// Requested agent access.
@@ -111,6 +113,10 @@ pub enum ServiceError {
     EndpointConnect,
     /// The responding endpoint did not match the service descriptor.
     EndpointIdentity,
+    /// A fresh browser link could not be obtained using local OS-user authority.
+    BrowserPairing,
+    /// The OS could not launch its default browser.
+    BrowserLaunch,
     /// No live Desktop instance matches the selected books and optional address.
     BooksNotServed(PathBuf),
     /// More than one live instance serves the same books.
@@ -141,6 +147,8 @@ impl ServiceError {
             Self::Worker => "SERVICE_INTERNAL",
             Self::EndpointConnect => "SERVICE_ENDPOINT_UNREACHABLE",
             Self::EndpointIdentity => "SERVICE_ENDPOINT_IDENTITY",
+            Self::BrowserPairing => "DESKTOP_BROWSER_PAIRING_UNAVAILABLE",
+            Self::BrowserLaunch => "DESKTOP_BROWSER_LAUNCH_FAILED",
             Self::BooksNotServed(_) => "DESKTOP_BOOKS_NOT_SERVED",
             Self::MultipleInstances => "DESKTOP_MULTIPLE_INSTANCES",
             Self::EndpointMcp(error) => error.diagnostic_code(),
@@ -163,6 +171,8 @@ impl fmt::Display for ServiceError {
             Self::Worker => f.write_str("Service operation could not complete. Run service_status to inspect the result."),
             Self::EndpointConnect => f.write_str("Cannot connect to the published Desktop endpoint. Run bk service status --json and inspect the private service log."),
             Self::EndpointIdentity => f.write_str("The published endpoint did not identify itself as the expected Beankeeper process. Run bk service status --json and inspect the private service log."),
+            Self::BrowserPairing => f.write_str("Could not request a fresh browser link for this Desktop instance. Check that Desktop is running under your OS account, then try again."),
+            Self::BrowserLaunch => f.write_str("Could not open your default browser. Check your browser settings and try again."),
             Self::BooksNotServed(books) => write!(f, "No matching Desktop instance is serving {}. Each instance serves one books file. Start Desktop for these books, or answer without a detail link.", books.display()),
             Self::MultipleInstances => f.write_str("Multiple Desktop instances serve these books. Select the intended listener with --bind."),
             Self::EndpointMcp(error) => error.fmt(f),
@@ -361,6 +371,16 @@ impl Status {
     }
 }
 
+enum ServiceReply {
+    Status(Box<Status>),
+    Opened,
+}
+
+impl ServiceReply {
+    const OPENED_MESSAGE: &str =
+        "Opened Beankeeper Desktop in your default browser. If asked, select Pair this browser.";
+}
+
 /// Read the runtime endpoint and authenticate the expected ledger before reporting health.
 ///
 /// # Errors
@@ -393,14 +413,14 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
     let mut address = None;
     match endpoint {
         Ok(Some(AuthenticatedEndpoint { endpoint, access })) => {
-            address = Some(endpoint.address.into());
+            address = Some((&endpoint.address).into());
             result.running = true;
             result.desktop_url = Some(endpoint.desktop_url().into());
             result.mcp_endpoint = Some(endpoint.url.into());
             result.version = Some(endpoint.version);
             result.pid = Some(endpoint.pid);
             result.agent_access = access;
-            result.message = "Beankeeper is running locally. Your agent can work with your books; opening Desktop is optional.".into();
+            result.message = "Beankeeper is running locally. Opening Desktop is optional. To pair this browser, ask your assistant to open Beankeeper Desktop or use bk open.".into();
         }
         Ok(None) if result.installed => {
             result.error_code = Some(ServiceError::NotRunning.code());
@@ -428,7 +448,7 @@ pub(crate) fn port_warning() -> Option<PortWarning> {
     let address = endpoint_at(&paths, &books)
         .ok()
         .flatten()
-        .map(|endpoint| endpoint.address.into());
+        .map(|endpoint| (&endpoint.address).into());
     instance::default_port_warning(&paths.state, &books, address)
 }
 
@@ -535,7 +555,7 @@ pub(crate) fn link_address(
         .as_ref()
         .is_some_and(|config| config.books == books.as_ref())
         && let Ok(Some(endpoint)) = endpoint_at(&paths, books.as_ref())
-        && bind.is_none_or(|bind| bind == endpoint.address.into())
+        && bind.is_none_or(|bind| bind == (&endpoint.address).into())
     {
         return Ok(endpoint.address);
     }
@@ -557,6 +577,24 @@ pub(crate) fn connection() -> Result<Endpoint, ServiceError> {
         UserSessionEnv::discover()?;
         Err(ServiceError::NotReady)
     }
+}
+
+pub(crate) fn browser_listener(
+    paths: &Paths,
+    expected_books: Option<&Path>,
+) -> Result<LiveListener, ServiceError> {
+    let config = Config::load(paths)?.ok_or(ServiceError::NotInstalled)?;
+    if !paths.definition.try_exists()? {
+        return Err(ServiceError::NotInstalled);
+    }
+    if expected_books.is_some_and(|books| books != config.books) {
+        return Err(ServiceError::Configuration(
+            "The local Desktop service is now hosting different books. Reconnect before opening it.",
+        ));
+    }
+    endpoint_at(paths, &config.books)?
+        .map(|endpoint| endpoint.address)
+        .ok_or(ServiceError::NotRunning)
 }
 
 struct AuthenticatedEndpoint {
@@ -608,7 +646,10 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         _ => {}
     }
     let operation = ServiceOperation::try_from(options.command)?;
-    let status = execute(operation, Some((cli, explicit_db)), None)?;
+    let ServiceReply::Status(status) = execute(operation, Some((cli, explicit_db)), None)? else {
+        println!("{}", ServiceReply::OPENED_MESSAGE);
+        return Ok(());
+    };
     match options.command {
         ServiceCommand::Status { json: true } | ServiceCommand::AccessSet { json: true, .. } => {
             println!(
@@ -644,7 +685,7 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         ServiceCommand::Uninstall => println!(
             "Service removed. Books, credentials, MCP configs and recovery material were preserved."
         ),
-        ServiceCommand::Mcp | ServiceCommand::Run => {}
+        ServiceCommand::Mcp | ServiceCommand::Run | ServiceCommand::Open => {}
     }
     Ok(())
 }
@@ -653,10 +694,15 @@ fn execute(
     operation: ServiceOperation,
     ledger: Option<(Cli, bool)>,
     expected_books: Option<&Path>,
-) -> Result<Status, ServiceError> {
+) -> Result<ServiceReply, ServiceError> {
     let paths = Paths::discover()?;
-    if matches!(operation, ServiceOperation::Status) {
-        return status_at(&paths);
+    match operation {
+        ServiceOperation::Status => return status_reply(&paths),
+        ServiceOperation::Open => {
+            browser::open_managed(&paths, expected_books)?;
+            return Ok(ServiceReply::Opened);
+        }
+        _ => {}
     }
     paths.prepare()?;
     let _lock = lock(&paths.state.join("service-operation.lock"))?;
@@ -712,11 +758,15 @@ fn execute(
             change_access(&cli, AccessChange::Set(access))?;
             let mut status = status_at(&paths)?;
             status.agent_access.get_or_insert_with(|| access.into());
-            return Ok(status);
+            return Ok(ServiceReply::Status(Box::new(status)));
         }
-        ServiceOperation::Status => {}
+        ServiceOperation::Status | ServiceOperation::Open => {}
     }
-    status_at(&paths)
+    status_reply(&paths)
+}
+
+fn status_reply(paths: &Paths) -> Result<ServiceReply, ServiceError> {
+    status_at(paths).map(|status| ServiceReply::Status(Box::new(status)))
 }
 
 #[derive(Clone, Copy)]

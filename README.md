@@ -131,8 +131,7 @@ SQLCipher/OpenSSL. See [the frontend/toolchain decision](docs/frontend.md).
 ```sh
 cargo build --release --locked
 ./target/release/bk --db /path/to/books.db setup
-# Open the one-time pairing URL in /path/to/books.desktop.log.
-# Later, reopen the paired workspace from another terminal:
+# Open Desktop and select Pair this browser if prompted:
 ./target/release/bk open
 ```
 
@@ -175,8 +174,8 @@ bk open --bind 127.0.0.1:8751
 `--read-only` removes mutation tools regardless of the agent's capabilities.
 Port 0 selects an available port; use the URL printed at startup with `bk open
 --bind 127.0.0.1:PORT`. `bk open` checks `/health` with a two-second timeout,
-without proxies or redirects, before launching the default browser. It fails
-clearly if Desktop is unavailable and does not start a server. Ctrl-C stops the
+without proxies or redirects, before opening a fresh pairing link in the default
+browser. With no `--bind`, it prefers the running managed service. Ctrl-C stops the
 listener and cancels upstream MCP sessions before HTTP shutdown completes.
 
 ## MCP credentials and the local HTTP boundary
@@ -203,14 +202,14 @@ These checks complement MCP credentials and the separate browser session.
 
 ## Pair the browser and connect your agent
 
-Open the one-time URL printed by `bk serve` and select **Pair this browser**
-within five minutes. Opening or refreshing the page leaves the link usable.
-The button submits a same-origin POST that exchanges the
-256-bit launch secret for an `HttpOnly`, `SameSite=Strict` cookie, then redirects
-to the workspace. The URL cannot be reused. Opening the raw origin or `bk open`
-without a valid cookie shows a pairing screen. Sessions expire after 12 hours
-and all links and sessions are invalidated when the server restarts. The paired
-workspace can create another browser link or unpair the current browser.
+Ask your assistant to open Beankeeper Desktop or run `bk open`. If prompted,
+select **Pair this browser** within five minutes. Opening or refreshing the
+link leaves it usable. The button submits a same-origin POST that exchanges the
+one-time secret for an `HttpOnly`, `SameSite=Strict` cookie, then opens the
+requested view. The local `service_open` MCP tool is available through the
+`beankeeper-service` connection and the Claude Desktop extension. Sessions
+expire after 12 hours. Restarting the server clears all links and sessions.
+The paired workspace can create another browser link or unpair the current browser.
 
 MCP works before any browser is paired. Successful authenticated responses
 include a `Beankeeper-Pairing-Url` header until the agent has a browser target.
@@ -264,9 +263,8 @@ share validation; unsupported filters return `VALIDATION` rather than being
 silently omitted. Include the company, currency and explicit dates from the
 financial answer to make its link reproducible.
 
-An unpaired browser remembers the requested view while the human opens the
-terminal's one-time pairing URL in that same browser. Confirming **Pair this
-browser** then opens the original destination with its filters. An already
+An unpaired browser remembers the requested view for five minutes. Pairing in
+that same browser opens the original destination with its filters. An already
 paired browser arriving from an external site can use **continue to your
 requested view** if its Strict cookie was withheld. Each listener serves one
 books file and has its own browser session. A separate listener needs an initial

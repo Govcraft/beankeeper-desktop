@@ -1,46 +1,77 @@
-//! Bounded, proxy-free detection before launching the user's default browser.
+//! Open Desktop in the OS user's default browser.
 
-use std::{io::Read, net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::Path};
 
-use crate::{DesktopError, instance::HEALTH, server::local_url};
+use crate::{
+    DesktopError,
+    cli::OpenOptions,
+    instance::{Health, ListenerAddress, LiveListener},
+    pairing::owner,
+    server::local_url,
+    service::{self, Paths, ServiceError},
+};
 
-/// Verify the server identity and launch the default browser.
+/// Open the managed listener when running, or a specific foreground listener.
 ///
 /// # Errors
 /// Returns an error when Desktop is unavailable or the OS launcher fails.
-pub fn open(bind: SocketAddr) -> Result<(), DesktopError> {
-    open_with(bind, |url| open::that(url).map_err(DesktopError::from))
+pub fn open(options: OpenOptions) -> Result<(), DesktopError> {
+    let paths = Paths::discover().map_err(service_error)?;
+    let listener = match options.bind {
+        Some(address) => probe(address)?,
+        None => match service::browser_listener(&paths, None) {
+            Ok(listener) => listener,
+            Err(ServiceError::NotInstalled | ServiceError::NotRunning) => {
+                probe(ListenerAddress::default())?
+            }
+            Err(error) => return Err(service_error(error)),
+        },
+    };
+    launch_at(&paths.state, &listener, launch).map_err(service_error)
 }
 
-/// Probe before invoking a supplied browser launcher.
-///
-/// This boundary lets callers test launch behavior without opening a real tab.
+/// Open the managed service from an OS-authority connection.
+pub(crate) fn open_managed(
+    paths: &Paths,
+    expected_books: Option<&Path>,
+) -> Result<(), ServiceError> {
+    let listener = service::browser_listener(paths, expected_books)?;
+    launch_at(&paths.state, &listener, launch)
+}
+
+fn service_error(error: ServiceError) -> DesktopError {
+    DesktopError::Service(Box::new(error))
+}
+
+fn launch(url: &str) -> Result<(), ServiceError> {
+    open::that_detached(url).map_err(|_| ServiceError::BrowserLaunch)
+}
+
+/// Verify the listener and request a fresh link before invoking a browser launcher.
 ///
 /// # Errors
-/// Returns invalid-address, connection, server-identity or launcher errors.
+/// Returns invalid-address, connection, pairing or launcher errors.
 pub fn open_with(
     bind: SocketAddr,
-    launch: impl FnOnce(&str) -> Result<(), DesktopError>,
+    state: &Path,
+    launch: impl FnOnce(&str) -> Result<(), ServiceError>,
 ) -> Result<(), DesktopError> {
-    if !crate::server::ui_loopback(bind.ip()) || bind.port() == 0 {
-        return Err(DesktopError::NotRunning(local_url(bind)));
-    }
-    let url = local_url(bind);
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(2))
-        .build()?;
-    let response = client.get(format!("{url}health")).send()?;
-    if !response.status().is_success() {
-        return Err(DesktopError::NotRunning(url));
-    }
-    // Bound the body too: unrelated services must not make `bk open` allocate
-    // an unbounded response while trying to identify a Desktop listener.
-    let mut body = String::new();
-    response.take(64).read_to_string(&mut body)?;
-    if body != HEALTH {
-        return Err(DesktopError::NotRunning(url));
-    }
-    launch(&url)
+    let address =
+        ListenerAddress::try_from(bind).map_err(|_| DesktopError::NotRunning(local_url(bind)))?;
+    launch_at(state, &probe(address)?, launch).map_err(service_error)
+}
+
+fn probe(address: ListenerAddress) -> Result<LiveListener, DesktopError> {
+    let health =
+        Health::probe(address).map_err(|_| DesktopError::NotRunning(local_url(address.into())))?;
+    Ok((&health).into())
+}
+
+fn launch_at(
+    state: &Path,
+    listener: &LiveListener,
+    launch: impl FnOnce(&str) -> Result<(), ServiceError>,
+) -> Result<(), ServiceError> {
+    let url = owner::request_link(state, listener)?;
+    launch(url.as_str())
 }
