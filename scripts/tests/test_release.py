@@ -261,6 +261,21 @@ class PackagingTests(unittest.TestCase):
         release.checksums(self.output)
         self.assertIn(f"  {filename}\n", (self.output / "checksums-sha256.txt").read_text())
 
+    def test_skill_teaches_owner_reply_shape(self):
+        guide = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        _, heading, rest = guide.partition("\n## How to talk to the owner\n")
+        self.assertTrue(heading, "missing owner voice section")
+        section = rest.split("\n## ", 1)[0]
+        for phrase in (
+            "Lead with the answer or outcome",
+            "After a change",
+            "receipt number",
+            "You could ask:",
+            "Leave out “As an AI…,” “Anything else?”",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+
     def test_checksums_cover_every_final_asset_and_exclude_bundles(self):
         for suffix in ("tar.gz", "deb", "pkg", "exe", "zip", "mcpb"):
             (self.output / f"bk-0.1.0-target.{suffix}").write_bytes(suffix.encode())
