@@ -31,6 +31,7 @@ main a { overflow-wrap: anywhere; }
 main { width: 100%; max-width: 90rem; min-width: 0; }
 form { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 1.25rem 0; }
 label { display: flex; flex-direction: column; gap: .35rem; font-size: .9rem; font-weight: 600; }
+.filters .checkbox-filter { flex-direction: row; align-items: center; align-self: center; }
 input, select, button { font: inherit; line-height: 1.4; border: 1px solid #658273; border-radius: .25rem; padding: .6rem .75rem; max-width: 100%; }
 input, select { background: #fffef9; color: #203c34; }
 button { cursor: pointer; background: #244e40; color: white; font-weight: 650; }

@@ -231,6 +231,14 @@ fn tools_use_live_upstream_grants_and_give_text_without_a_tab() -> TestResult {
     assert_no_connected_tab(&report);
     assert!(text(&report).contains("/reports/balance-sheet?to=2026-12-31"));
     assert!(content(&report)["pairing_url"].as_str().is_some());
+    let register = call(
+        &server,
+        nav,
+        "ui_show_view",
+        json!({"view_id":"transactions","state":{"include_reversed":true}}),
+    )?;
+    assert_no_connected_tab(&register);
+    assert!(text(&register).contains("/transactions?include_reversed=true"));
     assert_invalid_navigation_requests(&server, nav)?;
     assert_eq!(
         server
@@ -802,6 +810,8 @@ fn assert_invalid_navigation_requests(server: &Server, nav: &str) -> TestResult 
         json!({"view_id":"reports","state":{"report_kind":"../review"}}),
         json!({"view_id":"reports","state":{"report_kind":"missing"}}),
         json!({"view_id":"transactions","state":{"period":"month"}}),
+        json!({"view_id":"transactions","state":{"include_reversed":"true"}}),
+        json!({"view_id":"accounts","state":{"include_reversed":true}}),
         json!({"view_id":"income-statement","state":{"search":"ignored"}}),
         json!({"view_id":"balance-sheet","state":{"from":"2026-01-01"}}),
         json!({"view_id":"trend","state":{"period":"week"}}),

@@ -81,6 +81,7 @@ impl<T: Display> Part for T {
 
 /// Conditional attributes emit only fixed HTML syntax.
 pub(crate) enum Attribute {
+    Checked(bool),
     Selected(bool),
     CurrentPage(bool),
 }
@@ -89,7 +90,8 @@ impl Part for Attribute {
     fn render(&self, markup: &mut Markup) {
         let attribute = match self {
             Self::Selected(true) => " selected",
-            Self::Selected(false) => "",
+            Self::Checked(true) => " checked",
+            Self::Checked(false) | Self::Selected(false) => "",
             Self::CurrentPage(true) => "aria-current=\"page\"",
             Self::CurrentPage(false) => "data-view",
         };

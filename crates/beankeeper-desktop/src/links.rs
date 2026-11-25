@@ -327,6 +327,7 @@ fn encode_path(mut route: String, fields: &serde_json::Value) -> Result<String, 
         "search",
         "status",
         "currency",
+        "include_reversed",
         "period",
         "metric",
         "year",
@@ -397,6 +398,9 @@ pub(crate) fn parse_path(path: &str) -> Result<ViewAddress, &'static str> {
         }
         let value = match key.as_ref() {
             "offset" => serde_json::json!(value.parse::<i64>().map_err(|_| "Invalid offset.")?),
+            "include_reversed" => {
+                serde_json::Value::Bool(value.parse().map_err(|_| "Invalid reversal visibility.")?)
+            }
             "cash_account" | "receivable_account" | "payable_account" => {
                 let accounts: values::AccountSelection =
                     value.parse().map_err(|_| "Invalid account selection.")?;
@@ -483,6 +487,8 @@ link_flags! {
     status: values::Clearance,
     offset: values::Offset,
     currency: values::Currency,
+    /// Include both sides of audited reversals in the transaction register (true or false).
+    include_reversed: values::IncludeReversed,
     transaction_id: values::TransactionId,
     proposal_id: values::ProposalId,
     report_kind: ReportKind,
@@ -588,7 +594,7 @@ mod tests {
             ("accounts", json!({"company":"acme"})),
             (
                 "transactions",
-                json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30","search":"<coffee>","status":"cleared","min_amount":"1","max_amount":"100000","offset":50,"currency":"USD"}),
+                json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31","compare_from":"2026-09-01","compare_to":"2026-09-30","search":"<coffee>","status":"cleared","min_amount":"1","max_amount":"100000","offset":50,"currency":"USD","include_reversed":true}),
             ),
             (
                 "transaction",
@@ -758,6 +764,9 @@ mod tests {
             "/transactions?company=a&company=b",
             "/transactions?company=a&%63ompany=b",
             "/transactions?unknown=x",
+            "/transactions?include_reversed=yes",
+            "/transactions?include_reversed=true&include_reversed=false",
+            "/accounts?include_reversed=true",
             "/transactions?from=2026-02-30",
             "/transactions?offset=-1",
             "/transactions?compare_from=2026-10-01",

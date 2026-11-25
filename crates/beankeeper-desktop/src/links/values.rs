@@ -7,6 +7,7 @@ use beankeeper::types::{
 };
 use beankeeper_cli::db::{
     BudgetMonths, companies::CompanySlug, ids::TransactionId as LedgerTransactionId,
+    transactions::ReversalVisibility,
 };
 use chrono::{Datelike, Month, NaiveDate};
 use schemars::JsonSchema;
@@ -122,6 +123,38 @@ impl fmt::Display for Date {
 }
 
 string_wire!(Date);
+
+/// Register visibility shared by browser URLs, CLI flags, and MCP state.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(from = "bool", into = "bool")]
+#[schemars(with = "bool")]
+pub(crate) struct IncludeReversed(ReversalVisibility);
+
+impl From<bool> for IncludeReversed {
+    fn from(value: bool) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<IncludeReversed> for bool {
+    fn from(value: IncludeReversed) -> Self {
+        value.0 == ReversalVisibility::Include
+    }
+}
+
+impl From<IncludeReversed> for ReversalVisibility {
+    fn from(value: IncludeReversed) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for IncludeReversed {
+    type Err = std::str::ParseBoolError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<bool>().map(Self::from)
+    }
+}
 
 /// A register amount, in nonnegative whole minor units within `SQLite`'s range.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema)]

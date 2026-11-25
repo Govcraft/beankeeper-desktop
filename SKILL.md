@@ -720,6 +720,11 @@ balance-sheet snapshot comparison; see supported views and all
 identifiers in the [deep-link contract](docs/deep-links.md). Do not substitute a
 category's display name for its identifier or a fuzzy text search for a payee.
 
+To review cancelled or reversed pairs, use `txn_list` with
+`include_reversed: true` or `bk txn list --include-reversed`. When offering a
+matching Desktop register link, carry that choice as `state.include_reversed:
+true` or use `bk ui link --view-id transactions --include-reversed true`.
+
 For a financial summary, pass `desktop_view.link` to `ui_get_link` when it is
 present. Preserve the date bounds and complete account selections in summary and
 cash-flow chart links. See [summary and chart link fields](docs/deep-links.md#shared-upstream-identifiers).

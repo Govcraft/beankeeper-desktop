@@ -233,6 +233,11 @@ fn company_form(
             );
         }
         write_markup!(html, "</select></label>");
+        write_markup!(
+            html,
+            "<label class=\"checkbox-filter\"><input type=\"checkbox\" name=\"include_reversed\" value=\"true\"{}> Show reversed/cancelled pairs</label>",
+            Attribute::Checked(query.include_reversed.into())
+        );
     }
     if path == "/" || path == "/transactions" {
         html.append(&input(
@@ -692,6 +697,7 @@ fn register(
         from_date: from.map(Date::date),
         to_date: to.map(Date::date),
         value_filter: register_values(db, company, query)?,
+        include_reversed: query.include_reversed.into(),
         ..ListTransactionParams::default()
     };
     let total = db::count_transactions(book, &params)?;
@@ -733,7 +739,7 @@ fn register(
     transaction_table(&rows, company, section, html);
     write_markup!(
         html,
-        "<p>{} matching transactions shown. Scanned source rows {} through {} of {} candidates after company, account, date, currency and amount filters.</p>",
+        "<p>{} matching transactions shown. Scanned source rows {} through {} of {} candidates after company, account, date, currency, amount and reversal filters.</p>",
         rows.len(),
         if cursor > start { start + 1 } else { start },
         cursor,
@@ -939,8 +945,11 @@ mod tests {
     use super::*;
     use beankeeper::types::{AccountType, DebitOrCredit};
     use beankeeper_cli::{
-        db::{Actor, ConflictStrategy, PostEntryParams, PostTransactionParams},
-        identity::{Admin, Granted, Post, Reconcile},
+        db::{
+            Actor, ConflictStrategy, PostEntryParams, PostTransactionParams,
+            audit::{ReverseTransactionParams, reverse_transaction},
+        },
+        identity::{Admin, Granted, Post, Reconcile, Reverse},
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -1280,6 +1289,74 @@ mod tests {
     }
 
     #[test]
+    fn register_hides_both_sides_of_an_audited_reversal_until_requested() -> TestResult {
+        let db = fixture()?;
+        let owner = Actor::new("owner".parse()?);
+        let original = post(&db, "Cancelled sale", "cancelled", 100, "USD", &owner)?;
+        let active = post(&db, "Active sale", "active", 100, "USD", &owner)?;
+        let company = "acme".parse()?;
+        let date = "2024-03-01".parse()?;
+        let db::PostResult::Created(reversal) =
+            Granted::<Reverse>::with_db(&db, &owner, |grant| {
+                reverse_transaction(
+                    grant,
+                    &ReverseTransactionParams {
+                        company_slug: &company,
+                        id: original,
+                        date,
+                        description: Some("Cancel sale"),
+                        reference: None,
+                    },
+                )
+            })?
+        else {
+            return Err("reversal was not created".into());
+        };
+        let query = ViewQuery {
+            account: Some("1000".into()),
+            from: Some("2024-02-29".into()),
+            to: Some("2024-02-29".into()),
+            compare_from: Some("2024-03-01".into()),
+            compare_to: Some("2024-03-01".into()),
+            ..Default::default()
+        };
+        let checkbox = "name=\"include_reversed\" value=\"true\"";
+        for include_reversed in [None, Some(false), Some(true)] {
+            let page = render_query(
+                &db,
+                "/transactions",
+                &ViewQuery {
+                    include_reversed,
+                    ..query.clone()
+                },
+            )?;
+            let html = page.content.as_str();
+            let show = include_reversed == Some(true);
+            assert!(html.contains("Show reversed/cancelled pairs"));
+            assert_eq!(html.contains(&format!("{checkbox} checked")), show);
+            assert!(html.contains(&format!("id=\"transaction-{active}\"")));
+            assert_eq!(
+                html.contains(&format!("id=\"transaction-{original}\"")),
+                show
+            );
+            assert_eq!(
+                html.contains(&format!("id=\"comparison-transaction-{reversal}\"")),
+                show
+            );
+            let primary_count = if show { 2 } else { 1 };
+            let comparison_count = usize::from(show);
+            assert!(html.contains(&format!("of {primary_count} candidates")));
+            assert!(html.contains(&format!("of {comparison_count} candidates")));
+        }
+        for (id, description) in [(original, "Cancelled sale"), (reversal, "Cancel sale")] {
+            let detail = render_query(&db, &format!("/transactions/{id}"), &ViewQuery::default())?;
+            assert!(detail.content.as_str().contains(description));
+            assert!(detail.content.as_str().contains("Audit trail"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn register_pagination_is_bounded_and_uses_continuation_cursor() -> TestResult {
         let db = fixture()?;
         for n in 0..53 {
@@ -1299,6 +1376,7 @@ mod tests {
         let query = ViewQuery {
             company: Some("acme".into()),
             search: Some("Sale".into()),
+            include_reversed: Some(true),
             ..Default::default()
         };
         let first = render_query(&db, "/transactions", &query)?;
@@ -1310,6 +1388,12 @@ mod tests {
         );
         assert!(first.content.as_str().contains("&amp;offset=51"));
         assert!(first.content.as_str().contains("search=Sale"));
+        assert!(
+            first
+                .content
+                .as_str()
+                .contains("&amp;include_reversed=true&amp;offset=51")
+        );
         let second = render_query(
             &db,
             "/transactions",
@@ -1326,6 +1410,12 @@ mod tests {
         );
         assert!(second.content.as_str().contains("End of register"));
         assert!(!second.content.as_str().contains("rel=\"next\""));
+        assert!(
+            second
+                .content
+                .as_str()
+                .contains("search=Sale&amp;include_reversed=true\">Back to first results")
+        );
         Ok(())
     }
 

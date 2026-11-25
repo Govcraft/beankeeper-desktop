@@ -313,7 +313,9 @@ Host/Origin checks. After pairing, reopen a saved view URL to restore its filter
   grouped by account type, with links to each account's register.
 - **Register** (`/transactions?company=acme`): filter by account, inclusive date
   range, amount bounds in integer minor units, payee/reference text and clearance
-  status. Filters stay in the URL and restore on reload.
+  status. Reversed and cancelled pairs are hidden by default. Choose **Show
+  reversed/cancelled pairs** and select **Apply** to include both transactions.
+  Filters stay in the URL and restore on reload.
 - **Detail** (`/transactions/ID?company=acme`): entries, metadata and audit history,
   including agent identity and token ID when the ledger records them.
 - **Reports** (`/reports`): income statement, balance sheet, cash flow, spending
