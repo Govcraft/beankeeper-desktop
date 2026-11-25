@@ -108,8 +108,7 @@ against that exact tag and name the same version. Discovery failures, missing
 assets or invalid signatures are cached as failures without an unsigned fallback.
 `cosign` must be on PATH for both checks and installation. Missing cosign, missing
 bundles, invalid checksums, wrong signing identity and invalid metadata all
-prevent installation. This differs deliberately from the legacy command-line
-installers' checksum-only fallback. No self-update runs automatically.
+prevent installation. Self-update runs only when requested.
 
 Discovery requests send the Desktop `version` and `os`, plus the RC list's
 `per_page=100` pagination parameter, with a fixed product User Agent. They send

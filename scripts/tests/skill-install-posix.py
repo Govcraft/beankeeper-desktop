@@ -16,8 +16,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = "Govcraft/beankeeper-desktop"
-INSTALLER_URL = f"https://raw.githubusercontent.com/{PROJECT}/main/install.sh"
-RELEASES_URL = f"https://api.github.com/repos/{PROJECT}/releases?per_page=100"
+DOWNLOAD_BASE = "https://beankeeper.app/download"
+INSTALLER_URL = f"{DOWNLOAD_BASE}/latest/install.sh"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 UNIT = "beankeeper-desktop.service"
 LAUNCH_AGENT = "ai.govcraft.beankeeper-desktop"
@@ -37,16 +37,12 @@ def fixture_tool(mode, arguments):
         url = urls[0]
         if url == INSTALLER_URL:
             source = ROOT / "install.sh"
-        elif url == RELEASES_URL:
-            assert "-H" not in arguments, "fixture release discovery must be anonymous"
-            Path(arguments[arguments.index("-o") + 1]).write_text(json.dumps([{
-                "tag_name": f"beankeeper-desktop-v{version}", "draft": False,
-                "prerelease": "-rc." in version, "assets": [{"name": name} for name in release_files],
-            }]), encoding="utf-8")
-            print("200", end="")
+        elif url == f"{DOWNLOAD_BASE}/latest/version.txt":
+            assert "-H" not in arguments, "mirror discovery must be anonymous"
+            print(version)
             return
         else:
-            base = f"https://github.com/{PROJECT}/releases/download/beankeeper-desktop-v{version}/"
+            base = f"{DOWNLOAD_BASE}/{version}/"
             if not url.startswith(base):
                 raise ValueError(f"unexpected fixture URL {url}")
             name = url.removeprefix(base)
@@ -188,7 +184,7 @@ def exercise(target, artifacts, published):
         (home / ".claude").mkdir()
         env = dict(os.environ)
         config = native_config(env, sandbox)
-        for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN", "BK_VERSION"):
+        for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN", "BK_VERSION", "BK_DOWNLOAD_BASE"):
             env.pop(name, None)
         env.update(
             HOME=str(home), XDG_CONFIG_HOME=str(config), XDG_DATA_HOME=str(sandbox / "xdg-data"),

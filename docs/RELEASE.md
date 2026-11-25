@@ -229,67 +229,50 @@ time to establish reputation. Do not disable OS security checks automatically.
 
 ## Checksum-verifying command-line installers
 
-`install.sh` retains upstream D13's verification behavior, adapted to the Desktop
-repository. `install.ps1` follows the same contract on x64 Windows (PowerShell
-5.1+). After a release is available:
+The shell installer supports Linux and macOS. The PowerShell installer
+supports x64 Windows with PowerShell 5.1 or later. Install `cosign` first.
 
 ```sh
-# Download and inspect the script before running it.
-curl -fsSLO https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh
+curl -fsSLO https://beankeeper.app/download/latest/install.sh
 BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$HOME/.local/bin" sh install.sh
 ```
 
 The shell installer creates its destination directory, defaulting to
-`~/.local/bin`. A custom system directory can require sudo for binary placement;
-service setup still runs as the invoking desktop user. On Windows, download `install.ps1`,
-inspect it, then use:
+`~/.local/bin`. A system directory can require sudo for binary placement.
+Service setup still runs as the invoking desktop user. On Windows, use:
 
 ```powershell
+Invoke-WebRequest -UseBasicParsing -Uri 'https://beankeeper.app/download/latest/install.ps1' -OutFile install.ps1
 ./install.ps1 -RequireSignatures -RequireAgentSetup -InstallDir "$env:LOCALAPPDATA\Programs\Beankeeper Desktop"
 ```
 
-With `BK_VERSION` unset, both installers scan up to 100 recent GitHub releases.
-A release qualifies when it is published, its prerelease flag agrees with its
-stable or `-rc.N` tag, and it lists the platform archive,
-`checksums-sha256.txt`, and a Sigstore bundle for each. Regular installs choose
-the highest qualifying stable version, or the highest qualifying release
-candidate if no stable release qualifies. Guided setup chooses the highest
-qualifying version across both. The shell installer reads release metadata
-with `jq` when available, then macOS's built-in `osascript` or `python3`. If
-none of these tools is available, set `BK_VERSION` to a known signed release.
+Both scripts default to `https://beankeeper.app/download/`. They read
+`latest/version.txt` and download the archive, checksum list and both bundles
+from that version's directory. Set `BK_VERSION` without the tag prefix to
+select a specific signed release and skip discovery.
 
-Set `BK_VERSION` without the tag prefix to select a specific published release.
-Both scripts also accept `BK_INSTALL`. They always require a matching SHA-256
-checksum before extracting or installing. If `cosign` is on PATH, they also
-verify the bundles for the archive and checksum list with this exact certificate
-identity:
+Set `BK_DOWNLOAD_BASE` to use another HTTPS mirror with the same layout.
+The override `https://github.com/Govcraft/beankeeper-desktop/releases/download`
+uses GitHub tag directories. Without `BK_VERSION`, that override lists
+published GitHub releases with bundles for the platform and checksum list.
+Regular installs there prefer stable releases when available. Guided setup
+selects the highest signed version. For GitHub discovery only, the shell can
+read metadata with `jq`, macOS's built-in `osascript`, or `python3`. Both
+installers can use `GH_TOKEN` or `GITHUB_TOKEN` for the GitHub release listing.
+
+Before extraction, the installers verify the archive and
+`checksums-sha256.txt` with their Sigstore bundles and check the archive's
+SHA-256 against the signed list. The certificate identity is:
 
 ```text
 https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION
 ```
 
-The OIDC issuer must be `https://token.actions.githubusercontent.com`. A bundle
-HTTP 404 permits checksum-only verification for older unsigned releases and
-prints a warning. A regular install without `cosign` defaults to checksum
-verification and warns that checksum verification alone cannot authenticate the
-publisher. An invalid bundle, verification failure, or any other bundle
-download error stops installation.
-The installers leave the user's execution policy and PATH as configured.
-
-For a regular install without `cosign`, authenticate the GitHub CLI with
-`gh auth login` and opt in to build provenance with
-`BK_VERIFY_ATTESTATION=1 sh install.sh` or `./install.ps1 -VerifyAttestation`.
-Both installers accept the environment variable. They run
-`gh attestation verify` on the platform archive and checksum list, requiring
-the Govcraft repository, the exact workflow identity above, and the selected
-tag ref. A missing GitHub CLI or failed attestation stops installation.
-`BK_REQUIRE_SIGNATURES=1` and `-RequireSignatures` require `cosign` even when
-the provenance option is enabled.
-
-The [agent-led guide](../SKILL.md) requires both signatures and checks that the
-verified binary provides managed service and agent registration commands. A
-missing or invalid signature, or a binary without the setup commands, stops
-guided installation before replacement.
+The OIDC issuer must be `https://token.actions.githubusercontent.com`. A
+missing verifier or bundle, a failed signature check, or a checksum mismatch
+stops installation on every download base. The
+[agent-led guide](../SKILL.md) also checks for managed service and agent
+registration commands before replacing an existing binary.
 
 ## Signed update feed and self-update
 

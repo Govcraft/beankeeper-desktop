@@ -35,6 +35,7 @@ function New-ReleaseFixture([string]$FixtureVersion, [switch]$Unsigned) {
 
 function Test-ReleaseDiscovery {
     . "$root/install.ps1" -Version '' -InstallDir ([IO.Path]::GetTempPath()) -RequireAgentSetup:$false
+    $base = $GitHubDownloadBase
     $discovery = @{
         Statuses = [System.Collections.Generic.Queue[int]]::new()
         Authorization = [System.Collections.Generic.List[string]]::new()
@@ -64,13 +65,13 @@ function Test-ReleaseDiscovery {
         (New-ReleaseFixture '0.2.0-rc.9')
         (New-ReleaseFixture '0.2.0-rc.10')
     )
-    if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10') { throw 'Regular setup did not select the newest signed RC' }
+    if ((Resolve-ReleaseVersion $base) -cne '0.2.0-rc.10') { throw 'Regular setup did not select the newest signed RC' }
 
     $releases += (New-ReleaseFixture '0.0.9'), (New-ReleaseFixture '0.1.0')
-    if ((Resolve-ReleaseVersion) -cne '0.1.0') { throw 'Regular setup did not prefer the newest signed stable release' }
+    if ((Resolve-ReleaseVersion $base) -cne '0.1.0') { throw 'Regular setup did not prefer the newest signed stable release' }
 
     $RequireAgentSetup = $true
-    if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10') { throw 'Guided setup did not select the highest signed version' }
+    if ((Resolve-ReleaseVersion $base) -cne '0.2.0-rc.10') { throw 'Guided setup did not select the highest signed version' }
 
     $previousGhToken = $env:GH_TOKEN
     $previousGitHubToken = $env:GITHUB_TOKEN
@@ -78,9 +79,9 @@ function Test-ReleaseDiscovery {
         $discovery.Authorization.Clear()
         $env:GH_TOKEN = 'preferred'
         $env:GITHUB_TOKEN = 'fallback'
-        $null = Resolve-ReleaseVersion
+        $null = Resolve-ReleaseVersion $base
         $env:GH_TOKEN = ''
-        $null = Resolve-ReleaseVersion
+        $null = Resolve-ReleaseVersion $base
         if (($discovery.Authorization -join ',') -cne 'Bearer preferred,Bearer fallback') {
             throw 'Release discovery did not select the expected GitHub token'
         }
@@ -90,7 +91,7 @@ function Test-ReleaseDiscovery {
         $discovery.Statuses.Enqueue(403)
         $discovery.Statuses.Enqueue(429)
         $discovery.ResponseHeaders = @{ 'Retry-After' = '75' }
-        if ((Resolve-ReleaseVersion) -cne '0.2.0-rc.10' -or
+        if ((Resolve-ReleaseVersion $base) -cne '0.2.0-rc.10' -or
             ($discovery.Delays -join ',') -cne '75,120' -or
             ($discovery.Authorization -join ',') -cne 'anonymous,anonymous,anonymous') {
             throw 'Anonymous release discovery did not retry with backoff'
@@ -100,7 +101,7 @@ function Test-ReleaseDiscovery {
         $discovery.ResponseHeaders = @{}
         foreach ($status in 403, 429, 429) { $discovery.Statuses.Enqueue($status) }
         $rateLimitMessage = $null
-        try { $null = Resolve-ReleaseVersion } catch { $rateLimitMessage = $_.Exception.Message }
+        try { $null = Resolve-ReleaseVersion $base } catch { $rateLimitMessage = $_.Exception.Message }
         if ($rateLimitMessage -cnotlike '*GitHub rate limit (HTTP 429)*BK_VERSION*' -or
             ($discovery.Delays -join ',') -cne '60,120') {
             throw 'Persistent rate limiting did not produce a bounded retry and a BK_VERSION hint'
@@ -113,7 +114,7 @@ function Test-ReleaseDiscovery {
             'X-RateLimit-Reset' = [string][DateTimeOffset]::UtcNow.AddMinutes(10).ToUnixTimeSeconds()
         }
         $rateLimitMessage = $null
-        try { $null = Resolve-ReleaseVersion } catch { $rateLimitMessage = $_.Exception.Message }
+        try { $null = Resolve-ReleaseVersion $base } catch { $rateLimitMessage = $_.Exception.Message }
         if ($rateLimitMessage -cnotlike '*GitHub rate limit (HTTP 403)*BK_VERSION*' -or $discovery.Delays.Count -ne 0) {
             throw 'Release discovery retried before the quota reset'
         }
@@ -124,60 +125,79 @@ function Test-ReleaseDiscovery {
 }
 
 Test-ReleaseDiscovery
-Write-Host 'Windows installer release discovery tests passed'
+Write-Host 'Windows installer GitHub override discovery tests passed'
 
-function Test-AttestationFallback {
-    $releaseVersion = '0.2.0-rc.10'
-    $expectedRef = "refs/tags/beankeeper-desktop-v$releaseVersion"
-    $archive = "bk-$releaseVersion-x86_64-pc-windows-msvc.zip"
-    $directory = [IO.Path]::GetTempPath()
-    . "$root/install.ps1" -Version $releaseVersion -InstallDir $directory -VerifyAttestation -RequireSignatures:$false
-    $state = @{
-        HasGh = $false
-        FailOn = $null
-        Checked = [System.Collections.Generic.List[string]]::new()
+
+function Test-MirrorDiscovery {
+    . "$root/install.ps1" -Version '' -InstallDir ([IO.Path]::GetTempPath())
+    $mirror = @{
+        Requests = [System.Collections.Generic.List[string]]::new()
+        Content = "0.2.0-rc.10`r`n"
+        Available = $true
     }
-    function Get-Command([string]$Name, [string]$ErrorAction) {
-        if ($Name -eq 'gh' -and $state.HasGh) { return 'gh' }
-        if ($Name -notin 'gh', 'cosign') { throw "Unexpected executable check: $Name" }
+    function Invoke-WebRequest([string]$Uri, [switch]$UseBasicParsing) {
+        $mirror.Requests.Add($Uri)
+        if (-not $mirror.Available) { throw 'No version metadata' }
+        @{ Content = $mirror.Content }
     }
-    function gh {
-        $artifact = Split-Path $args[2] -Leaf
-        $expected = @(
-            'attestation', 'verify', (Join-Path $directory $artifact), '--hostname', 'github.com',
-            '--repo', 'Govcraft/beankeeper-desktop', '--cert-identity',
-            "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@$expectedRef",
-            '--source-ref', $expectedRef
-        )
-        if (($args -join '|') -cne ($expected -join '|')) { throw 'Unexpected provenance verification arguments' }
-        $state.Checked.Add($artifact)
-        $global:LASTEXITCODE = if ($state.FailOn -ceq $artifact) { 1 } else { 0 }
-    }
-    function Assert-Failure([string]$Message) {
-        try { Test-ReleaseSignatures 'unused' $archive $directory $releaseVersion }
-        catch {
+    function Assert-Failure([scriptblock]$Action, [string]$Message) {
+        try { & $Action } catch {
             if ($_.Exception.Message -notlike "*$Message*") { throw }
             return
         }
         throw "Expected failure: $Message"
     }
 
-    Assert-Failure 'requires gh'
-    $state.HasGh = $true
-    $RequireSignatures = $true
-    Assert-Failure 'cosign is required'
-    $RequireSignatures = $false
-    if ($state.Checked.Count -ne 0) { throw 'Strict signature mode attempted the provenance fallback' }
-
-    Test-ReleaseSignatures 'unused' $archive $directory $releaseVersion
-    if (($state.Checked -join ',') -cne "$archive,checksums-sha256.txt") { throw 'Expected both files to be attested' }
-    $state.FailOn = 'checksums-sha256.txt'
-    Assert-Failure 'GitHub build provenance verification failed for checksums-sha256.txt'
-    $global:LASTEXITCODE = 0
+    $previousBase = $env:BK_DOWNLOAD_BASE
+    try {
+        $env:BK_DOWNLOAD_BASE = ''
+        if ((Resolve-ReleaseVersion (Get-DownloadBase)) -cne '0.2.0-rc.10' -or
+            ($mirror.Requests -join ',') -cne 'https://beankeeper.app/download/latest/version.txt') {
+            throw 'Default discovery did not read the latest mirrored release'
+        }
+        $mirror.Requests.Clear()
+        $env:BK_DOWNLOAD_BASE = 'https://mirror.example/releases/'
+        $base = Get-DownloadBase
+        if ((Resolve-ReleaseVersion $base) -cne '0.2.0-rc.10' -or
+            ($mirror.Requests -join ',') -cne 'https://mirror.example/releases/latest/version.txt') {
+            throw 'Custom discovery did not read the latest mirrored release'
+        }
+        foreach ($body in @('', ' ', '../main', "0.1.0`n0.2.0`n")) {
+            $mirror.Content = $body
+            Assert-Failure { Resolve-ReleaseVersion $base } 'Invalid release version'
+        }
+        $mirror.Available = $false
+        Assert-Failure { Resolve-ReleaseVersion $base } 'Could not read the latest release version'
+        $mirror.Requests.Clear()
+        $Version = '0.2.0'
+        if ((Resolve-ReleaseVersion $base) -cne $Version -or $mirror.Requests.Count -ne 0) {
+            throw 'Explicit version did not bypass discovery'
+        }
+        $env:BK_DOWNLOAD_BASE = 'http://mirror.example'
+        Assert-Failure { Get-DownloadBase } 'BK_DOWNLOAD_BASE must be an HTTPS URL'
+    } finally {
+        $env:BK_DOWNLOAD_BASE = $previousBase
+    }
 }
 
-Test-AttestationFallback
-Write-Host 'Windows installer provenance tests passed'
+Test-MirrorDiscovery
+Write-Host 'Windows installer mirror discovery tests passed'
+
+function Test-SignaturesRequired {
+    $directory = [IO.Path]::GetTempPath()
+    . "$root/install.ps1" -InstallDir $directory -RequireSignatures:$false
+    function Get-Command([string]$Name, [string]$ErrorAction) {
+        if ($Name -ne 'cosign') { throw "Unexpected executable check: $Name" }
+    }
+    try { Test-ReleaseSignatures 'unused' 'archive.zip' $directory '0.2.0-rc.10' } catch {
+        if ($_.Exception.Message -notlike '*cosign is required*') { throw }
+        return
+    }
+    throw 'Expected installation to require cosign'
+}
+
+Test-SignaturesRequired
+Write-Host 'Windows installer mandatory verifier test passed'
 if ($DiscoveryOnly) { return }
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
@@ -192,20 +212,24 @@ $digest = (Get-FileHash "$fixture/$artifact" -Algorithm SHA256).Hash
 $manifest = "$fixture/checksums-sha256.txt"
 "$digest  $artifact" | Set-Content $manifest
 . "$root/install.ps1" -Version $releaseVersion -InstallDir $destination -NoService
-$script:bundleStatus = 404
+$script:bundleStatus = 200
 $script:signatureFails = $false
+$script:missingBundle = $null
+$script:expectedBase = 'https://beankeeper.app/download'
+$previousBase = $env:BK_DOWNLOAD_BASE
 $script:verified = @()
 
 function Get-ReleaseFile([string]$Url, [string]$Destination) {
-    if ($Url -notlike "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$releaseVersion/*") {
+    if ($Url -cnotlike "$script:expectedBase/$releaseVersion/*") {
         throw "Unexpected URL $Url"
     }
     if ($Url.EndsWith('.sigstore')) {
-        if ($script:bundleStatus -eq 200) {
+        if ($script:bundleStatus -eq 200 -and -not $Url.EndsWith('/' + $script:missingBundle + '.sigstore')) {
             'fixture' | Set-Content $Destination
         } else {
             $errorObject = [Exception]::new('Simulated HTTP error')
-            $errorObject | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = $script:bundleStatus })
+            $status = if ($script:missingBundle) { 404 } else { $script:bundleStatus }
+            $errorObject | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = $status })
             throw $errorObject
         }
     } else {
@@ -233,15 +257,24 @@ function Assert-Rejected([string]$Message) {
     }
 }
 try {
-    Install-Beankeeper # legacy bundle 404 fallback
-    if (-not (Test-Path "$destination/bk.exe")) { throw 'Legacy install failed' }
-    $RequireSignatures = $true
-    Assert-Rejected 'Required Sigstore bundle missing'
-    $script:bundleStatus = 200
+    $env:BK_DOWNLOAD_BASE = ''
     Install-Beankeeper
-    if ($script:verified.Count -ne 2 -or $script:verified -notcontains $artifact -or $script:verified -notcontains 'checksums-sha256.txt') {
+    if (-not (Test-Path "$destination/bk.exe")) { throw 'Default install failed' }
+    if (($script:verified -join ',') -cne "$artifact,checksums-sha256.txt") {
         throw 'Expected both bundles to be verified'
     }
+    $script:verified = @()
+    $script:expectedBase = 'https://mirror.example/releases'
+    $env:BK_DOWNLOAD_BASE = "$script:expectedBase/"
+    Install-Beankeeper
+    if (($script:verified -join ',') -cne "$artifact,checksums-sha256.txt") {
+        throw 'Custom base did not verify both assets with the same trust policy'
+    }
+    foreach ($name in $artifact, 'checksums-sha256.txt') {
+        $script:missingBundle = $name
+        Assert-Rejected "Required Sigstore bundle missing for $name"
+    }
+    $script:missingBundle = $null
     $script:signatureFails = $true
     Assert-Rejected 'Sigstore verification failed'
     $script:signatureFails = $false
@@ -258,5 +291,6 @@ try {
     $global:LASTEXITCODE = 0
     Write-Host 'Windows installer verification tests passed'
 } finally {
+    $env:BK_DOWNLOAD_BASE = $previousBase
     Remove-Item -LiteralPath $temporary -Force -Recurse
 }

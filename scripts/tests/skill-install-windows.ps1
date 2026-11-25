@@ -31,6 +31,7 @@ $recovery = [IO.Path]::ChangeExtension($books, 'recovery.txt')
 $binary = Join-Path $localDirectory 'Programs\Beankeeper Desktop\bk.exe'
 $environment = @{
     BK_VERSION = $null
+    BK_DOWNLOAD_BASE = $null
     BEANKEEPER_DB = $null
     BEANKEEPER_PASSPHRASE_CMD = $null
     BK_AGENT_TOKEN = $null
@@ -49,7 +50,8 @@ $environment = @{
 }
 $previous = @{}
 $guidePassed = $false
-$installerUrl = 'https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.ps1'
+$downloadBase = 'https://beankeeper.app/download'
+$installerUrl = "$downloadBase/latest/install.ps1"
 
 function Set-FixtureEnvironment([string]$Key, $Value) {
     if ($null -eq $Value) {
@@ -70,6 +72,9 @@ function Invoke-WebRequest {
         Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters
         return
     }
+    if ($Uri.AbsoluteUri -eq "$downloadBase/latest/version.txt") {
+        return @{ Content = $fixtureVersion }
+    }
     if (-not $Uri.AbsoluteUri.StartsWith("$releaseUrl/", [StringComparison]::Ordinal)) {
         throw "Unexpected fixture download: $Uri"
     }
@@ -86,26 +91,10 @@ if (-not $Published) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the built release version.' }
     $fixtureVersion = $versionText.Trim()
     $archive = "bk-$fixtureVersion-x86_64-pc-windows-msvc.zip"
-    $releaseUrl = "https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v$fixtureVersion"
+    $releaseUrl = "$downloadBase/$fixtureVersion"
     $skillExpectedIdentity = "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v$fixtureVersion"
     $fixtureFiles = @($archive, 'checksums-sha256.txt', "$archive.sigstore", 'checksums-sha256.txt.sigstore')
     $verified = [System.Collections.Generic.List[string]]::new()
-
-    function Invoke-RestMethod([string]$Uri, [switch]$UseBasicParsing, [int]$MaximumRedirection, [hashtable]$Headers) {
-        if ($Uri -ne 'https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100' -or $Headers) {
-            throw "Unexpected fixture discovery request: $Uri"
-        }
-        @(
-            [pscustomobject]@{ tag_name = 'beankeeper-desktop-v99.0.0'; draft = $true; prerelease = $false },
-            [pscustomobject]@{ tag_name = 'beankeeper-desktop-v98.0.0'; draft = $false; prerelease = $false; assets = @() },
-            [pscustomobject]@{
-                tag_name = "beankeeper-desktop-v$fixtureVersion"
-                draft = $false
-                prerelease = $fixtureVersion.Contains('-rc.')
-                assets = @($fixtureFiles | ForEach-Object { @{ name = $_ } })
-            }
-        )
-    }
 
     function cosign {
         if ($args[0] -ne 'verify-blob' -or $args -notcontains '--certificate-identity' -or

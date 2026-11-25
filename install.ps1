@@ -1,4 +1,4 @@
-# Install Beankeeper Desktop from GitHub Releases. Supports Windows PowerShell 5.1+.
+# Install Beankeeper Desktop from beankeeper.app. Supports Windows PowerShell 5.1+.
 [CmdletBinding()]
 param(
     [string]$Version = $env:BK_VERSION,
@@ -7,12 +7,23 @@ param(
     }),
     [switch]$NoService = ($env:BK_NO_SERVICE -eq '1'),
     [switch]$NoAgents = ($env:BK_NO_AGENTS -eq '1'),
-    [switch]$RequireSignatures = ($env:BK_REQUIRE_SIGNATURES -eq '1'),
-    [switch]$VerifyAttestation = ($env:BK_VERIFY_ATTESTATION -eq '1'),
+    # Accept the original switch for callers of older install guides.
+    [switch]$RequireSignatures,
     [switch]$RequireAgentSetup = ($env:BK_REQUIRE_AGENT_SETUP -eq '1')
 )
 $ErrorActionPreference = 'Stop'
 $Repository = 'Govcraft/beankeeper-desktop'
+$GitHubDownloadBase = "https://github.com/$Repository/releases/download"
+
+function Get-DownloadBase {
+    $base = if ($env:BK_DOWNLOAD_BASE) { $env:BK_DOWNLOAD_BASE.TrimEnd('/') } else { 'https://beankeeper.app/download' }
+    $uri = $null
+    if ($base -cnotmatch '\Ahttps://[^/]' -or $base -match '[\s?#]' -or
+        -not [uri]::TryCreate($base, [UriKind]::Absolute, [ref]$uri) -or -not $uri.Host) {
+        throw 'BK_DOWNLOAD_BASE must be an HTTPS URL without a query or fragment'
+    }
+    $base
+}
 
 function Get-ReleaseFile([string]$Url, [string]$Destination) {
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
@@ -81,12 +92,24 @@ function Find-SignedReleaseVersion([switch]$PreferStable) {
     $latest.Version
 }
 
-function Resolve-ReleaseVersion {
-    if ($Version) {
-        if ($Version -notmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?\z') { throw "Invalid release version: $Version" }
-        return $Version
+function Resolve-ReleaseVersion([string]$DownloadBase) {
+    $selected = $Version
+    if (-not $selected) {
+        if ($DownloadBase -ceq $GitHubDownloadBase) {
+            $selected = Find-SignedReleaseVersion -PreferStable:(-not $RequireAgentSetup)
+        } else {
+            try {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri "$DownloadBase/latest/version.txt"
+            } catch {
+                throw "Could not read the latest release version. Retry or set BK_VERSION to a signed release. $_"
+            }
+            $selected = ([string]$response.Content).TrimEnd([char[]]"`r`n")
+        }
     }
-    Find-SignedReleaseVersion -PreferStable:(-not $RequireAgentSetup)
+    if ($selected -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?\z') {
+        throw "Invalid release version: $selected"
+    }
+    $selected
 }
 
 function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Directory, [string]$Identity) {
@@ -95,9 +118,7 @@ function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Dir
         Get-ReleaseFile "$BaseUrl/$Artifact.sigstore" $bundle
     } catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
-            if ($RequireSignatures) { throw "Required Sigstore bundle missing for $Artifact (HTTP 404)" }
-            Write-Warning "Sigstore bundle missing for $Artifact (HTTP 404); only SHA-256 will be checked for this artifact"
-            return
+            throw "Required Sigstore bundle missing for $Artifact (HTTP 404)"
         }
         throw
     }
@@ -109,24 +130,11 @@ function Test-ReleaseSignature([string]$BaseUrl, [string]$Artifact, [string]$Dir
 function Test-ReleaseSignatures([string]$BaseUrl, [string]$Archive, [string]$Directory, [string]$ReleaseVersion) {
     $releaseRef = "refs/tags/beankeeper-desktop-v$ReleaseVersion"
     $identity = "https://github.com/$Repository/.github/workflows/release.yml@$releaseRef"
-    $artifacts = @($Archive, 'checksums-sha256.txt')
-    if (Get-Command cosign -ErrorAction SilentlyContinue) {
-        foreach ($artifact in $artifacts) { Test-ReleaseSignature $BaseUrl $artifact $Directory $identity }
-        return
+    if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
+        throw 'cosign is required to verify this release. Install it from a trusted package source and retry.'
     }
-    if ($RequireSignatures) { throw 'cosign is required to verify this release. Install it from a trusted package source and retry.' }
-    if (-not $VerifyAttestation) {
-        Write-Warning 'cosign not found: only SHA-256 will be checked; release authenticity is not verified'
-        return
-    }
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw 'GitHub provenance verification requires gh. Install it and authenticate with gh auth login.'
-    }
-    foreach ($artifact in $artifacts) {
-        Write-Host "Verifying GitHub build provenance for $artifact..."
-        & gh attestation verify (Join-Path $Directory $artifact) --hostname github.com --repo $Repository `
-            --cert-identity $identity --source-ref $releaseRef
-        if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance verification failed for $artifact" }
+    foreach ($artifact in @($Archive, 'checksums-sha256.txt')) {
+        Test-ReleaseSignature $BaseUrl $artifact $Directory $identity
     }
 }
 
@@ -136,10 +144,15 @@ function Install-Beankeeper {
         throw 'This installer requires x64 Windows; ARM64 Windows binaries are not yet provided'
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $releaseVersion = Resolve-ReleaseVersion
+    $downloadBase = Get-DownloadBase
+    $releaseVersion = Resolve-ReleaseVersion $downloadBase
     $stem = "bk-$releaseVersion-x86_64-pc-windows-msvc"
     $artifact = "$stem.zip"
-    $url = "https://github.com/$Repository/releases/download/beankeeper-desktop-v$releaseVersion"
+    $url = if ($downloadBase -ceq $GitHubDownloadBase) {
+        "$downloadBase/beankeeper-desktop-v$releaseVersion"
+    } else {
+        "$downloadBase/$releaseVersion"
+    }
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $temporary | Out-Null
     try {

@@ -1,22 +1,22 @@
 #!/bin/sh
-# Install bk (Beankeeper Desktop) from GitHub Releases.
+# Install bk (Beankeeper Desktop) from beankeeper.app.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh | sh
+#   curl -fsSL https://beankeeper.app/download/latest/install.sh | sh
 #
 # Options (environment variables):
-#   BK_VERSION   - version to install (default: signed release, with stable preferred for regular installs)
+#   BK_VERSION   - version to install (default: the mirror's latest version)
+#   BK_DOWNLOAD_BASE - HTTPS release mirror (default: https://beankeeper.app/download/)
 #   BK_INSTALL   - install directory (default: ~/.local/bin)
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
-#   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
-#   BK_VERIFY_ATTESTATION=1 - require GitHub provenance for both files if cosign is absent
 #   BK_REQUIRE_AGENT_SETUP=1 - require managed service and registration commands
-#   GH_TOKEN or GITHUB_TOKEN - optional GitHub authentication for release discovery
+#   GH_TOKEN or GITHUB_TOKEN - authentication for discovery with the GitHub Releases override
 
 set -eu
 
 REPO="Govcraft/beankeeper-desktop"
+GITHUB_DOWNLOAD_BASE="https://github.com/${REPO}/releases/download"
 INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
 NO_SERVICE="${BK_NO_SERVICE:-0}"
 NO_AGENTS="${BK_NO_AGENTS:-0}"
@@ -33,6 +33,7 @@ main() {
         shift
     done
     detect_platform
+    resolve_download_base
     resolve_version
     download_and_install
     verify
@@ -42,6 +43,22 @@ main() {
             "${INSTALL_DIR}/bk" agents connect --all || fatal "agent registration needs attention; run bk agents doctor and retry bk agents connect --all"
         fi
     fi
+}
+
+resolve_download_base() {
+    DOWNLOAD_BASE="${BK_DOWNLOAD_BASE:-https://beankeeper.app/download}"
+    while [ "${DOWNLOAD_BASE%/}" != "$DOWNLOAD_BASE" ]; do
+        DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+    done
+    case "$DOWNLOAD_BASE" in
+        *[[:space:]]*|*\?*|*\#*) fatal "BK_DOWNLOAD_BASE must be an HTTPS URL without a query or fragment" ;;
+        https://[!/]*) ;;
+        *) fatal "BK_DOWNLOAD_BASE must be an HTTPS URL" ;;
+    esac
+}
+
+download() {
+    curl -q -fsSL --globoff --proto '=https' --proto-redir '=https' "$@"
 }
 
 detect_platform() {
@@ -208,13 +225,18 @@ select_release_version() {
 resolve_version() {
     VERSION="${BK_VERSION:-}"
     if [ -z "$VERSION" ]; then
-        info "finding the latest published release with signature bundles for ${TARGET}..."
-        releases="$(list_published_releases)"
-        records="$(printf '%s\n' "$releases" | read_release_records)" ||
-            fatal "could not read published release metadata"
-        # Metadata selects a tag. Artifact verification happens after download.
-        VERSION="$(printf '%s\n' "$records" | select_release_version)"
-        [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"
+        if [ "$DOWNLOAD_BASE" = "$GITHUB_DOWNLOAD_BASE" ]; then
+            info "finding the latest published release with signature bundles for ${TARGET}..."
+            releases="$(list_published_releases)"
+            records="$(printf '%s\n' "$releases" | read_release_records)" ||
+                fatal "could not read published release metadata"
+            VERSION="$(printf '%s\n' "$records" | select_release_version)"
+            [ -n "$VERSION" ] || fatal "no published release with signature bundles found for ${TARGET}"
+        else
+            VERSION="$(download "${DOWNLOAD_BASE}/latest/version.txt")" ||
+                fatal "could not read the latest release version; retry or set BK_VERSION to a signed release"
+            VERSION="${VERSION%"$(printf '\r')"}"
+        fi
     fi
     case "$VERSION" in *[!0-9.rc-]*) fatal "invalid version: $VERSION" ;; esac
     printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq "$VERSION_PATTERN" || fatal "invalid version: $VERSION"
@@ -222,17 +244,19 @@ resolve_version() {
 
 download_and_install() {
     ARCHIVE="bk-${VERSION}-${TARGET}.tar.gz"
-    URL="https://github.com/${REPO}/releases/download/beankeeper-desktop-v${VERSION}/${ARCHIVE}"
-    CHECKSUM_URL="https://github.com/${REPO}/releases/download/beankeeper-desktop-v${VERSION}/checksums-sha256.txt"
+    RELEASE_URL="${DOWNLOAD_BASE}/${VERSION}"
+    if [ "$DOWNLOAD_BASE" = "$GITHUB_DOWNLOAD_BASE" ]; then
+        RELEASE_URL="${DOWNLOAD_BASE}/beankeeper-desktop-v${VERSION}"
+    fi
 
     BK_TEMP_DIR="$(mktemp -d)"
     trap 'rm -rf "$BK_TEMP_DIR"' EXIT
 
     info "downloading bk v${VERSION} for ${TARGET}..."
-    curl -fsSL "$URL" -o "${BK_TEMP_DIR}/${ARCHIVE}"
+    download "${RELEASE_URL}/${ARCHIVE}" -o "${BK_TEMP_DIR}/${ARCHIVE}"
 
     info "verifying checksum..."
-    curl -fsSL "$CHECKSUM_URL" -o "${BK_TEMP_DIR}/checksums-sha256.txt"
+    download "${RELEASE_URL}/checksums-sha256.txt" -o "${BK_TEMP_DIR}/checksums-sha256.txt"
 
     verify_signatures
 
@@ -273,33 +297,16 @@ download_and_install() {
 verify_signatures() {
     ref="refs/tags/beankeeper-desktop-v${VERSION}"
     IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@${ref}"
-    if ! command -v cosign >/dev/null 2>&1; then
-        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] ||
-            fatal "cosign is required to verify this release; install it from a trusted package source and retry"
-        if [ "${BK_VERIFY_ATTESTATION:-0}" = 1 ]; then
-            command -v gh >/dev/null 2>&1 ||
-                fatal "GitHub provenance verification requires gh; install it and authenticate with gh auth login"
-            for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
-                info "verifying GitHub build provenance for ${ARTIFACT}..."
-                gh attestation verify "${BK_TEMP_DIR}/${ARTIFACT}" --hostname github.com --repo "$REPO" \
-                    --cert-identity "$IDENTITY" --source-ref "$ref" ||
-                    fatal "GitHub build provenance verification failed for ${ARTIFACT}"
-            done
-        else
-            warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
-        fi
-        return
-    fi
+    command -v cosign >/dev/null 2>&1 ||
+        fatal "cosign is required to verify this release; install it from a trusted package source and retry"
 
     for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
         info "verifying Sigstore bundle for ${ARTIFACT}..."
-        if BUNDLE_STATUS="$(curl -fsSL "${URL%/*}/${ARTIFACT}.sigstore" \
+        if BUNDLE_STATUS="$(download "${RELEASE_URL}/${ARTIFACT}.sigstore" \
             -o "${BK_TEMP_DIR}/${ARTIFACT}.sigstore" -w '%{http_code}')"; then
             :
         elif [ "$BUNDLE_STATUS" = 404 ]; then
-            [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] || fatal "required Sigstore bundle missing for ${ARTIFACT} (HTTP 404)"
-            warn "Sigstore bundle missing for ${ARTIFACT} (HTTP 404): this release predates Sigstore signing; only the SHA-256 checksum will be checked for this artifact; release authenticity is not verified"
-            continue
+            fatal "required Sigstore bundle missing for ${ARTIFACT} (HTTP 404)"
         else
             fatal "could not download Sigstore bundle for ${ARTIFACT}"
         fi

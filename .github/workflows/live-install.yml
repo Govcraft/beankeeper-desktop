@@ -50,11 +50,8 @@ jobs:
         if: runner.os != 'Windows'
         env:
           TARGET: ${{ matrix.target }}
-          GH_TOKEN: ${{ github.token }}
         run: python -B scripts/tests/skill-install-posix.py --target "$TARGET" --published
       - name: Install from the guide with Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: ./scripts/tests/skill-install-windows.ps1 -Published

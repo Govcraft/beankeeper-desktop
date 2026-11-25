@@ -12,6 +12,10 @@ import zipfile
 from test_release import ROOT, release
 
 
+DOWNLOAD_BASE = "https://beankeeper.app/download"
+GITHUB_DOWNLOAD_BASE = "https://github.com/Govcraft/beankeeper-desktop/releases/download"
+
+
 @unittest.skipIf(os.name == "nt", "POSIX shell installer")
 class ShellInstallerTests(unittest.TestCase):
     def setUp(self):
@@ -25,6 +29,8 @@ class ShellInstallerTests(unittest.TestCase):
         self.destination = self.root / "installed"
         self.destination.mkdir()
         self.stage_shell_fixture("0.1.0")
+        self.cosign()
+        self.bundles()
         for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
@@ -36,6 +42,9 @@ import shutil
 from urllib.parse import urlparse
 args = sys.argv[1:]
 url = next(arg for arg in args if arg.startswith("https://"))
+fixtures = Path(os.environ["FIXTURES"])
+with (fixtures / "requested-urls").open("a") as requests:
+    print(url, file=requests)
 if url == "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per_page=100":
     log = Path(os.environ["FIXTURES"]) / "release-requests"
     count = len(log.read_text().splitlines()) if log.exists() else 0
@@ -52,8 +61,18 @@ if url == "https://api.github.com/repos/Govcraft/beankeeper-desktop/releases?per
     print(status, end="")
     sys.exit(0)
 assert "-H" not in args, "release downloads must not receive the API token"
-assert url.startswith("https://github.com/Govcraft/beankeeper-desktop/releases/download/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"] + "/"), url
-path = Path(os.environ["FIXTURES"]) / Path(urlparse(url).path).name
+base = os.environ.get("BK_DOWNLOAD_BASE", "https://beankeeper.app/download").rstrip("/")
+if url == base + "/latest/version.txt":
+    if os.environ.get("VERSION_UNAVAILABLE"):
+        sys.exit(22)
+    print(os.environ.get("VERSION_BODY", os.environ["FIXTURE_VERSION"] + "\\n"), end="")
+    sys.exit(0)
+assert args[0] == "-q" and args[args.index("--proto-redir") + 1] == "=https"
+version = os.environ["FIXTURE_VERSION"]
+if base == "https://github.com/Govcraft/beankeeper-desktop/releases/download":
+    version = "beankeeper-desktop-v" + version
+assert url.startswith(f"{base}/{version}/"), url
+path = fixtures / Path(urlparse(url).path).name
 if not path.exists():
     if "-w" in args: print(os.environ.get("BUNDLE_STATUS", "404"), end="")
     sys.exit(22)
@@ -63,8 +82,8 @@ if "-w" in args: print("200", end="")
         self.env = {**os.environ, "PATH": str(self.bin), "BK_VERSION": "0.1.0", "FIXTURE_VERSION": "0.1.0",
                     "BK_INSTALL": str(self.destination), "FIXTURES": str(self.fixtures),
                     "TMPDIR": str(self.root), "BK_TEST_LOG": str(self.root / "service-actions")}
-        self.env.pop("GH_TOKEN", None)
-        self.env.pop("GITHUB_TOKEN", None)
+        for name in ("BK_DOWNLOAD_BASE", "GH_TOKEN", "GITHUB_TOKEN"):
+            self.env.pop(name, None)
         self.script("date", 'print("1000")')
         self.script("sleep", 'with (Path(os.environ["FIXTURES"]) / "release-delays").open("a") as log:\n'
                              '    print(sys.argv[1], file=log)')
@@ -104,22 +123,6 @@ sys.exit({1 if fail else 0})
         for name in (f"{self.stem}.tar.gz", "checksums-sha256.txt"):
             (self.fixtures / f"{name}.sigstore").write_text("fixture bundle")
 
-    def github_cli(self, fail_on=None):
-        self.script("gh", f'''
-artifact = Path(sys.argv[3])
-ref = "refs/tags/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"]
-assert sys.argv[1:] == [
-    "attestation", "verify", str(artifact), "--hostname", "github.com",
-    "--repo", "Govcraft/beankeeper-desktop", "--cert-identity",
-    "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@" + ref,
-    "--source-ref", ref,
-]
-assert artifact.is_file()
-with (Path(os.environ["FIXTURES"]) / "attested").open("a") as log:
-    print(artifact.name, file=log)
-sys.exit(artifact.name == {fail_on!r})
-''')
-
     @staticmethod
     def release_entry(version, target, *, missing=None, **overrides):
         archive = f"bk-{version}-{target}.tar.gz"
@@ -128,45 +131,71 @@ sys.exit(artifact.name == {fail_on!r})
                 "prerelease": "-rc." in version,
                 "assets": [{"name": name} for name in names if name != missing], **overrides}
 
-    def test_no_cosign_checks_checksum_and_installs(self):
-        self.github_cli()
+    def assert_release_requests(self, base, version, *, discover):
+        archive = f"{self.stem}.tar.gz"
+        self.assertEqual((self.fixtures / "requested-urls").read_text().splitlines(),
+                         ([f"{base}/latest/version.txt"] if discover else []) +
+                         [f"{base}/{version}/{name}" for name in
+                          (archive, "checksums-sha256.txt", f"{archive}.sigstore", "checksums-sha256.txt.sigstore")])
+        self.assertEqual((self.fixtures / "verified").read_text().splitlines(),
+                         [archive, "checksums-sha256.txt"])
+
+    def test_default_discovers_version_and_downloads_signed_assets_without_json_reader(self):
+        self.env.pop("BK_VERSION")
+        self.env["GH_TOKEN"] = "do-not-send"
+        (self.bin / "python3").unlink()
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cosign not found", result.stderr)
-        self.assertTrue((self.destination / "bk").exists())
-        self.assertFalse((self.fixtures / "attested").exists())
+        self.assert_release_requests(DOWNLOAD_BASE, "0.1.0", discover=True)
 
-    def test_attestation_opt_in_checks_archive_and_checksum_manifest(self):
-        self.env["BK_VERIFY_ATTESTATION"] = "1"
-        missing_gh = self.run_installer()
-        self.assertNotEqual(missing_gh.returncode, 0)
-        self.assertIn("requires gh", missing_gh.stderr)
-        self.assertFalse((self.destination / "bk").exists())
-
-        self.github_cli()
+    def test_override_uses_the_same_mirror_layout_and_trust_identity(self):
+        self.env.pop("BK_VERSION")
+        mirror = "https://mirror.example/releases"
+        self.env.update(BK_DOWNLOAD_BASE=f"{mirror}/", VERSION_BODY="0.1.0\r\n")
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.fixtures / "attested").read_text().splitlines(),
-                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
-        self.assertTrue((self.destination / "bk").exists())
+        self.assert_release_requests(mirror, "0.1.0", discover=True)
 
-    def test_failed_attestation_preserves_installed_binary(self):
-        self.env["BK_VERIFY_ATTESTATION"] = "1"
-        self.github_cli(fail_on="checksums-sha256.txt")
-        installed = self.destination / "bk"
-        installed.write_text("previous version")
+    def test_explicit_version_bypasses_discovery(self):
+        self.env["VERSION_UNAVAILABLE"] = "1"
         result = self.run_installer()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("GitHub build provenance verification failed for checksums-sha256.txt", result.stderr)
-        self.assertEqual(installed.read_text(), "previous version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_release_requests(DOWNLOAD_BASE, "0.1.0", discover=False)
 
-    def test_required_signatures_take_precedence_over_attestation_opt_in(self):
-        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_VERIFY_ATTESTATION="1")
-        self.github_cli()
+    def test_invalid_base_is_rejected_before_network_access(self):
+        for base in ("http://mirror.example", "https:///download", "https://mirror.example/?query"):
+            with self.subTest(base=base):
+                self.env["BK_DOWNLOAD_BASE"] = base
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("BK_DOWNLOAD_BASE must be an HTTPS URL", result.stderr)
+                self.assertFalse((self.fixtures / "requested-urls").exists())
+
+    def test_unavailable_or_invalid_version_metadata_does_not_fall_back(self):
+        self.env.pop("BK_VERSION")
+        requests = self.fixtures / "requested-urls"
+        for body in (None, "", "0.1.0\n0.2.0\n", "../main", "0.1.0 "):
+            with self.subTest(body=body):
+                self.env.pop("VERSION_UNAVAILABLE", None)
+                if body is None:
+                    self.env["VERSION_UNAVAILABLE"] = "1"
+                    message = "could not read the latest release version"
+                else:
+                    self.env["VERSION_BODY"] = body
+                    message = "invalid version"
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(requests.read_text().splitlines(), [f"{DOWNLOAD_BASE}/latest/version.txt"])
+                self.assertFalse((self.destination / "bk").exists())
+                requests.unlink()
+
+    def test_missing_cosign_stops_even_with_legacy_fallback_settings(self):
+        (self.bin / "cosign").unlink()
+        self.env.update(BK_REQUIRE_SIGNATURES="0", BK_VERIFY_ATTESTATION="1")
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cosign is required", result.stderr)
-        self.assertFalse((self.fixtures / "attested").exists())
         self.assertFalse((self.destination / "bk").exists())
 
     def test_service_is_installed_by_default_and_reinstall_stops_before_upgrading(self):
@@ -230,39 +259,18 @@ sys.exit(artifact.name == {fail_on!r})
         self.assertIn("no checksum found", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
 
-    def test_present_bundles_verify_both_with_exact_release_identity(self):
-        self.env["BK_VERIFY_ATTESTATION"] = "1"
-        self.cosign()
-        self.bundles()
-        result = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.fixtures / "verified").read_text().splitlines(),
-                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
-
-    def test_legacy_404_falls_back_to_checksum(self):
-        self.cosign()
-        result = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr.count("HTTP 404"), 2)
-
-    def test_agent_install_requires_cosign_and_both_bundles(self):
-        self.env["BK_REQUIRE_SIGNATURES"] = "1"
-        missing_cosign = self.run_installer()
-        self.assertNotEqual(missing_cosign.returncode, 0)
-        self.assertIn("cosign is required", missing_cosign.stderr)
-        self.assertFalse((self.destination / "bk").exists())
-
-        self.cosign()
-        (self.fixtures / f"{self.stem}.tar.gz.sigstore").write_text("fixture bundle")
-        missing_checksum_bundle = self.run_installer()
-        self.assertNotEqual(missing_checksum_bundle.returncode, 0)
-        self.assertIn("required Sigstore bundle missing for checksums-sha256.txt", missing_checksum_bundle.stderr)
-        self.assertFalse((self.destination / "bk").exists())
-
-        self.bundles()
-        verified = self.run_installer()
-        self.assertEqual(verified.returncode, 0, verified.stderr)
-        self.assertTrue((self.destination / "bk").is_file())
+    def test_missing_bundle_preserves_installed_binary(self):
+        installed = self.destination / "bk"
+        installed.write_text("previous version")
+        self.env["BK_REQUIRE_SIGNATURES"] = "0"
+        for name in (f"{self.stem}.tar.gz", "checksums-sha256.txt"):
+            with self.subTest(artifact=name):
+                (self.fixtures / f"{name}.sigstore").unlink()
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"required Sigstore bundle missing for {name} (HTTP 404)", result.stderr)
+                self.assertEqual(installed.read_text(), "previous version")
+                self.bundles()
 
     def test_agent_install_rejects_older_binary_before_replacing_installed_copy(self):
         binary = self.root / "bk"
@@ -273,8 +281,7 @@ sys.exit(artifact.name == {fail_on!r})
         self.cosign()
         self.bundles()
         self.env.pop("BK_VERSION")
-        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1",
-                        FIXTURE_RELEASES=json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]))
+        self.env["BK_REQUIRE_AGENT_SETUP"] = "1"
         installed = self.destination / "bk"
         installed.write_text("previous executable")
 
@@ -285,11 +292,9 @@ sys.exit(artifact.name == {fail_on!r})
         self.assertEqual(installed.read_text(), "previous executable")
 
     def test_guided_discovery_refuses_when_no_release_includes_both_signature_bundles(self):
-        self.env.pop("BK_VERSION")
-        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_REQUIRE_AGENT_SETUP="1",
-                        FIXTURE_RELEASES=json.dumps([self.release_entry(
-                            "0.2.0-rc.1", "x86_64-unknown-linux-gnu", missing="checksums-sha256.txt.sigstore",
-                        )]))
+        self.use_discovery(BK_REQUIRE_AGENT_SETUP="1", FIXTURE_RELEASES=json.dumps([self.release_entry(
+            "0.2.0-rc.1", "x86_64-unknown-linux-gnu", missing="checksums-sha256.txt.sigstore",
+        )]))
 
         result = self.run_installer()
 
@@ -299,7 +304,8 @@ sys.exit(artifact.name == {fail_on!r})
 
     def use_discovery(self, **overrides):
         self.env.pop("BK_VERSION", None)
-        self.env.update({"FIXTURE_RELEASES": json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]),
+        self.env.update({"BK_DOWNLOAD_BASE": GITHUB_DOWNLOAD_BASE + "/",
+                         "FIXTURE_RELEASES": json.dumps([self.release_entry("0.1.0", "x86_64-unknown-linux-gnu")]),
                          **overrides})
 
     def test_discovery_rejects_malformed_metadata(self):
@@ -362,9 +368,8 @@ sys.exit(artifact.name == {fail_on!r})
         self.stage_shell_fixture(version)
         self.cosign()
         self.bundles()
-        self.env.pop("BK_VERSION", None)
-        self.env.update(BK_REQUIRE_AGENT_SETUP="0", FIXTURE_VERSION=version,
-                        FIXTURE_RELEASES=json.dumps(releases))
+        self.use_discovery(BK_REQUIRE_AGENT_SETUP="0", FIXTURE_VERSION=version,
+                           FIXTURE_RELEASES=json.dumps(releases))
 
         result = self.run_installer()
 
@@ -435,7 +440,7 @@ sys.exit(artifact.name == {fail_on!r})
         self.script("curl", """
 import shutil
 args = sys.argv[1:]
-if "https://raw.githubusercontent.com/Govcraft/beankeeper-desktop/main/install.sh" in args:
+if "https://beankeeper.app/download/latest/install.sh" in args:
     shutil.copyfile(os.environ["BK_TEST_INSTALLER"], args[args.index("-o") + 1])
 else:
     os.execv(os.environ["BK_TEST_FIXTURE_CURL"], [os.environ["BK_TEST_FIXTURE_CURL"], *args])
@@ -463,23 +468,10 @@ else:
                 self.cosign()
                 arch = "aarch64" if platform == "Darwin" else "x86_64"
                 self.script("uname", f'print({platform!r} if "-s" in sys.argv else {arch!r})')
-                if platform == "Darwin" and sys.platform == "darwin":
-                    (self.bin / "python3").unlink()
-                    (self.bin / "osascript").symlink_to("/usr/bin/osascript")
-                candidates = [
-                    self.release_entry("0.3.0-rc.1", target, draft=True),
-                    self.release_entry("0.3.0", target, missing=f"bk-0.3.0-{target}.tar.gz"),
-                    self.release_entry("0.4.0-rc.1", target, prerelease=False),
-                    self.release_entry(version, target),
-                    self.release_entry("0.2.0-rc.9", target),
-                    self.release_entry("0.1.0", target),
-                ]
-                if platform == "Darwin":
-                    candidates.append(self.release_entry("0.2.0-rc.10", target))
                 result = subprocess.run(
                     ["/bin/sh", str(script)],
                     env={**self.env, "HOME": str(fake_home), "BK_TEST_CALLS": str(expected),
-                         "FIXTURE_VERSION": version, "FIXTURE_RELEASES": json.dumps(candidates),
+                         "FIXTURE_VERSION": version,
                          "BK_TEST_INSTALLER": str(ROOT / "install.sh"), "BK_TEST_FIXTURE_CURL": str(fixture_curl)},
                     capture_output=True, text=True,
                 )
@@ -529,8 +521,8 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Sigstore verification failed", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
-        for path in self.fixtures.glob("*.sigstore"):
-            path.unlink()
+        self.cosign()
+        (self.fixtures / "checksums-sha256.txt.sigstore").unlink()
         self.env["BUNDLE_STATUS"] = "503"
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
