@@ -10,7 +10,9 @@
 //! `cargo:rustc-env` values cannot contain newlines, so JSON from
 //! packaging/license-embed.json is compacted before it is forwarded.
 
-fn main() -> Result<(), std::env::VarError> {
+use std::{error::Error, io, path::Path};
+
+fn main() -> Result<(), Box<dyn Error>> {
     // The unoptimized upstream clap command tree exceeds Windows' 1 MiB
     // default main stack. Reserve the usual Unix main-stack budget; pages
     // are committed on demand. This applies only to the Desktop executable.
@@ -28,12 +30,7 @@ fn main() -> Result<(), std::env::VarError> {
         std::path::PathBuf::from(&manifest_dir).join("../../packaging/license-embed.json");
     let lock_path = std::path::PathBuf::from(manifest_dir).join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock_path.display());
-    let lock = std::fs::read_to_string(lock_path).unwrap_or_default();
-    let core_revision = lock.lines().find_map(|line| {
-        line.strip_prefix("source = \"git+https://github.com/Govcraft/beankeeper?branch=main#")
-            .and_then(|line| line.strip_suffix('"'))
-    });
-    rustc_env("BK_CORE_REVISION", core_revision.unwrap_or("unknown"));
+    rustc_env("BK_CORE_REVISION", &core_revision(&lock_path)?);
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
@@ -71,6 +68,32 @@ fn main() -> Result<(), std::env::VarError> {
         }
     }
     Ok(())
+}
+
+fn core_revision(lock_path: &Path) -> Result<String, Box<dyn Error>> {
+    let lock = toml_edit::Document::parse(std::fs::read_to_string(lock_path)?)?;
+    let revision = lock
+        .get("package")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+        .find(|package| package.get("name").and_then(toml_edit::Item::as_str) == Some("beankeeper"))
+        .and_then(|package| package.get("source"))
+        .and_then(toml_edit::Item::as_str)
+        .and_then(|source| source.strip_prefix("git+"))
+        .and_then(|source| source.rsplit_once('#'))
+        .map(|(_, revision)| revision)
+        .filter(|revision| !revision.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} needs a Git revision for the beankeeper package",
+                    lock_path.display()
+                ),
+            )
+        })?;
+    Ok(revision.to_owned())
 }
 
 struct LicenseEmbed {

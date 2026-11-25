@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Automatically back up local books and attachments before migrations and upgrades, and list, restore, or undo backups through Desktop MCP and the CLI.
+- Automatically back up local books and attachments before migrations and Desktop or core upgrades, and list, restore, or undo backups through Desktop MCP and the CLI.
 
 ## [0.1.0-rc.30] - 2026-11-25
 

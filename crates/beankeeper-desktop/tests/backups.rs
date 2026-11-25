@@ -189,7 +189,7 @@ fn agent_restores_encrypted_backup_and_attachments_and_undoes_with_either_interf
     let backups = list["backups"].as_array().ok_or("backups")?;
     assert_eq!(backups.len(), 1);
     let backup = &backups[0];
-    assert_eq!(backup["encrypted"], true);
+    assert_eq!(backup["archive_format"], "age_tar");
     assert_eq!(backup["reason"], "first_backup");
     let id = backup["id"].as_str().ok_or("backup ID")?;
     let directory = local_backup(&ledger, id);
@@ -233,9 +233,20 @@ fn agent_restores_encrypted_backup_and_attachments_and_undoes_with_either_interf
     assert_eq!(undone["undo_of"], undo);
     assert!(contains_txn(&ledger, later)?);
 
+    // Earlier Desktop builds stored the archive format as a Boolean.
+    let manifest = directory.join("backup.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
+    legacy
+        .as_object_mut()
+        .ok_or("backup metadata")?
+        .remove("archive_format");
+    legacy["encrypted"] = true.into();
+    fs::write(&manifest, serde_json::to_vec(&legacy)?)?;
+    fs::remove_file(&earlier_path)?;
     let cli_restore = data(cli(&ledger, &admin).args(["restore", id]))?;
     let second_undo = cli_restore["undo_id"].as_i64().ok_or("CLI undo receipt")?;
     assert!(!contains_txn(&ledger, later)?);
+    assert_eq!(fs::read(&earlier_path)?, archived_bytes);
     let undone = call(
         &server,
         &admin,
@@ -271,13 +282,19 @@ fn backup_catalog_rotates_and_same_schema_upgrade_takes_a_new_backup() -> TestRe
     );
     assert!(!local_backup(&ledger, first).exists());
 
-    // Simulate a catalog last written by a different build of the same schema.
+    // Simulate a build with the same Desktop and schema versions but a different core revision.
     let id = list["backups"][0]["id"]
         .as_str()
         .ok_or("latest backup ID")?;
     let manifest = local_backup(&ledger, id).join("backup.json");
     let mut previous: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
-    previous["release"] = "previous-build".into();
+    let (desktop, core) = previous["release"]
+        .as_str()
+        .and_then(|release| release.split_once('/'))
+        .ok_or("backup release")?;
+    assert_eq!(core, env!("BK_CORE_REVISION"));
+    let other = if core.starts_with('0') { '1' } else { '0' };
+    previous["release"] = format!("{desktop}/{other}{}", &core[1..]).into();
     fs::write(&manifest, serde_json::to_vec(&previous)?)?;
     drop(server);
     let server = Server::start(&ledger, &["serve"], None)?;

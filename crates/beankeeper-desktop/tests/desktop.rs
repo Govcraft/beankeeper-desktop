@@ -13,7 +13,7 @@ use std::{
 };
 
 use beankeeper_cli::{
-    db::{Actor, Db, get_schema_version},
+    db::{Actor, Db, current_schema_version, get_schema_version},
     identity,
 };
 use beankeeper_desktop::browser;
@@ -490,6 +490,50 @@ fn failed_backup_blocks_migration_and_leaves_no_completed_copy() -> TestResult {
             .filter_map(Result::ok)
             .all(|entry| entry.file_name() == "catalog.lock")
     );
+    Ok(())
+}
+
+#[test]
+fn serve_preserves_wrong_key_and_future_schema_errors() -> TestResult {
+    let ledger = Ledger::new()?;
+    let actual_passphrase = std::fs::read_to_string(&ledger.secret)?;
+    let wrong_passphrase = "wrong-backup-fixture-passphrase";
+    let newer = i64::from(current_schema_version()) + 1;
+
+    for (passphrase, future_schema) in [
+        (wrong_passphrase, None),
+        (actual_passphrase.as_str(), Some(newer)),
+    ] {
+        if let Some(version) = future_schema {
+            ledger.fixture_sql()?.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                [version],
+            )?;
+        }
+        let passphrase_file = tempfile::NamedTempFile::new()?;
+        std::fs::write(passphrase_file.path(), passphrase)?;
+        let Err(expected) = Db::open_snapshot(&ledger.path, Some(&passphrase.into())) else {
+            return Err("fixture should fail the current-schema open".into());
+        };
+        let output = clean_command()
+            .arg("--db")
+            .arg(&ledger.path)
+            .arg("--passphrase-file")
+            .arg(passphrase_file.path())
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .output()?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains(&expected.to_string()), "{stderr}");
+        let catalog = ledger
+            .path
+            .with_file_name(".beankeeper-backups")
+            .join("books.db");
+        assert!(
+            std::fs::read_dir(catalog)?
+                .all(|entry| { entry.is_ok_and(|entry| entry.file_name() == "catalog.lock") })
+        );
+    }
     Ok(())
 }
 

@@ -29,6 +29,7 @@ use crate::{
 
 use super::{
     LocalBackups,
+    books::{BooksState, CurrentBooks},
     catalog::{Backup, BackupId, Reason, Retention},
 };
 
@@ -141,7 +142,7 @@ impl BackupTool {
         match tokio::task::spawn_blocking(move || {
             let operation = self.decode(request)?;
             let actor = Actor::resolve(Some(identity.uri())).with_identity(identity);
-            operation.execute(&books, &actor)?.into_tool_result()
+            operation.execute(&books, |_| Ok(actor))?.into_tool_result()
         })
         .await
         {
@@ -193,9 +194,15 @@ impl From<&Operation> for BackupTool {
 }
 
 impl Operation {
-    fn execute(self, books: &LocalBackups, actor: &Actor) -> Result<Reply, CliError> {
+    fn execute(
+        self,
+        books: &LocalBackups,
+        resolve_actor: impl FnOnce(&Db) -> Result<Actor, CliError>,
+    ) -> Result<Reply, CliError> {
         let location = books.location()?;
         let catalog = location.lock()?;
+        let current = BooksState::try_from((books, &catalog))?.current()?;
+        let actor = resolve_actor(current.snapshot())?;
         match self {
             Self::List => Ok(Reply::Listed {
                 backups: catalog.list()?,
@@ -205,16 +212,12 @@ impl Operation {
                 let (backup, _) = catalog.capture(books, Reason::Requested)?;
                 Ok(Reply::Created { backup })
             }
-            Self::Restore(options) => Restore::Backup(options.backup_id).execute(
-                books,
-                &catalog,
-                RestoreAgent::try_from(actor)?,
-            ),
-            Self::Undo(options) => Restore::Undo(options.undo_id).execute(
-                books,
-                &catalog,
-                RestoreAgent::try_from(actor)?,
-            ),
+            Self::Restore(options) => {
+                Restore::Backup(options.backup_id).execute(current, RestoreAgent::try_from(&actor)?)
+            }
+            Self::Undo(options) => {
+                Restore::Undo(options.undo_id).execute(current, RestoreAgent::try_from(&actor)?)
+            }
         }
     }
 }
@@ -248,19 +251,16 @@ enum Restore {
 impl Restore {
     fn execute(
         self,
-        books: &LocalBackups,
-        catalog: &super::catalog::Catalog<'_>,
+        current: CurrentBooks<'_>,
         agent: RestoreAgent<'_>,
     ) -> Result<Reply, CliError> {
-        // Require current books before preparing attachments or opening a writer.
-        Db::open_snapshot(books.path(), books.key())?;
         let request = match self {
             Self::Backup(id) => {
-                RestoreRequest::Backup(BackupPath::try_from(catalog.restore_source(&id, books)?)?)
+                RestoreRequest::Backup(BackupPath::try_from(current.restore_source(&id)?)?)
             }
             Self::Undo(id) => RestoreRequest::Undo(id),
         };
-        let db = Db::open_existing(books.path(), books.key())?;
+        let db = current.open_existing()?;
         match LedgerRequest::Restore(request).execute(&db, agent.0)? {
             LedgerResponse::Restore(_, receipt) => Ok(Reply::Restored { receipt }),
             _ => Err(CliError::General(
@@ -323,20 +323,22 @@ fn encoding(error: &serde_json::Error) -> CliError {
 pub fn run(options: BackupOptions, mut cli: Cli, managed_or_default: bool) -> ExitCode {
     let mut meta = Metadata::new(BackupTool::from(&options.operation));
     let result = local_books(&mut cli, managed_or_default).and_then(|books| {
-        let db = Db::open_snapshot(books.path(), books.key())?;
-        let identity = db.read_snapshot(|reader| {
-            identity::authorize(
-                reader,
-                cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
-                BackupTool::from(&options.operation).capability(),
-            )
+        let capability = BackupTool::from(&options.operation).capability();
+        let reply = options.operation.execute(&books, |db| {
+            let identity = db.read_snapshot(|reader| {
+                identity::authorize(
+                    reader,
+                    cli.agent_token.as_ref().map(ExposeSecret::expose_secret),
+                    capability,
+                )
+            })?;
+            let mut actor = Actor::resolve(cli.actor.as_deref());
+            if let Some(identity) = identity {
+                meta.agent = Some(identity.uri().to_owned());
+                actor = actor.with_identity(identity);
+            }
+            Ok(actor)
         })?;
-        let mut actor = Actor::resolve(cli.actor.as_deref());
-        if let Some(identity) = identity {
-            meta.agent = Some(identity.uri().to_owned());
-            actor = actor.with_identity(identity);
-        }
-        let reply = options.operation.execute(&books, &actor)?;
         if cli.is_json() {
             let envelope = Envelope {
                 ok: true,

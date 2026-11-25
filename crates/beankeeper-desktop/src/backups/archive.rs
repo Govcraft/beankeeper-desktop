@@ -10,13 +10,87 @@ use std::{
 use beankeeper::types::Sha256Hex;
 use beankeeper_cli::error::CliError;
 use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
 
 use crate::setup::keychain::{restrict_directory, restrict_file};
 
 use super::{
-    catalog::{digest, regular},
+    catalog::{check_digest, digest, regular, sha256_hex},
     sync_directory,
 };
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ArchiveFormat {
+    Tar,
+    AgeTar,
+}
+
+impl From<bool> for ArchiveFormat {
+    fn from(encrypted: bool) -> Self {
+        if encrypted { Self::AgeTar } else { Self::Tar }
+    }
+}
+
+impl AsRef<Path> for ArchiveFormat {
+    fn as_ref(&self) -> &Path {
+        Path::new(match self {
+            Self::Tar => "attachments.tar",
+            Self::AgeTar => "attachments.tar.age",
+        })
+    }
+}
+
+impl ArchiveFormat {
+    fn passphrase(self, key: Option<&SecretString>) -> Result<Option<&SecretString>, CliError> {
+        match self {
+            Self::Tar => Ok(None),
+            Self::AgeTar => key
+                .map(Some)
+                .ok_or_else(|| invalid("encrypted attachments require the books' passphrase")),
+        }
+    }
+}
+
+pub(super) fn read_format<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ArchiveFormat, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredFormat {
+        Current(ArchiveFormat),
+        Legacy(bool),
+    }
+
+    Ok(match StoredFormat::deserialize(deserializer)? {
+        StoredFormat::Current(format) => format,
+        StoredFormat::Legacy(encrypted) => encrypted.into(),
+    })
+}
+
+pub(super) struct Archive {
+    manifest: AttachmentManifest,
+    bytes: u64,
+}
+
+impl Archive {
+    pub(super) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl From<Archive> for AttachmentManifest {
+    fn from(archive: Archive) -> Self {
+        archive.manifest
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct AttachmentManifest {
+    files: usize,
+    #[serde(with = "sha256_hex")]
+    sha256: Sha256Hex,
+}
 
 fn store(books: &Path) -> PathBuf {
     books.with_file_name("attachments")
@@ -41,10 +115,11 @@ fn is_directory(path: &Path) -> Result<bool, CliError> {
 
 pub(super) fn capture(
     books: &Path,
-    destination: &Path,
+    directory: &Path,
+    format: ArchiveFormat,
     key: Option<&SecretString>,
     byte_limit: u64,
-) -> Result<Option<(usize, u64, Sha256Hex)>, CliError> {
+) -> Result<Option<Archive>, CliError> {
     let store = store(books);
     if !is_directory(&store)? {
         return Ok(None);
@@ -74,12 +149,8 @@ pub(super) fn capture(
         return Ok(None);
     }
 
-    let mut file = tempfile::NamedTempFile::new_in(
-        destination
-            .parent()
-            .ok_or_else(|| invalid("attachment archive needs a parent directory"))?,
-    )?;
-    if let Some(key) = key {
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    if let Some(key) = format.passphrase(key)? {
         let mut writer = age::Encryptor::with_user_passphrase(key.clone())
             .wrap_output(file.as_file_mut())
             .map_err(crypto)?;
@@ -95,9 +166,16 @@ pub(super) fn capture(
             "attachment archive exceeds the local backup size limit",
         ));
     }
-    file.persist_noclobber(destination)
+    let destination = directory.join(format);
+    file.persist_noclobber(&destination)
         .map_err(|error| error.error)?;
-    Ok(Some((attachments.len(), bytes, digest(destination)?)))
+    Ok(Some(Archive {
+        manifest: AttachmentManifest {
+            files: attachments.len(),
+            sha256: digest(&destination)?,
+        },
+        bytes,
+    }))
 }
 
 fn write_tar(output: impl Write, attachments: &[(Sha256Hex, PathBuf)]) -> Result<(), CliError> {
@@ -119,20 +197,21 @@ fn write_tar(output: impl Write, attachments: &[(Sha256Hex, PathBuf)]) -> Result
 
 pub(super) fn restore(
     books: &Path,
-    input: &Path,
+    directory: &Path,
+    format: ArchiveFormat,
     key: Option<&SecretString>,
-    expected_files: usize,
+    manifest: &AttachmentManifest,
 ) -> Result<(), CliError> {
-    let input_file = BufReader::new(regular(input)?);
+    let input = directory.join(format);
+    check_digest(&input, &manifest.sha256)?;
+    let input_file = BufReader::new(regular(&input)?);
     let stage = tempfile::tempdir_in(
         books
             .parent()
             .ok_or_else(|| invalid("ledger needs a directory for restored attachments"))?,
     )?;
     restrict_directory(stage.path())?;
-    let files = if input.extension().is_some_and(|ext| ext == "age") {
-        let key =
-            key.ok_or_else(|| invalid("encrypted attachments require the books' passphrase"))?;
+    let files = if let Some(key) = format.passphrase(key)? {
         let decryptor = age::Decryptor::new_buffered(input_file).map_err(crypto)?;
         if !decryptor.is_scrypt() {
             return Err(invalid(
@@ -143,9 +222,9 @@ pub(super) fn restore(
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
             .map_err(crypto)?;
-        unpack(reader, stage.path(), expected_files)?
+        unpack(reader, stage.path(), manifest.files)?
     } else {
-        unpack(input_file, stage.path(), expected_files)?
+        unpack(input_file, stage.path(), manifest.files)?
     };
     install(books, files)
 }

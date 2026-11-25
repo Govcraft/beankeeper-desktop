@@ -1,7 +1,9 @@
 //! Local backup lifecycle. Ledger verification and audited writes belong to core.
 
 mod archive;
+mod books;
 mod catalog;
+mod release;
 mod tools;
 
 pub(crate) use tools::BackupTool;
@@ -16,7 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::instance::BooksPath;
 
-use catalog::{BackupLocation, Reason, Retention};
+use books::BooksState;
+use catalog::{BackupLocation, Catalog, Retention};
 
 #[derive(Clone)]
 pub(crate) struct LocalBackups {
@@ -44,26 +47,27 @@ impl LocalBackups {
         BackupLocation::try_from(&self.books)
     }
 
-    // A noncurrent schema can only reach the write connection through core's
-    // proof-consuming migration API. A key or database failure also fails closed.
     pub(crate) fn open(&self) -> Result<Db, CliError> {
-        if Db::open_snapshot(self.path(), self.key()).is_ok() {
-            self.automatic();
-            return Db::open_existing(self.path(), self.key());
-        }
-
         let location = self.location()?;
         let catalog = location.lock()?;
-        // Another Desktop operation could have migrated while we waited.
-        if Db::open_snapshot(self.path(), self.key()).is_ok() {
-            return Db::open_existing(self.path(), self.key());
+        match BooksState::try_from((self, &catalog))? {
+            BooksState::Current(books) => {
+                Self::report_automatic(self.capture_if_due(&catalog));
+                books.open_existing()
+            }
+            BooksState::NeedsMigration(books) => books.open(),
         }
-        let (_, proof) = catalog.capture(self, Reason::BeforeMigration)?;
-        Db::open_after_snapshot(proof, self.key())
     }
 
     pub(crate) fn automatic(&self) {
-        if let Err(error) = self.capture_if_due() {
+        Self::report_automatic(self.location().and_then(|location| {
+            let catalog = location.lock()?;
+            self.capture_if_due(&catalog)
+        }));
+    }
+
+    fn report_automatic(result: Result<(), CliError>) {
+        if let Err(error) = result {
             eprintln!(
                 "Automatic Beankeeper backup failed ({}): {error}",
                 error.error_code()
@@ -71,9 +75,7 @@ impl LocalBackups {
         }
     }
 
-    fn capture_if_due(&self) -> Result<(), CliError> {
-        let location = self.location()?;
-        let catalog = location.lock()?;
+    fn capture_if_due(&self, catalog: &Catalog<'_>) -> Result<(), CliError> {
         let retention = Retention::default();
         let backups = catalog.rotate(&retention)?;
         if let Some(reason) = retention.due(backups.first()) {

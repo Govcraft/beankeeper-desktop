@@ -22,13 +22,15 @@ use crate::{
     setup::keychain::{restrict_directory, restrict_file},
 };
 
-use super::{LocalBackups, archive, sync_directory};
+use super::{
+    LocalBackups,
+    archive::{self, Archive, ArchiveFormat, AttachmentManifest},
+    release::Release,
+    sync_directory,
+};
 
 const MANIFEST: &str = "backup.json";
 const DATABASE: &str = "books.db";
-const ATTACHMENTS: &str = "attachments.tar";
-const ENCRYPTED_ATTACHMENTS: &str = "attachments.tar.age";
-const RELEASE: &str = concat!(env!("CARGO_PKG_VERSION"), "/", env!("BK_CORE_REVISION"));
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -95,34 +97,28 @@ pub(super) struct Backup {
     id: BackupId,
     created_at: DateTime<Utc>,
     reason: Reason,
-    release: String,
+    release: Release,
     #[serde(deserialize_with = "schema_version")]
     schema_version: SchemaVersion,
-    encrypted: bool,
+    #[serde(alias = "encrypted", deserialize_with = "archive::read_format")]
+    archive_format: ArchiveFormat,
     bytes: u64,
     #[serde(with = "sha256_hex")]
     database_sha256: Sha256Hex,
-    attachments: Option<Archive>,
+    attachments: Option<AttachmentManifest>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Archive {
-    files: usize,
-    #[serde(with = "sha256_hex")]
-    sha256: Sha256Hex,
-}
-
-mod sha256_hex {
+pub(super) mod sha256_hex {
     use super::{Deserialize, Sha256Hex};
 
-    pub(super) fn serialize<S: serde::Serializer>(
+    pub(in crate::backups) fn serialize<S: serde::Serializer>(
         value: &Sha256Hex,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(value.as_str())
     }
 
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+    pub(in crate::backups) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Sha256Hex, D::Error> {
         String::deserialize(deserializer)?
@@ -176,7 +172,7 @@ impl Retention {
         let Some(latest) = latest else {
             return Some(Reason::FirstBackup);
         };
-        if latest.release != RELEASE {
+        if &latest.release != Release::current() {
             return Some(Reason::Upgrade);
         }
         let age = Utc::now() - latest.created_at;
@@ -320,30 +316,28 @@ impl Catalog<'_> {
         )?;
         let retention = Retention::default();
         retention.check_size(proof.bytes())?;
+        let archive_format = ArchiveFormat::from(proof.encrypted());
         let attachments = archive::capture(
             books.path(),
-            &archive_path(&pending.0, proof.encrypted()),
+            &pending.0,
+            archive_format,
             books.key(),
             retention.max_bytes - proof.bytes(),
         )?;
         let database_sha256 = digest(&database)?;
-        let (attachments, bytes) = match attachments {
-            Some((files, bytes, sha256)) => (
-                Some(Archive { files, sha256 }),
-                proof.bytes().saturating_add(bytes),
-            ),
-            None => (None, proof.bytes()),
-        };
+        let bytes = proof
+            .bytes()
+            .saturating_add(attachments.as_ref().map_or(0, Archive::bytes));
         let backup = Backup {
             id,
             created_at: Utc::now(),
             reason,
-            release: RELEASE.into(),
+            release: Release::default(),
             schema_version: proof.schema_version(),
-            encrypted: proof.encrypted(),
+            archive_format,
             bytes,
             database_sha256,
-            attachments,
+            attachments: attachments.map(AttachmentManifest::from),
         };
         retention.check_size(bytes)?;
         pending.commit(&backup)?;
@@ -362,20 +356,16 @@ impl Catalog<'_> {
         let database = path.join(DATABASE);
         check_digest(&database, &backup.database_sha256)?;
         if let Some(attachments) = &backup.attachments {
-            let path = archive_path(&path, backup.encrypted);
-            check_digest(&path, &attachments.sha256)?;
-            archive::restore(books.path(), &path, books.key(), attachments.files)?;
+            archive::restore(
+                books.path(),
+                &path,
+                backup.archive_format,
+                books.key(),
+                attachments,
+            )?;
         }
         Ok(database)
     }
-}
-
-fn archive_path(directory: &Path, encrypted: bool) -> PathBuf {
-    directory.join(if encrypted {
-        ENCRYPTED_ATTACHMENTS
-    } else {
-        ATTACHMENTS
-    })
 }
 
 fn read_manifest(id: &BackupId, path: &Path) -> Result<Backup, CliError> {
@@ -447,7 +437,7 @@ pub(super) fn digest(path: &Path) -> io::Result<Sha256Hex> {
     }
 }
 
-fn check_digest(path: &Path, expected: &Sha256Hex) -> Result<(), CliError> {
+pub(super) fn check_digest(path: &Path, expected: &Sha256Hex) -> Result<(), CliError> {
     if digest(path)? != *expected {
         return Err(CliError::Validation(
             "local backup file does not match its recorded SHA-256".into(),
