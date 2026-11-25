@@ -70,6 +70,27 @@ fn call(server: &Server, bearer: &str, name: &str, arguments: &Value) -> TestRes
     Ok(response["result"]["structuredContent"].clone())
 }
 
+fn assert_invalid_cursor_error(ledger: &Ledger, state: &Path, mcp_error: &Value) -> TestResult {
+    let output = cli(ledger, state)?
+        .args([
+            "--company",
+            "acme",
+            "audit",
+            "mark-seen",
+            "--through",
+            &i64::MAX.to_string(),
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.stdout.as_slice(), b"");
+    let response: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["meta"]["command"], "audit.mark_seen");
+    assert_eq!(response["error"], *mcp_error);
+    assert!(response.get("data").is_none());
+    Ok(())
+}
+
 #[test]
 fn cli_and_mcp_share_a_monotonic_book_marker_and_page_all_receipts() -> TestResult {
     let ledger = Ledger::new()?;
@@ -111,6 +132,7 @@ fn cli_and_mcp_share_a_monotonic_book_marker_and_page_all_receipts() -> TestResu
         &json!({"company":"acme", "through":i64::MAX}),
     )?;
     assert_eq!(invalid["code"], "VALIDATION");
+    assert_invalid_cursor_error(&ledger, state.path(), &invalid)?;
     assert_eq!(
         call(&server, reader, "changes_since", &json!({"company":"acme"}))?,
         first

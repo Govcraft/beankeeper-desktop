@@ -99,15 +99,7 @@ fn run(
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if cli.is_json() {
-                let envelope = Envelope {
-                    ok: false,
-                    meta,
-                    data: None::<()>,
-                    error: Some(EnvelopeError {
-                        code: error.code(),
-                        message: error.to_string(),
-                    }),
-                };
+                let envelope = Envelope::failure(meta, &error);
                 match serde_json::to_string_pretty(&envelope) {
                     Ok(result) => eprintln!("{result}"),
                     Err(_) => error.report(true, None),

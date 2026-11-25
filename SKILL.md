@@ -126,6 +126,9 @@ preserving the books. The binary can then be removed from its install directory.
 
 When a Beankeeper tool rejects a call, read the error and the installed tool's
 schema or command help. Correct the call and retry it in the same conversation.
+On `STATEMENT_DISCREPANCY` from `reconcile_statement` or `bk reconcile statement`,
+use the ending balances and exact difference in `details` (`error.details` in
+CLI JSON) to find unmatched activity before retrying.
 If the corrected call still fails, tell the owner which action failed and show
 the error code and message so they can report it. Never tell the owner to do it
 in the Beankeeper app, on a screen, or in a terminal. Never put structured data

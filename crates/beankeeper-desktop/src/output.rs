@@ -1,5 +1,6 @@
 //! Response envelopes for commands owned by Desktop.
 
+use beankeeper_cli::{error::CliError, output::json::EnvelopeError};
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
@@ -29,4 +30,20 @@ pub(crate) struct Envelope<C, T, E> {
     pub(crate) data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<E>,
+}
+
+impl<C> Envelope<C, (), EnvelopeError> {
+    pub(crate) fn failure(meta: Metadata<C>, error: &CliError) -> Self {
+        Self {
+            ok: false,
+            meta,
+            data: None,
+            error: Some(EnvelopeError {
+                code: error.code(),
+                message: error.to_string(),
+                // Desktop setup status and audit commands cannot reconcile statements.
+                details: None,
+            }),
+        }
+    }
 }

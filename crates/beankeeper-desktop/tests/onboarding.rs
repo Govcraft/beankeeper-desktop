@@ -81,6 +81,8 @@ fn setup_status_reports_json_errors_under_its_existing_command_name() -> TestRes
     assert_eq!(response["meta"]["command"], "setup.status");
     assert!(response["meta"]["timestamp"].is_string());
     assert!(response["error"]["code"].is_string());
+    assert!(response["error"]["message"].is_string());
+    assert!(response["error"].get("details").is_none());
     assert!(response.get("data").is_none());
     Ok(())
 }
