@@ -193,6 +193,26 @@ without proxies or redirects, before opening a fresh pairing link in the default
 browser. With no `--bind`, it prefers the running managed service. Ctrl-C stops the
 listener and cancels upstream MCP sessions before HTTP shutdown completes.
 
+## Automatic local backups
+
+Desktop keeps local backups of your books and attachments automatically. Ask
+your agent to list the backups or restore one. After restoring, the agent can
+put your books back using the undo receipt.
+
+Backups stay beside the books and use the books' existing passphrase.
+Desktop retains up to seven readable backups totaling up to 2 GiB per ledger,
+keeping the newest pre-migration or upgrade backup. It takes a backup on first
+use, before migrating the books, on the first open with a new Desktop or core
+build, and daily while the service runs. A failed pre-migration backup stops
+the migration.
+
+The agent uses `backup_list`, `backup_create`, `backup_restore` and `backup_undo`
+on the ledger connection. Their CLI equivalents are `bk backups list`,
+`bk backups create`, `bk backups restore <backup-id>` and
+`bk backups undo <undo-id>`, all with `--json`.
+List uses ledger read access. Create, restore, and undo use a separately
+authorized ledger administrator grant. See [backup storage and recovery](docs/setup.md#automatic-local-backups).
+
 ## MCP credentials and the local HTTP boundary
 
 Configure your agent's Streamable HTTP client with the `/mcp` URL and an

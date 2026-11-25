@@ -20,7 +20,7 @@ use std::{
 
 use beankeeper_cli::{
     capability::Capability,
-    cli::Cli,
+    cli::{Cli, PassphraseOptions},
     db::{
         self, Actor, Db, audit,
         audit::{ActorLabel, BlankActorLabel},
@@ -424,7 +424,7 @@ fn run_with_store(
     if matches!(mode, SetupMode::Fresh) {
         initialize_ledger(cli, &secret, options.demo)?;
     }
-    let db = Db::open_existing(&cli.db, Some(&secret))?;
+    let db = crate::backups::open_for_provisioning(&cli.db, &secret)?;
     provision(&db, provisioning, &token_file, &owner_file)?;
     if storage.is_none() && matches!(registration, ClientRegistration::Skip) {
         managed::reconcile(&db, &cli.db, options.managed_access_change())?;
@@ -504,7 +504,7 @@ fn store_ledger_secret(
     };
     // Verify supplied recovery credentials before replacing a stored credential.
     if matches!(mode, SetupMode::Resume) {
-        Db::open_existing(&cli.db, Some(&secret))?;
+        crate::backups::open(&cli.db, Some(&secret))?;
     }
     // Establish a recoverable credential before initialization.
     let automatic_file = match (store.store(&cli.db, &secret), storage, mode) {
@@ -542,6 +542,11 @@ fn finish_setup(
     temporary: &tempfile::NamedTempFile,
     mode: SetupMode,
 ) -> Result<(), SetupError> {
+    if matches!(mode, SetupMode::Fresh) {
+        let backups =
+            crate::backups::LocalBackups::new(cli.db.as_path().try_into()?, Some(secret.clone()));
+        backups.automatic();
+    }
     eprintln!(
         "Agent token is a secret: {}. Owner credential stays separate: {}.",
         paths.token_file.display(),
@@ -840,7 +845,7 @@ pub(crate) fn generate_passphrase() -> Result<SecretString, SetupError> {
 
 fn recovery_kit(ledger: &Path, owner: &Path, passphrase: &str) -> String {
     format!(
-        "Beankeeper Desktop recovery kit\nKEEP PRIVATE. Store an offline copy separately from the ledger.\nLedger: {}\nPassphrase: {passphrase}\nOwner token file: {} (never share with agents; back this file up separately too)\n\nBack up with bk --db <ledger> backup --output <backup>. With policy enforcement, supply the owner token through BK_AGENT_TOKEN.\nRestore with bk --db <new-ledger> --passphrase-file <private-passphrase-file> restore --input <backup>.\nIf keychain access is lost, copy ONLY the Passphrase value to a private file and use --passphrase-file, then rerun setup --force.\nA backup is encrypted and still needs this passphrase. There is no backdoor.\nTokens expire after one year; use upstream agent issue/revoke to renew them.\n",
+        "Beankeeper Desktop recovery kit\nKEEP PRIVATE. Store an offline copy separately from the ledger.\nLedger: {}\nPassphrase: {passphrase}\nOwner token file: {} (never share with agents; back this file up separately too)\n\nDesktop saves automatic local backups. Ask your agent to list or restore a backup while your books are available.\nIf the ledger file is missing, find its snapshot at .beankeeper-backups/<ledger-filename>/<bkbackup_…>/books.db beside the original ledger. From the ledger's directory, run bk --db <new-ledger> --passphrase-file <private-passphrase-file> recover --input .beankeeper-backups/<ledger-filename>/<bkbackup_…>/books.db. With policy enforcement, supply the matching private owner credential through BK_AGENT_TOKEN. Keep the sibling attachments directory with the recovered ledger.\nIf keychain access is lost, copy ONLY the Passphrase value to a private file and use --passphrase-file, then rerun setup --force.\nA backup is encrypted and still needs this passphrase. There is no backdoor.\nTokens expire after one year; use upstream agent issue/revoke to renew them.\n",
         ledger.display(),
         owner.display()
     )
@@ -864,7 +869,7 @@ fn set_private(path: &Path) -> io::Result<()> {
     keychain::restrict_file(path)
 }
 
-fn temporary_passphrase(secret: &SecretString) -> io::Result<tempfile::NamedTempFile> {
+pub(crate) fn temporary_passphrase(secret: &SecretString) -> io::Result<tempfile::NamedTempFile> {
     let mut file = tempfile::NamedTempFile::new()?;
     keychain::restrict_file(file.path())?;
     file.write_all(secret.expose_secret().as_bytes())?;
@@ -958,23 +963,30 @@ fn super_start(
 /// # Errors
 /// Returns invalid metadata, keychain or private temporary-file errors.
 pub fn stored_passphrase(cli: &mut Cli) -> Result<Option<keychain::StoredPassphrase>, SetupError> {
-    if cli.passphrase.passphrase_fd.is_some()
-        || cli.passphrase.passphrase_file.is_some()
+    stored_passphrase_for(&mut cli.passphrase, &cli.db)
+}
+
+pub(crate) fn stored_passphrase_for(
+    options: &mut PassphraseOptions,
+    path: &Path,
+) -> Result<Option<keychain::StoredPassphrase>, SetupError> {
+    if options.passphrase_fd.is_some()
+        || options.passphrase_file.is_some()
         || std::env::var_os("BEANKEEPER_PASSPHRASE_CMD").is_some_and(|value| !value.is_empty())
     {
         return Ok(None);
     }
-    if !cli.db.exists() {
+    if !path.exists() {
         return Ok(None);
     }
-    let ledger = keychain::canonical_ledger(&cli.db)?;
+    let ledger = keychain::canonical_ledger(path)?;
     let marker = ledger.with_extension("desktop.json");
     if !marker.exists() {
         return Ok(None);
     }
     let store = registered_store(&ledger)?
         .ok_or(SetupError::Invalid("Desktop setup metadata is missing"))?;
-    let guard = keychain::apply_stored_passphrase(cli, store.as_ref())?;
+    let guard = keychain::apply_stored_passphrase(options, &ledger, store.as_ref())?;
     if guard.is_none() {
         return Err(SetupError::Invalid(
             "keychain entry missing; recover the passphrase from your recovery kit with --passphrase-file",

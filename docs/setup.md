@@ -140,11 +140,48 @@ the owner credential beside its ledger, restart Desktop and pair again.
 If both the keychain and recorded passphrase are lost, the ledger cannot be
 recovered. There is no bypass or backdoor.
 
-Create an encrypted snapshot with upstream `bk backup --output`, and restore it
-with `bk --db <explicit-new-destination> --passphrase-file <private-file> restore
---input <backup>`. Supply the private owner credential through `BK_AGENT_TOKEN`
-when upstream requires administration rights. A ledger backup does not contain
-the separate recovery kit or credential files; back those up separately.
+## Automatic local backups
+
+Desktop saves a first backup during setup or startup, then checks hourly for a
+backup due after 24 hours. It also backs up before migrating a ledger and on
+the first ledger open after the Desktop version or core revision changes.
+When a backup fails, the service records the error in its log. A failed
+pre-migration backup leaves the ledger at its existing schema.
+
+The backup directory is `.beankeeper-backups/<ledger-filename>/` beside the
+ledger. Each backup has a core `books.db` snapshot, backup metadata, and, when
+there are attachments, an archive of the content-addressed files in
+`attachments/`. For encrypted books, the snapshot and the
+`attachments.tar.age` archive both use the original passphrase.
+Desktop retains up to seven readable backups totaling up to 2 GiB per ledger. It
+keeps the newest pre-migration or upgrade backup. If a new daily or requested
+backup cannot fit alongside that copy, Desktop reports a size error. Desktop
+also reports unreadable entries and rotation errors in its log or CLI
+diagnostics. Core manages the separate undo snapshot recorded in each restore
+receipt.
+
+Ask your agent to list or restore a backup. With a ledger administrator grant,
+the agent can restore directly and give you the receipt. It can undo that
+restore on request while the receipt remains current. The live audit history
+and credential policy stay in effect, and attachment files needed for the
+restore or undo are available locally.
+
+### Recover a missing ledger file
+
+The private recovery kit contains the original passphrase. If the live file
+is missing, a local administrator can run this from the original ledger's
+directory.
+
+```text
+bk --db <new-ledger> --passphrase-file <private-file> recover --input .beankeeper-backups/<ledger-filename>/<bkbackup_…>/books.db
+```
+
+Supply the appropriate credential through `BK_AGENT_TOKEN` if enforcement
+requires it. Preserve any existing sibling `attachments/` directory. If it
+was also lost, decrypt the age archive with the same passphrase and extract it
+into the new ledger's sibling `attachments/` directory.
+
+Keep separate private copies of the recovery kit and owner credential file.
 
 ## Files touched
 

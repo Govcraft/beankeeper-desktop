@@ -52,6 +52,9 @@ pub fn command() -> Command {
             Command::new("service")
                 .about("Manage per-user background hosting and lifecycle MCP tools"),
         ))
+        .subcommand(crate::backups::BackupOptions::augment_args(
+            Command::new("backups").about("List, create, and restore Desktop's local backups"),
+        ))
         .subcommand(crate::demo::DemoOptions::augment_args(
             Command::new("demo").about("Manage fictional books on the running service"),
         ))
@@ -123,6 +126,7 @@ pub fn ledger_options(matches: &ArgMatches) -> Result<Cli, clap::Error> {
         cli.db.clone_from(path);
     }
     cli.company = matches.get_one("company").cloned();
+    cli.actor = matches.get_one("actor").cloned();
     cli.passphrase = PassphraseOptions::from_arg_matches(matches)?;
     cli.agent_token = matches.get_one("agent_token").cloned();
     Ok(cli)

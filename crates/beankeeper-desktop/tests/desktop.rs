@@ -13,7 +13,7 @@ use std::{
 };
 
 use beankeeper_cli::{
-    db::{Actor, Db, get_schema_version},
+    db::{Actor, Db, current_schema_version, get_schema_version},
     identity,
 };
 use beankeeper_desktop::browser;
@@ -415,6 +415,25 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
 
     let migrated = Db::open_snapshot(&path, Some(&passphrase))?;
     assert_eq!(get_schema_version(migrated.read())?, expected_version);
+    let catalog = dir.path().join(".beankeeper-backups/books.db");
+    let backup = std::fs::read_dir(catalog)?
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .ok_or("missing pre-migration backup")?
+        .path();
+    let manifest: Value = serde_json::from_slice(&std::fs::read(backup.join("backup.json"))?)?;
+    assert_eq!(manifest["reason"], "before_migration");
+    assert_eq!(manifest["schema_version"], 1);
+    let snapshot = rusqlite::Connection::open_with_flags(
+        backup.join("books.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    snapshot.pragma_update(None, "key", fixture_passphrase)?;
+    assert_eq!(
+        snapshot.query_row("SELECT version FROM schema_version", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
     // Assert the internal schema only in this explicit migration fixture.
     let schema =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -434,6 +453,176 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
         .error_for_status()?
         .text()?;
     assert!(accounts.contains("Legacy Checking"));
+    Ok(())
+}
+
+#[test]
+fn upstream_command_backs_up_the_selected_ledger_before_migrating_it() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("old.db");
+    let secret = "migration-fixture-passphrase";
+    let passphrase_file = dir.path().join("passphrase");
+    std::fs::write(&passphrase_file, secret)?;
+    {
+        let fixture = rusqlite::Connection::open(&path)?;
+        fixture.pragma_update(None, "key", secret)?;
+        fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
+    }
+    let catalog = dir.path().join(".beankeeper-backups/old.db");
+    let bad = catalog.join("bkbackup_00000000000000000000000000");
+    std::fs::create_dir_all(&bad)?;
+    std::fs::write(bad.join("backup.json"), b"unreadable manifest")?;
+
+    let output = clean_command()
+        .arg("--ledger")
+        .arg(format!("legacy={}", path.display()))
+        .args(["--ledger-target", "legacy", "--passphrase-file"])
+        .arg(&passphrase_file)
+        .args(["--json", "company", "list"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stderr)?.contains("Skipping unreadable local backup"));
+    assert!(String::from_utf8(output.stdout)?.contains("Acme"));
+    Db::open_snapshot(&path, Some(&secret.into()))?;
+    let backup = std::fs::read_dir(catalog)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|entry| entry.path() != bad && entry.path().is_dir())
+        .ok_or("missing pre-migration backup")?
+        .path();
+    let manifest: Value = serde_json::from_slice(&std::fs::read(backup.join("backup.json"))?)?;
+    assert_eq!(manifest["reason"], "before_migration");
+    assert_eq!(manifest["schema_version"], 1);
+    let snapshot = rusqlite::Connection::open_with_flags(
+        backup.join("books.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    snapshot.pragma_update(None, "key", secret)?;
+    let version = snapshot.query_row("SELECT version FROM schema_version", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    assert_eq!(version, 1);
+    Ok(())
+}
+
+#[test]
+fn failed_backup_blocks_migration_and_leaves_no_completed_copy() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    let passphrase_file = dir.path().join("passphrase");
+    let secret = "migration-fixture-passphrase";
+    std::fs::write(&passphrase_file, secret)?;
+    let fixture = rusqlite::Connection::open(&path)?;
+    fixture.pragma_update(None, "key", secret)?;
+    fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
+    std::fs::write(
+        dir.path().join("attachments"),
+        b"obstruct the attachment archive",
+    )?;
+
+    for args in [
+        ["serve", "--bind", "127.0.0.1:0"].as_slice(),
+        ["company", "list"].as_slice(),
+        ["mcp", "serve"].as_slice(),
+    ] {
+        let output = clean_command()
+            .arg("--db")
+            .arg(&path)
+            .arg("--passphrase-file")
+            .arg(&passphrase_file)
+            .args(args)
+            .output()?;
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains("attachment store"), "{args:?}: {stderr}");
+        assert_eq!(
+            fixture.query_row("SELECT version FROM schema_version", [], |row| row
+                .get::<_, i64>(0))?,
+            1,
+            "{args:?}"
+        );
+    }
+    assert!(
+        std::fs::read_dir(dir.path().join(".beankeeper-backups/books.db"))?
+            .filter_map(Result::ok)
+            .all(|entry| entry.file_name() == "catalog.lock")
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_backup_blocks_upstream_http_from_migrating_a_named_ledger() -> TestResult {
+    let startup = Ledger::new()?;
+    let secret = std::fs::read_to_string(&startup.secret)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("legacy.db");
+    let fixture = rusqlite::Connection::open(&path)?;
+    fixture.pragma_update(None, "key", &secret)?;
+    fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
+    std::fs::write(dir.path().join("attachments"), b"blocked")?;
+    let occupied = TcpListener::bind("127.0.0.1:0")?;
+    let output = startup
+        .command()
+        .arg("--ledger")
+        .arg(format!("legacy={}", path.display()))
+        .args(["mcp", "serve", "--http", "--bind"])
+        .arg(occupied.local_addr()?.to_string())
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("attachment store"), "{stderr}");
+    let version = fixture.query_row("SELECT version FROM schema_version", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    assert_eq!(version, 1);
+    Ok(())
+}
+
+#[test]
+fn serve_preserves_wrong_key_and_future_schema_errors() -> TestResult {
+    let ledger = Ledger::new()?;
+    let actual_passphrase = std::fs::read_to_string(&ledger.secret)?;
+    let wrong_passphrase = "wrong-backup-fixture-passphrase";
+    let newer = i64::from(current_schema_version()) + 1;
+
+    for (passphrase, future_schema) in [
+        (wrong_passphrase, None),
+        (actual_passphrase.as_str(), Some(newer)),
+    ] {
+        if let Some(version) = future_schema {
+            ledger.fixture_sql()?.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                [version],
+            )?;
+        }
+        let passphrase_file = tempfile::NamedTempFile::new()?;
+        std::fs::write(passphrase_file.path(), passphrase)?;
+        let Err(expected) = Db::open_snapshot(&ledger.path, Some(&passphrase.into())) else {
+            return Err("fixture should fail the current-schema open".into());
+        };
+        let output = clean_command()
+            .arg("--db")
+            .arg(&ledger.path)
+            .arg("--passphrase-file")
+            .arg(passphrase_file.path())
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .output()?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains(&expected.to_string()), "{stderr}");
+        let catalog = ledger
+            .path
+            .with_file_name(".beankeeper-backups")
+            .join("books.db");
+        assert!(
+            std::fs::read_dir(catalog)?
+                .all(|entry| { entry.is_ok_and(|entry| entry.file_name() == "catalog.lock") })
+        );
+    }
     Ok(())
 }
 

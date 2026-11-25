@@ -2,6 +2,8 @@
 
 mod agent_skill;
 pub mod agents;
+#[doc(hidden)]
+pub mod backups;
 pub mod boundary;
 pub mod bridge;
 pub mod browser;

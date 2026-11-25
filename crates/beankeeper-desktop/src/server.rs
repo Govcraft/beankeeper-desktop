@@ -17,15 +17,13 @@ use axum::{
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
-    mcp::{
-        LedgerTargets, StreamableHttpServerConfig, http_router_with_host_tools,
-        http_router_with_ledger_targets,
-    },
+    mcp::{LedgerTargets, StreamableHttpServerConfig, http_router_with_ledger_targets},
     passphrase::resolve_passphrase,
 };
 
 use crate::{
     DesktopError,
+    backups::LocalBackups,
     boundary::{self, LocalBoundary},
     changes,
     demo::DemoBooks,
@@ -80,7 +78,7 @@ pub fn local_url(bound: SocketAddr) -> String {
 
 /// Merge upstream MCP with embedded UI routes and a listener-wide guard.
 ///
-/// Call during synchronous startup: the upstream factory performs blocking I/O.
+/// Call during synchronous startup so Desktop can prepare the startup ledger.
 /// The caller must cancel `config.cancellation_token` on shutdown.
 ///
 /// # Errors
@@ -100,7 +98,7 @@ pub fn application(
         pairing,
         ApplicationMode::default(),
     )
-    .map(|(router, _)| router)
+    .map(|app| app.router)
 }
 
 #[derive(Default)]
@@ -108,6 +106,12 @@ struct ApplicationMode {
     id: InstanceId,
     managed_books: Option<std::path::PathBuf>,
     owner_key: Option<owner::OwnerKey>,
+}
+
+struct Application {
+    router: Router,
+    demo: Option<DemoBooks>,
+    backups: LocalBackups,
 }
 
 fn application_with_id(
@@ -121,7 +125,7 @@ fn application_with_id(
         managed_books,
         owner_key,
     }: ApplicationMode,
-) -> Result<(Router, Option<DemoBooks>), DesktopError> {
+) -> Result<Application, DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
         .with_allowed_hosts(boundary.authorities())
@@ -132,12 +136,14 @@ fn application_with_id(
         cli.passphrase.passphrase_file.as_deref(),
         false,
     )?;
-    // Migrate through the review connection before opening the read-only snapshots.
-    let review_db = Db::open_existing(&cli.db, passphrase.as_ref())?;
     let books = BooksPath::try_from(cli.db.as_path())?;
+    let backups = LocalBackups::new(books.clone(), passphrase);
+    let review_db = backups.open()?;
+    let key = backups.key();
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
-    let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, passphrase.as_ref())?));
+    let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, key)?));
     let mut tools = DesktopTools {
+        backups: backups.clone(),
         bound,
         navigation: navigation.clone(),
         status_db: Arc::clone(&association_db),
@@ -147,21 +153,17 @@ fn application_with_id(
         company: cli.company.clone(),
     };
     let request_limit = config.max_request_body_bytes;
-    let demo;
-    let mcp = if let Some(managed_books) = &tools.managed_books {
-        let targets = LedgerTargets::new(Db::open_existing(&cli.db, passphrase.as_ref())?);
-        demo = Some(DemoBooks::new(
+    let targets = LedgerTargets::new(backups.open()?);
+    let demo = tools.managed_books.as_ref().map(|managed_books| {
+        DemoBooks::new(
             targets.clone(),
             managed_books,
             config.cancellation_token.clone(),
-        ));
-        tools.demo.clone_from(&demo);
-        http_router_with_ledger_targets(cli, targets, read_only, config, tools)?
-    } else {
-        demo = None;
-        http_router_with_host_tools(cli, passphrase.as_ref(), read_only, config, tools)?
-    };
-    let db = Db::open_snapshot(&cli.db, passphrase.as_ref())?;
+        )
+    });
+    tools.demo.clone_from(&demo);
+    let mcp = http_router_with_ledger_targets(cli, targets, read_only, config, tools)?;
+    let db = Db::open_snapshot(&cli.db, key)?;
     let review = review::router(
         review_db,
         cli.company.clone(),
@@ -169,13 +171,12 @@ fn application_with_id(
         &cli.db.with_extension("owner-token"),
     )?;
     let changes = changes::router(
-        Db::open_existing(&cli.db, passphrase.as_ref())?,
+        backups.open()?,
         books,
         cli.company.clone(),
         cli.db.with_extension("owner-token"),
         pairing.clone(),
     );
-    drop(passphrase);
     let fallback = cli.agent_token.clone();
     let mcp = if read_only {
         mcp
@@ -201,7 +202,11 @@ fn application_with_id(
         .merge(mcp)
         .route("/health", get(move || async move { instance::health(&id) }))
         .layer(middleware::from_fn_with_state(boundary, boundary::guard));
-    Ok((router, demo))
+    Ok(Application {
+        router,
+        demo,
+        backups,
+    })
 }
 
 /// Run the combined listener until Ctrl-C, then cancel MCP and drain HTTP.
@@ -249,7 +254,11 @@ fn serve_bound(
         let (pairing, link) = PairingState::new(bound)?;
         (pairing, Some(link))
     };
-    let (app, demo) = application_with_id(
+    let Application {
+        router,
+        demo,
+        backups,
+    } = application_with_id(
         cli,
         read_only,
         bound,
@@ -288,10 +297,11 @@ fn serve_bound(
         );
     }
     runtime.block_on(async move {
+        let backup_task = tokio::spawn(backups.schedule(cancellation.clone()));
         let shutdown = cancellation.clone();
         let result = axum::serve(
             serving,
-            app.into_make_service_with_connect_info::<owner::Peer>(),
+            router.into_make_service_with_connect_info::<owner::Peer>(),
         )
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
@@ -299,6 +309,9 @@ fn serve_bound(
         })
         .await;
         cancellation.cancel();
+        if let Err(error) = backup_task.await {
+            eprintln!("Automatic Beankeeper backup scheduler failed: {error}");
+        }
         if let Some(demo) = demo
             && let Err(error) = demo.remove().await
         {
