@@ -4,6 +4,7 @@
 
 - Install Desktop from beankeeper.app by default, with an optional download mirror and required Sigstore and SHA-256 verification.
 - Set up encrypted local books or start practice books from the installed Claude extension, with one Mac download for Apple Silicon and Intel.
+- Use plain language, exact amounts, receipts, and suggested next questions in Beankeeper chat, with a clearer Claude extension description.
 - Build Desktop against current Beankeeper main, preserving named setup and audit errors and exposing structured statement discrepancy details through the upstream CLI and MCP tools.
 - The transaction register hides reversed and cancelled pairs by default, with a checkbox and shareable links to include both entries.
 - Discover signed Desktop releases on Linux and macOS without `jq`, and opt in to GitHub provenance verification when `cosign` is unavailable for a regular install.

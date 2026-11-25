@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "beankeeper",
   "display_name": "Beankeeper",
-  "description": "Let Claude help with your encrypted, local Beankeeper books.",
-  "long_description": "After installing, say “Set up my books” or “Create demo books” in Claude. Beankeeper sets up encrypted local books and runs in the background under your computer account. Your ledger and credentials stay on your machine.",
+  "description": "Ask Claude about your books.",
+  "long_description": "Ask Claude to check your accounts and record what's new, or ask what came in and where your money went. Your Beankeeper books stay on your computer. Say “Set up my books” or “Create demo books” to get started.",
   "author": {
     "name": "Govcraft",
     "url": "https://github.com/Govcraft"
