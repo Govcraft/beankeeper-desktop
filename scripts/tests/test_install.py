@@ -104,6 +104,22 @@ sys.exit({1 if fail else 0})
         for name in (f"{self.stem}.tar.gz", "checksums-sha256.txt"):
             (self.fixtures / f"{name}.sigstore").write_text("fixture bundle")
 
+    def github_cli(self, fail_on=None):
+        self.script("gh", f'''
+artifact = Path(sys.argv[3])
+ref = "refs/tags/beankeeper-desktop-v" + os.environ["FIXTURE_VERSION"]
+assert sys.argv[1:] == [
+    "attestation", "verify", str(artifact), "--hostname", "github.com",
+    "--repo", "Govcraft/beankeeper-desktop", "--cert-identity",
+    "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@" + ref,
+    "--source-ref", ref,
+]
+assert artifact.is_file()
+with (Path(os.environ["FIXTURES"]) / "attested").open("a") as log:
+    print(artifact.name, file=log)
+sys.exit(artifact.name == {fail_on!r})
+''')
+
     @staticmethod
     def release_entry(version, target, *, missing=None, **overrides):
         archive = f"bk-{version}-{target}.tar.gz"
@@ -113,10 +129,45 @@ sys.exit({1 if fail else 0})
                 "assets": [{"name": name} for name in names if name != missing], **overrides}
 
     def test_no_cosign_checks_checksum_and_installs(self):
+        self.github_cli()
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("cosign not found", result.stderr)
         self.assertTrue((self.destination / "bk").exists())
+        self.assertFalse((self.fixtures / "attested").exists())
+
+    def test_attestation_opt_in_checks_archive_and_checksum_manifest(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
+        missing_gh = self.run_installer()
+        self.assertNotEqual(missing_gh.returncode, 0)
+        self.assertIn("requires gh", missing_gh.stderr)
+        self.assertFalse((self.destination / "bk").exists())
+
+        self.github_cli()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.fixtures / "attested").read_text().splitlines(),
+                         [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
+        self.assertTrue((self.destination / "bk").exists())
+
+    def test_failed_attestation_preserves_installed_binary(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
+        self.github_cli(fail_on="checksums-sha256.txt")
+        installed = self.destination / "bk"
+        installed.write_text("previous version")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub build provenance verification failed for checksums-sha256.txt", result.stderr)
+        self.assertEqual(installed.read_text(), "previous version")
+
+    def test_required_signatures_take_precedence_over_attestation_opt_in(self):
+        self.env.update(BK_REQUIRE_SIGNATURES="1", BK_VERIFY_ATTESTATION="1")
+        self.github_cli()
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cosign is required", result.stderr)
+        self.assertFalse((self.fixtures / "attested").exists())
+        self.assertFalse((self.destination / "bk").exists())
 
     def test_service_is_installed_by_default_and_reinstall_stops_before_upgrading(self):
         result = self.run_installer()
@@ -180,6 +231,7 @@ sys.exit({1 if fail else 0})
         self.assertFalse((self.destination / "bk").exists())
 
     def test_present_bundles_verify_both_with_exact_release_identity(self):
+        self.env["BK_VERIFY_ATTESTATION"] = "1"
         self.cosign()
         self.bundles()
         result = self.run_installer()

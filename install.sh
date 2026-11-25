@@ -10,6 +10,7 @@
 #   BK_NO_SERVICE=1 or --no-service - install the binary without background hosting
 #   BK_NO_AGENTS=1 or --no-agents - skip local agent configuration
 #   BK_REQUIRE_SIGNATURES=1 - require cosign and both release signatures
+#   BK_VERIFY_ATTESTATION=1 - require GitHub provenance for both files if cosign is absent
 #   BK_REQUIRE_AGENT_SETUP=1 - require managed service and registration commands
 #   GH_TOKEN or GITHUB_TOKEN - optional GitHub authentication for release discovery
 
@@ -270,13 +271,26 @@ download_and_install() {
 }
 
 verify_signatures() {
+    ref="refs/tags/beankeeper-desktop-v${VERSION}"
+    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@${ref}"
     if ! command -v cosign >/dev/null 2>&1; then
-        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] || fatal "cosign is required to verify this release"
-        warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
+        [ "${BK_REQUIRE_SIGNATURES:-0}" != 1 ] ||
+            fatal "cosign is required to verify this release; install it from a trusted package source and retry"
+        if [ "${BK_VERIFY_ATTESTATION:-0}" = 1 ]; then
+            command -v gh >/dev/null 2>&1 ||
+                fatal "GitHub provenance verification requires gh; install it and authenticate with gh auth login"
+            for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
+                info "verifying GitHub build provenance for ${ARTIFACT}..."
+                gh attestation verify "${BK_TEMP_DIR}/${ARTIFACT}" --hostname github.com --repo "$REPO" \
+                    --cert-identity "$IDENTITY" --source-ref "$ref" ||
+                    fatal "GitHub build provenance verification failed for ${ARTIFACT}"
+            done
+        else
+            warn "cosign not found: only the SHA-256 checksum will be checked; release authenticity is not verified"
+        fi
         return
     fi
 
-    IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v${VERSION}"
     for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
         info "verifying Sigstore bundle for ${ARTIFACT}..."
         if BUNDLE_STATUS="$(curl -fsSL "${URL%/*}/${ARTIFACT}.sigstore" \

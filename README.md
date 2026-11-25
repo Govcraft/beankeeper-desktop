@@ -80,12 +80,17 @@ cosign verify-blob --bundle bk-desktop-VERSION-ASSET.sigstore \
   --certificate-identity https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   bk-desktop-VERSION-ASSET
-gh attestation verify bk-desktop-VERSION-ASSET -R Govcraft/beankeeper-desktop
+gh attestation verify bk-desktop-VERSION-ASSET --repo Govcraft/beankeeper-desktop \
+  --cert-identity https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-vVERSION \
+  --source-ref refs/tags/beankeeper-desktop-vVERSION
 ```
 
 Exact archive names are in [docs/RELEASE.md](docs/RELEASE.md). `install.sh` and
 `install.ps1` already verify checksums and, when `cosign` is on `PATH`, the
-Sigstore bundles.
+Sigstore bundles. The shell installer can find a release using `jq`, macOS's
+built-in `osascript`, or `python3`. If `cosign` is absent, regular installs can
+opt in to GitHub provenance verification with `BK_VERIFY_ATTESTATION=1` and an
+authenticated GitHub CLI. Guided setup requires `cosign`.
 
 ## Run quietly in the background
 
