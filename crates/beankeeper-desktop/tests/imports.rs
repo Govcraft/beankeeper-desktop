@@ -232,6 +232,36 @@ fn assert_extension_discovery(server: &Server, bearer: &str) -> TestResult {
     Ok(())
 }
 
+fn assert_upload_binding(
+    server: &Server,
+    bearer: &str,
+    args: &Value,
+    state: &Value,
+    size: f64,
+) -> TestResult {
+    for (field, value) in [("reference", json!("unbound")), ("suspense", json!("3151"))] {
+        let mut changed = args.clone();
+        changed[field] = value;
+        assert_eq!(
+            call_file(server, bearer, &changed, Some(state))?["error"]["code"],
+            -32602
+        );
+    }
+    let mut changed = args.clone();
+    changed["file"]["mimeType"] = json!("application/octet-stream");
+    assert_eq!(
+        call_file(server, bearer, &changed, Some(state))?["error"]["code"],
+        -32602
+    );
+    changed["file"]["size"] = json!(size + 0.5);
+    assert_eq!(
+        call_file(server, bearer, &changed, Some(state))?["result"]["structuredContent"]["code"],
+        "VALIDATION"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn extension_uploads_before_task_and_uses_existing_audited_import() -> TestResult {
     let ledger = prepared_ledger()?;
@@ -257,7 +287,9 @@ fn extension_uploads_before_task_and_uses_existing_audited_import() -> TestResul
     );
 
     let csv = long_statement();
-    let args = file_args("large", &csv);
+    let mut args = file_args("large", &csv);
+    args["csv"] = json!(r#"{"date_col":"date"}"#);
+    args["hold_posting_window_days"] = json!(7);
     let upload = call_file(&server, bearer, &args, None)?;
     assert_eq!(
         upload["result"]["resultType"], "upload_required",
@@ -292,14 +324,15 @@ fn extension_uploads_before_task_and_uses_existing_audited_import() -> TestResul
         .body(csv)
         .send()?;
     assert_eq!(uploaded.status(), 204);
-    let mut changed = args.clone();
-    changed["reference"] = json!("unbound");
-    assert_eq!(
-        call_file(&server, bearer, &changed, Some(state))?["error"]["code"],
-        -32602
-    );
+    let size = f64::from(u32::try_from(
+        args["file"]["size"].as_u64().ok_or("file size")?,
+    )?);
+    assert_upload_binding(&server, bearer, &args, state, size)?;
 
-    let imported = call_file(&server, bearer, &args, Some(state))?;
+    let mut retry = args.clone();
+    retry["file"]["size"] = json!(size);
+    retry["csv"] = json!({"date_col":"date"});
+    let imported = call_file(&server, bearer, &retry, Some(state))?;
     let task = &imported["result"];
     assert_eq!(task["resultType"], "task", "{imported}");
     assert_eq!(task["status"], "working");
@@ -355,16 +388,16 @@ fn upload_targets_and_task_results_are_credential_bound() -> TestResult {
     let target = upload["uploads"][0]["path"]
         .as_str()
         .ok_or("transfer target")?;
-    let put = |bearer| {
+    let put = |bearer, content: &str| {
         server
             .client
             .put(format!("{}/mcp{target}", server.base))
             .bearer_auth(bearer)
-            .body(csv.clone())
+            .body(content.to_owned())
             .send()
     };
-    assert_eq!(put(second)?.status(), 404);
-    assert_eq!(put(first)?.status(), 204);
+    assert_eq!(put(second, "wrong credential")?.status(), 404);
+    assert_eq!(put(first, &csv)?.status(), 204);
     assert_eq!(
         call_file(&server, second, &args, Some(state))?["error"]["code"],
         -32602
@@ -398,6 +431,8 @@ fn cli_uses_the_same_import_receipt_and_counts() -> TestResult {
     let file = state.path().join("statement.csv");
     std::fs::write(&file, &csv)?;
     let mut args = arguments("cli");
+    args["csv"] = json!({"date_col":"date"});
+    args["hold_amount_tolerance"] = json!(1);
     args["content"] = json!(csv);
     let task = rpc(request(
         &server,
@@ -426,11 +461,20 @@ fn cli_uses_the_same_import_receipt_and_counts() -> TestResult {
             "csv",
             "--reference",
             "cli",
+            "--csv",
+            r#"{"date_col":"date"}"#,
+            "--hold-amount-tolerance",
+            "1",
         ])
         .arg(file)
         .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let response: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(output.status.success(), "{response}");
     assert_eq!(response["data"], mcp["structuredContent"]);
     Ok(())
 }

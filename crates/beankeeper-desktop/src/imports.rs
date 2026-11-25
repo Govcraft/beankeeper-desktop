@@ -1,6 +1,8 @@
 //! Desktop's MCP transport for the existing audited statement import.
 
 pub mod command;
+mod protocol;
+mod request;
 mod tasks;
 mod upload;
 
@@ -26,24 +28,28 @@ use beankeeper_cli::{
     mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY},
     operation::Operation,
 };
-use rmcp::model::{CallToolResult, TaskAckResult};
+use rmcp::{
+    model::{CallToolResult, ProtocolVersion, TaskAckResult},
+    transport::common::http_header::{
+        HEADER_MCP_METHOD, HEADER_MCP_NAME, HEADER_MCP_PROTOCOL_VERSION,
+    },
+};
 use secrecy::{ExposeSecret, SecretString};
-use serde::Serialize;
+use serde::{Deserialize, Serialize, de::value::StrDeserializer};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::pairing::{AgentKey, Secret};
+use protocol::{ImportCode, ImportMethod, META_VERSION, RpcCall, TaskMethod, ToolCall, VERSION};
+use request::ImportRequest;
 use tasks::{ImportTaskId, TASKS, Tasks};
 pub(crate) use upload::FILES;
-use upload::{FileSpec, UPLOAD_ROUTE, Uploads};
+use upload::{UPLOAD_ROUTE, Uploads};
 
 const TOOL: &str = "ledger_setup_statement_import";
 pub(crate) const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
-const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-const VERSION: &str = "2026-07-28";
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const RETENTION: Duration = Duration::from_mins(15);
-const TASK_THRESHOLD: usize = 64 * 1024;
 
 type Principal = AgentKey;
 
@@ -85,18 +91,18 @@ enum ImportError {
 impl ImportError {
     fn respond(self, id: &Value) -> Response {
         match self {
-            Self::Validation(message) => reply(id, tool_failure("VALIDATION", message)),
+            Self::Validation(message) => reply(id, tool_failure(&ImportCode::Validation, message)),
             Self::Busy => reply(
                 id,
                 tool_failure(
-                    "IMPORT_BUSY",
+                    &ImportCode::Busy,
                     "Statement import capacity is full. Try again shortly.",
                 ),
             ),
             Self::Unavailable => reply(
                 id,
                 tool_failure(
-                    "IMPORT_UNAVAILABLE",
+                    &ImportCode::Unavailable,
                     "Statement import state is unavailable.",
                 ),
             ),
@@ -122,12 +128,13 @@ impl ImportError {
             Self::Authorization(error @ CliError::Unauthorized(_)) => (
                 StatusCode::UNAUTHORIZED,
                 [(header::WWW_AUTHENTICATE, "Bearer")],
-                Json(json!({"code":error.error_code(),"message":error.to_string()})),
+                Json(json!({"code":ImportCode::Unauthorized,"message":error.to_string()})),
             )
                 .into_response(),
-            Self::Authorization(error) => {
-                reply(id, tool_failure(error.error_code(), &error.to_string()))
-            }
+            Self::Authorization(error) => reply(
+                id,
+                tool_failure(&ImportCode::from(error.error_code()), &error.to_string()),
+            ),
         }
     }
 }
@@ -145,7 +152,7 @@ fn no_store(response: impl IntoResponse) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
-fn tool_failure(code: &str, message: &str) -> CallToolResult {
+fn tool_failure(code: &ImportCode, message: &str) -> CallToolResult {
     CallToolResult::structured_error(json!({"code":code,"message":message}))
 }
 
@@ -221,7 +228,7 @@ fn bearer(
     Ok(SecretString::from(token))
 }
 
-/// Add the extensions outside the upstream SDK, which owns the authenticated tool and its ledger write.
+/// Add transport extensions around the upstream authenticated import tool.
 pub(crate) fn layer(
     mcp: Router,
     db: Arc<Mutex<Db>>,
@@ -282,98 +289,76 @@ async fn transfer(
     }
 }
 
-async fn intercept(State(state): State<Imports>, request: Request, next: Next) -> Response {
-    if request.method() != Method::POST
-        || request.headers().contains_key(LEDGER_TARGET_HEADER)
-        || request
-            .headers()
-            .get("mcp-protocol-version")
-            .is_none_or(|version| version != VERSION)
-        || !matches!(
-            request
-                .headers()
-                .get("mcp-method")
-                .and_then(|method| method.to_str().ok()),
-            Some(
-                "server/discover"
-                    | "tools/list"
-                    | "tools/call"
-                    | "tasks/get"
-                    | "tasks/cancel"
-                    | "tasks/update"
-            )
-        )
-        || (request
-            .headers()
-            .get("mcp-method")
-            .is_some_and(|method| method == "tools/call")
-            && request
-                .headers()
-                .get("mcp-name")
-                .is_none_or(|name| name != TOOL))
-    {
-        return next.run(request).await;
+/// The header selects a candidate before reading the request body.
+fn extension_method(request: &Request) -> Option<(ImportMethod, ProtocolVersion)> {
+    let headers = request.headers();
+    if request.method() != Method::POST || headers.contains_key(LEDGER_TARGET_HEADER) {
+        return None;
     }
+    let version = headers.get(HEADER_MCP_PROTOCOL_VERSION)?.to_str().ok()?;
+    let version =
+        ProtocolVersion::deserialize(StrDeserializer::<serde::de::value::Error>::new(version))
+            .ok()?;
+    if version != VERSION {
+        return None;
+    }
+    let method: ImportMethod = headers
+        .get(HEADER_MCP_METHOD)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()?;
+    if method == ImportMethod::CallTool
+        && headers.get(HEADER_MCP_NAME).is_none_or(|name| name != TOOL)
+    {
+        return None;
+    }
+    Some((method, version))
+}
+
+async fn intercept(State(state): State<Imports>, request: Request, next: Next) -> Response {
+    let Some((method, version)) = extension_method(&request) else {
+        return next.run(request).await;
+    };
     let (parts, body) = request.into_parts();
     let Ok(bytes) = to_bytes(body, state.request_limit).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let request = Request::from_parts(parts, Body::from(bytes.clone()));
-    let Ok(mut message) = serde_json::from_slice::<Value>(&bytes) else {
+    let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
         return next.run(request).await;
     };
-    let Some(id) = message
-        .get("id")
-        .filter(|id| id.is_string() || id.is_i64())
-        .cloned()
-    else {
+    let Some(id) = message.get("id").filter(|id| id.is_string() || id.is_i64()) else {
         return next.run(request).await;
     };
-    let method = message["method"].as_str().unwrap_or_default();
-    if message["jsonrpc"] != "2.0"
-        || request
-            .headers()
-            .get("mcp-method")
-            .is_none_or(|header| header != method)
-        || message["params"]["_meta"]
-            .get(LEDGER_TARGET_META_KEY)
-            .is_some()
-    {
-        return next.run(request).await;
-    }
     let params = &message["params"];
-    if method.starts_with("tasks/")
-        && request
-            .headers()
-            .get("mcp-name")
-            .and_then(|name| name.to_str().ok())
-            != params["taskId"].as_str()
+    let metadata = &params["_meta"];
+    if message["jsonrpc"] != "2.0"
+        || message["method"].as_str() != Some(method.as_ref())
+        || metadata.get(LEDGER_TARGET_META_KEY).is_some()
     {
-        return ImportError::Unknown.respond(&id);
+        return next.run(request).await;
     }
-    let capabilities = &params["_meta"][META_CAPABILITIES]["extensions"];
+    let capabilities = &metadata[META_CAPABILITIES]["extensions"];
     let files =
         capabilities[FILES]["upload"].is_object() && capabilities[FILES].get("revision").is_none();
     let tasks = capabilities[TASKS].is_object();
+    let versions_agree =
+        || ProtocolVersion::deserialize(&metadata[META_VERSION]).is_ok_and(|body| body == version);
     match method {
-        "server/discover" => discovery(request, next, &id).await,
-        "tools/list" if files => tool_list(request, next, &id).await,
-        "tools/call" if params["name"] == TOOL && params["_meta"][META_VERSION] == VERSION => {
-            let (parts, _) = request.into_parts();
-            let result = state
-                .import(&id, &mut message, parts, next, files, tasks)
-                .await;
-            result.unwrap_or_else(|error| error.respond(&id))
+        ImportMethod::Discover => discovery(request, next, id).await,
+        ImportMethod::ListTools if files => tool_list(request, next, id).await,
+        ImportMethod::CallTool if params["name"] == TOOL && versions_agree() => state
+            .import(id, params, request, next, files, tasks)
+            .await
+            .unwrap_or_else(|error| error.respond(id)),
+        ImportMethod::Task(method) if versions_agree() => state
+            .task_request(method, params, request.headers(), tasks)
+            .await
+            .map_or_else(|error| error.respond(id), |result| reply(id, result)),
+        ImportMethod::ListTools | ImportMethod::CallTool | ImportMethod::Task(_) => {
+            next.run(request).await
         }
-        "tasks/get" | "tasks/cancel" | "tasks/update"
-            if params["_meta"][META_VERSION] == VERSION =>
-        {
-            state
-                .task_request(method, params, request.headers(), tasks)
-                .await
-                .map_or_else(|error| error.respond(&id), |result| reply(&id, result))
-        }
-        _ => next.run(request).await,
     }
 }
 
@@ -453,44 +438,47 @@ async fn read_rpc(response: Response, id: &Value) -> Result<Value, ImportError> 
 impl Imports {
     async fn task_request(
         &self,
-        method: &str,
+        method: TaskMethod,
         params: &Value,
         headers: &HeaderMap,
         supported: bool,
     ) -> Result<Value, ImportError> {
+        let task_id = params["taskId"].as_str().ok_or(ImportError::Unknown)?;
+        if headers
+            .get(HEADER_MCP_NAME)
+            .is_none_or(|name| name != task_id)
+        {
+            return Err(ImportError::Unknown);
+        }
         if !supported {
             return Err(ImportError::MissingCapability(TASKS));
         }
         let principal = self.authorize(headers, true).await?;
-        let id: ImportTaskId = params["taskId"]
-            .as_str()
-            .ok_or(ImportError::Unknown)?
-            .parse()?;
+        let id: ImportTaskId = task_id.parse()?;
         let mut tasks = locked(&self.tasks)?;
-        match method {
-            "tasks/get" => serde_json::to_value(tasks.get(&id, &principal)?)
-                .map_err(|_| ImportError::Unavailable),
-            "tasks/cancel" => {
+        let result = match method {
+            TaskMethod::Get => serde_json::to_value(tasks.get(&id, &principal)?),
+            TaskMethod::Cancel => {
                 tasks.cancel(&id, &principal)?;
-                serde_json::to_value(TaskAckResult::new()).map_err(|_| ImportError::Unavailable)
+                serde_json::to_value(TaskAckResult::new())
             }
-            _ => {
+            TaskMethod::Update => {
                 tasks.get(&id, &principal)?;
-                serde_json::to_value(TaskAckResult::new()).map_err(|_| ImportError::Unavailable)
+                serde_json::to_value(TaskAckResult::new())
             }
-        }
+        };
+        result.map_err(|_| ImportError::Unavailable)
     }
 
     async fn import(
         &self,
         id: &Value,
-        message: &mut Value,
-        mut parts: axum::http::request::Parts,
+        params: &Value,
+        request: Request,
         next: Next,
         files: bool,
         tasks: bool,
     ) -> Result<Response, ImportError> {
-        let params = &mut message["params"];
         let request_state = params
             .get("requestState")
             .map(|state| {
@@ -501,27 +489,24 @@ impl Imports {
             })
             .transpose()?;
         let arguments = params["arguments"]
-            .as_object_mut()
+            .as_object()
             .ok_or(ImportError::Validation("Expected statement arguments."))?;
+        // File transfers require an explicit credential, including malformed file requests.
         let principal = self
-            .authorize(&parts.headers, !arguments.contains_key("file"))
+            .authorize(request.headers(), !arguments.contains_key("file"))
             .await?;
-        if let Some(file) = arguments.get("file") {
-            if arguments.contains_key("content") {
-                return Err(ImportError::Validation(
-                    "Supply exactly one statement source.",
-                ));
-            }
-            if !files {
+        let arguments = ImportRequest::try_from(arguments)?;
+        let arguments = match (arguments, request_state) {
+            (ImportRequest::Inline(arguments), None) => arguments,
+            (ImportRequest::Inline(_), Some(_)) => return Err(ImportError::Unknown),
+            (ImportRequest::File(_), _) if !files => {
                 return Err(ImportError::MissingCapability(FILES));
             }
-            let mut uploads = locked(&self.uploads)?;
-            let binding = arguments.clone();
-            if let Some(ticket) = request_state {
-                *arguments = uploads.confirm(&ticket, &principal, &binding)?;
-            } else {
-                let file = FileSpec::try_from(file)?;
-                let result = uploads.issue(principal, binding, file)?;
+            (ImportRequest::File(arguments), Some(ticket)) => {
+                locked(&self.uploads)?.confirm(&ticket, &principal, &arguments)?
+            }
+            (ImportRequest::File(arguments), None) => {
+                let result = locked(&self.uploads)?.issue(principal, arguments)?;
                 let uploads = Arc::downgrade(&self.uploads);
                 tokio::spawn(async move {
                     tokio::time::sleep(RETENTION).await;
@@ -533,22 +518,15 @@ impl Imports {
                 });
                 return Ok(reply(id, result));
             }
-        } else if request_state.is_some() {
-            return Err(ImportError::Unknown);
-        }
-        let large = arguments
-            .get("content")
-            .and_then(Value::as_str)
-            .is_some_and(|text| text.len() >= TASK_THRESHOLD);
-        let destination = ImportDestination {
-            company: arguments.get("company").cloned().unwrap_or_default(),
-            suspense: arguments.get("suspense").cloned().unwrap_or_default(),
         };
-        if let Some(params) = params.as_object_mut() {
-            params.remove("requestState");
-        }
+        let large = arguments.content().uses_background_task();
+        let destination = arguments.summary_scope();
+        let call = ToolCall::from((&arguments, &params["_meta"], params.get("inputResponses")));
+        let call = RpcCall::from((id, &ImportMethod::CallTool, call));
+        let body = serde_json::to_vec(&call).map_err(|_| ImportError::Unavailable)?;
+        let (mut parts, _) = request.into_parts();
         parts.headers.remove(header::CONTENT_LENGTH);
-        let request = Request::from_parts(parts, Body::from(message.to_string()));
+        let request = Request::from_parts(parts, Body::from(body));
         if large && tasks {
             let (task, handle) = locked(&self.tasks)?.enqueue(principal)?;
             let state = self.clone();
@@ -577,22 +555,25 @@ impl Imports {
         id: &Value,
         request: Request,
         next: Next,
-        destination: ImportDestination,
+        destination: summary::Scope,
     ) -> Value {
         let response = next.run(request).await;
         if !response.status().is_success() {
             let (code, message) = if response.status() == StatusCode::UNAUTHORIZED {
-                ("UNAUTHORIZED", "The import credential is no longer valid.")
+                (
+                    ImportCode::Unauthorized,
+                    "The import credential is no longer valid.",
+                )
             } else {
                 (
-                    "IMPORT_UNAVAILABLE",
+                    ImportCode::Unavailable,
                     "The ledger did not return the statement import result. Retry with the same reference.",
                 )
             };
-            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure(code,message)});
+            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure(&code,message)});
         }
         let Ok(mut response) = read_rpc(response, id).await else {
-            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure("IMPORT_UNAVAILABLE","The ledger did not return the statement import result. Retry with the same reference.")});
+            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure(&ImportCode::Unavailable,"The ledger did not return the statement import result. Retry with the same reference.")});
         };
         if let Some(error) = response.get_mut("error") {
             let code = error["code"].as_i64().unwrap_or(-32603);
@@ -603,35 +584,22 @@ impl Imports {
         if result["isError"] == true {
             let code = result["structuredContent"]["code"]
                 .as_str()
-                .unwrap_or("IMPORT_FAILED");
+                .map(ImportCode::from)
+                .unwrap_or_default();
             // Parsers can include source rows in diagnostic text. Keep the named
             // error, and never pass source-dependent messages to the client.
             *result = json!(tool_failure(
-                code,
+                &code,
                 "Statement import failed. Check the format, accounts, and stable reference before retrying."
             ));
         } else if let Some(data) = result.get_mut("structuredContent") {
-            if let Some(scope) = destination.summary_scope()
-                && let Some(message) = scope.summarize(Arc::clone(&self.db), data).await
-            {
+            if let Some(message) = destination.summarize(Arc::clone(&self.db), data).await {
                 result["content"] = json!([{"type":"text","text":message}]);
             }
         } else {
-            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure("IMPORT_UNAVAILABLE","The ledger did not return the statement import result. Retry with the same reference.")});
+            return json!({"jsonrpc":"2.0","id":id,"result":tool_failure(&ImportCode::Unavailable,"The ledger did not return the statement import result. Retry with the same reference.")});
         }
         response
-    }
-}
-
-// Only used for read-back after upstream accepts and commits the typed import.
-struct ImportDestination {
-    company: Value,
-    suspense: Value,
-}
-
-impl ImportDestination {
-    fn summary_scope(&self) -> Option<summary::Scope> {
-        summary::Scope::from_completed_import(&self.company, &self.suspense)
     }
 }
 

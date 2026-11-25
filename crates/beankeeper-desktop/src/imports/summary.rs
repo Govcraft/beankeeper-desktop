@@ -16,12 +16,12 @@ pub(super) struct Scope {
     suspense: AccountCode,
 }
 
-impl Scope {
-    pub(super) fn from_completed_import(company: &Value, suspense: &Value) -> Option<Self> {
-        Some(Self {
-            company: company.as_str()?.parse().ok()?,
-            suspense: suspense.as_str()?.parse().ok()?,
-        })
+impl From<(&CompanySlug, &AccountCode)> for Scope {
+    fn from((company, suspense): (&CompanySlug, &AccountCode)) -> Self {
+        Self {
+            company: company.clone(),
+            suspense: suspense.clone(),
+        }
     }
 }
 

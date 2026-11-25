@@ -4,22 +4,21 @@ use std::{
     fs::File,
     io::{self, Read},
     process::ExitCode,
-    str::FromStr,
     thread,
     time::{Duration, Instant},
 };
 
-use beankeeper::types::{AccountCode, Currency};
-use beankeeper_cli::{
-    cli::{Cli, InputSource},
-    commands::setup::{SetupReference, StatementFormat},
-    db::{companies::CompanySlug, holds::HoldMatchOptions},
-};
+use beankeeper_cli::cli::{Cli, InputSource};
 use clap::Args;
 use reqwest::{Url, blocking::Client, header::HeaderValue, redirect::Policy};
-use rmcp::model::{CallToolResult, CreateTaskResult, GetTaskResult, TaskPayload};
+use rmcp::{
+    model::{CallToolResult, GetTaskResult, TaskPayload},
+    transport::common::http_header::{
+        HEADER_MCP_METHOD, HEADER_MCP_NAME, HEADER_MCP_PROTOCOL_VERSION,
+    },
+};
 use secrecy::ExposeSecret;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -30,73 +29,30 @@ use crate::{
     service::{self, LinkBooks, ServiceError},
 };
 
-use super::{META_CAPABILITIES, META_VERSION, TOOL, VERSION, tasks::TASKS, upload::MAX_BYTES};
+use super::{
+    META_CAPABILITIES, TOOL,
+    protocol::{
+        ImportCode, ImportMethod, ImportReply, META_VERSION, PollInterval, RpcCall, TaskMethod,
+        ToolCall, VERSION,
+    },
+    request::{ImportFields, ReadyImport},
+    tasks::{ImportTaskId, TASKS},
+    upload::{MAX_BYTES, StatementText},
+};
 
 /// Import a statement through the running Desktop's audited ledger import.
 #[derive(Args, Debug)]
 pub struct ImportOptions {
     /// Local statement file, or '-' for standard input.
     file: InputSource,
-    /// Book that owns the bank account.
-    #[arg(long = "book")]
-    company: CompanySlug,
-    /// Stable import reference. Reuse it when retrying the same statement.
-    #[arg(long)]
-    reference: SetupReference,
-    /// Bank account code.
-    #[arg(long)]
-    bank: AccountCode,
-    /// Account to use for entries without a category rule.
-    #[arg(long)]
-    suspense: AccountCode,
-    /// Statement currency.
-    #[arg(long)]
-    currency: Currency,
-    /// Source format. Use ofx for OFX or QFX.
-    #[arg(long, value_enum)]
-    statement_format: StatementFormat,
+    #[command(flatten)]
+    fields: ImportFields,
     /// Select the running Desktop listener for these books.
     #[arg(long)]
     bind: Option<ListenerAddress>,
-    /// Optional CSV column mapping as a JSON object.
-    #[arg(long)]
-    csv: Option<CsvMappingInput>,
-    #[command(flatten)]
-    matching: HoldMatchOptions,
 }
 
-#[derive(Serialize)]
-struct ImportArguments<'a> {
-    company: &'a CompanySlug,
-    reference: String,
-    bank: &'a AccountCode,
-    suspense: &'a AccountCode,
-    currency: &'static str,
-    format: StatementFormat,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    csv: Option<&'a CsvMappingInput>,
-    #[serde(flatten)]
-    matching: HoldMatchOptions,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(transparent)]
-struct CsvMappingInput(serde_json::Map<String, Value>);
-
-impl FromStr for CsvMappingInput {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(value)
-            .map(Self)
-            .map_err(|_| "Expected a JSON object with CSV mapping fields.")
-    }
-}
-
-struct LocalStatement(String);
-
-impl TryFrom<&InputSource> for LocalStatement {
+impl TryFrom<&InputSource> for StatementText {
     type Error = CommandError;
 
     fn try_from(source: &InputSource) -> Result<Self, Self::Error> {
@@ -109,57 +65,40 @@ impl TryFrom<&InputSource> for LocalStatement {
     }
 }
 
-impl<R: Read> TryFrom<io::Take<R>> for LocalStatement {
+impl<R: Read> TryFrom<io::Take<R>> for StatementText {
     type Error = CommandError;
 
     fn try_from(mut input: io::Take<R>) -> Result<Self, Self::Error> {
         let mut bytes = Vec::new();
         input.read_to_end(&mut bytes)?;
-        if bytes.is_empty() || bytes.len() > MAX_BYTES {
-            return Err(CommandError::InvalidSource);
-        }
         let text = String::from_utf8(bytes).map_err(|_| CommandError::InvalidSource)?;
-        Ok(Self(text))
-    }
-}
-
-impl<'a> From<(&'a ImportOptions, LocalStatement)> for ImportArguments<'a> {
-    fn from((options, statement): (&'a ImportOptions, LocalStatement)) -> Self {
-        Self {
-            company: &options.company,
-            reference: options.reference.to_string(),
-            bank: &options.bank,
-            suspense: &options.suspense,
-            currency: options.currency.code(),
-            format: options.statement_format,
-            content: statement.0,
-            csv: options.csv.as_ref(),
-            matching: options.matching,
-        }
+        Self::try_from(text.into_boxed_str()).map_err(|_| CommandError::InvalidSource)
     }
 }
 
 #[derive(Debug)]
-enum CommandError {
+pub(super) enum CommandError {
     Io(io::Error),
     InvalidSource,
     Service(ServiceError),
     Transport(BridgeError),
     ResultUnavailable,
-    Rejected { code: String, message: String },
+    Rejected { code: ImportCode, message: String },
 }
 
 impl CommandError {
-    fn code(&self) -> &str {
+    fn code(&self) -> &ImportCode {
         match self {
-            Self::InvalidSource => "VALIDATION",
-            Self::Io(_) => "IO",
-            Self::Service(_) => "DESKTOP_BOOKS_NOT_SERVED",
+            Self::InvalidSource => &ImportCode::Validation,
+            Self::Io(_) => &ImportCode::Io,
+            Self::Service(_) => &ImportCode::BooksNotServed,
             Self::Transport(BridgeError::Rejected(reqwest::StatusCode::UNAUTHORIZED)) => {
-                "UNAUTHORIZED"
+                &ImportCode::Unauthorized
             }
-            Self::Transport(BridgeError::Rejected(reqwest::StatusCode::FORBIDDEN)) => "FORBIDDEN",
-            Self::Transport(_) | Self::ResultUnavailable => "IMPORT_UNAVAILABLE",
+            Self::Transport(BridgeError::Rejected(reqwest::StatusCode::FORBIDDEN)) => {
+                &ImportCode::Forbidden
+            }
+            Self::Transport(_) | Self::ResultUnavailable => &ImportCode::Unavailable,
             Self::Rejected { code, .. } => code,
         }
     }
@@ -224,7 +163,7 @@ impl Connection {
                 service::link_address(target, options.bind).map_err(CommandError::Service)?;
             if std::net::SocketAddr::from(address) != std::net::SocketAddr::from(requested) {
                 return Err(CommandError::Rejected {
-                    code: "UNAUTHORIZED".into(),
+                    code: ImportCode::Unauthorized,
                     message: "Supply an agent credential for the selected Desktop listener.".into(),
                 });
             }
@@ -246,53 +185,64 @@ impl Connection {
         })
     }
 
-    fn request(&self, method: &str, mut params: Value) -> Result<Value, CommandError> {
-        params["_meta"] = json!({
-            META_VERSION: VERSION,
-            "io.modelcontextprotocol/clientInfo": {"name":"bk import","version":env!("CARGO_PKG_VERSION")},
-            META_CAPABILITIES: {"extensions":{ TASKS: {} }}
-        });
-        let mut request = self
+    fn request(
+        &self,
+        method: ImportMethod,
+        name: &str,
+        params: impl Serialize,
+    ) -> Result<Value, CommandError> {
+        let id = json!(1);
+        let call = RpcCall::from((&id, &method, params));
+        let response = self
             .client
             .post(self.url.clone())
             .header(reqwest::header::AUTHORIZATION, self.authorization.clone())
             .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", VERSION)
-            .header("mcp-method", method);
-        let name = if method == "tools/call" {
-            TOOL
-        } else {
-            params["taskId"]
-                .as_str()
-                .ok_or(CommandError::ResultUnavailable)?
-        };
-        request = request.header("mcp-name", name);
-        let response = request
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+            .header(HEADER_MCP_PROTOCOL_VERSION, VERSION.as_str())
+            .header(HEADER_MCP_METHOD, method.as_ref())
+            .header(HEADER_MCP_NAME, name)
+            .json(&call)
             .send()?;
         Ok(bridge::response_result(response)?)
     }
 
     fn import(
         &self,
-        arguments: &ImportArguments<'_>,
+        arguments: &ReadyImport,
         show_progress: bool,
     ) -> Result<CallToolResult, CommandError> {
-        let result = self.request("tools/call", json!({"name":TOOL,"arguments":arguments}))?;
-        if result["resultType"] == "task" {
-            let task: CreateTaskResult =
-                serde_json::from_value(result).map_err(|_| CommandError::ResultUnavailable)?;
-            self.poll(&task.task.task_id, show_progress)
-        } else {
-            serde_json::from_value(result).map_err(|_| CommandError::ResultUnavailable)
+        let metadata = Self::metadata();
+        let params = ToolCall::from((arguments, &metadata, None));
+        let result = self.request(ImportMethod::CallTool, TOOL, params)?;
+        match ImportReply::deserialize(result).map_err(|_| CommandError::ResultUnavailable)? {
+            ImportReply::Complete(result) => Ok(result),
+            ImportReply::Task(task) => {
+                let id: ImportTaskId = task
+                    .task
+                    .task_id
+                    .parse()
+                    .map_err(|_| CommandError::ResultUnavailable)?;
+                self.poll(&id, show_progress)
+            }
+            ImportReply::Upload(_upload) => Err(CommandError::ResultUnavailable),
         }
     }
 
-    fn poll(&self, id: &str, show_progress: bool) -> Result<CallToolResult, CommandError> {
+    fn metadata() -> Value {
+        json!({
+            META_VERSION: VERSION,
+            "io.modelcontextprotocol/clientInfo": {"name":"bk import","version":env!("CARGO_PKG_VERSION")},
+            META_CAPABILITIES: {"extensions":{ TASKS: {} }}
+        })
+    }
+
+    fn poll(&self, id: &ImportTaskId, show_progress: bool) -> Result<CallToolResult, CommandError> {
         let limit = Instant::now() + super::RETENTION;
         let mut previous = None;
+        let id = id.to_string();
+        let params = json!({"taskId": id, "_meta": Self::metadata()});
         while Instant::now() < limit {
-            let response = self.request("tasks/get", json!({"taskId": id}))?;
+            let response = self.request(ImportMethod::Task(TaskMethod::Get), &id, &params)?;
             let result: GetTaskResult =
                 serde_json::from_value(response).map_err(|_| CommandError::ResultUnavailable)?;
             match result.task.payload {
@@ -305,7 +255,7 @@ impl Connection {
                         eprintln!("{message}");
                     }
                     previous = task.status_message;
-                    thread::sleep(Duration::from_millis(task.poll_interval_ms.unwrap_or(500)));
+                    thread::sleep(PollInterval::from(task.poll_interval_ms).into());
                 }
                 TaskPayload::Completed { result } => {
                     return serde_json::from_value(Value::Object(result))
@@ -323,15 +273,18 @@ fn execute(
     cli: &Cli,
     target: LinkBooks<'_>,
 ) -> Result<Value, CommandError> {
-    let statement = LocalStatement::try_from(&options.file)?;
+    let statement = StatementText::try_from(&options.file)?;
     let connection = Connection::connect(cli, options, target)?;
-    let result = connection.import(&(options, statement).into(), !cli.verbosity.quiet)?;
+    let result = connection.import(&(&options.fields, statement).into(), !cli.verbosity.quiet)?;
     let data = result
         .structured_content
         .ok_or(CommandError::ResultUnavailable)?;
     if result.is_error == Some(true) {
         return Err(CommandError::Rejected {
-            code: data["code"].as_str().unwrap_or("IMPORT_FAILED").into(),
+            code: data["code"]
+                .as_str()
+                .map(ImportCode::from)
+                .unwrap_or_default(),
             message: data["message"]
                 .as_str()
                 .unwrap_or("Statement import failed.")

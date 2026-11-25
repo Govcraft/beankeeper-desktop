@@ -1,16 +1,30 @@
-use std::{collections::HashMap, str::FromStr, time::Instant};
+use std::{collections::HashMap, fmt, str::FromStr, time::Instant};
 
 use chrono::Utc;
 use mti::prelude::{MagicTypeId, MagicTypeIdExt, V7};
 use rmcp::model::{CreateTaskResult, DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus};
 use serde_json::{Map, Value};
 
-use super::{ImportError, Principal, RETENTION};
+use super::{ImportError, Principal, RETENTION, protocol::PollInterval};
 
 pub(super) const TASKS: &str = "io.modelcontextprotocol/tasks";
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct ImportTaskId(MagicTypeId);
+
+impl ImportTaskId {
+    const PREFIX: &str = "statement_task";
+
+    fn new() -> Self {
+        Self(Self::PREFIX.create_type_id::<V7>())
+    }
+}
+
+impl fmt::Display for ImportTaskId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 impl FromStr for ImportTaskId {
     type Err = ImportError;
@@ -19,7 +33,7 @@ impl FromStr for ImportTaskId {
         let id = value
             .parse::<MagicTypeId>()
             .map_err(|_| ImportError::Unknown)?;
-        if id.prefix().as_str() != "statement_task" {
+        if id.prefix().as_str() != Self::PREFIX {
             return Err(ImportError::Unknown);
         }
         Ok(Self(id))
@@ -111,16 +125,11 @@ impl Tasks {
         {
             return Err(ImportError::Busy);
         }
-        let id = ImportTaskId("statement_task".create_type_id::<V7>());
+        let id = ImportTaskId::new();
         let timestamp = Utc::now().to_rfc3339();
-        let task = Task::new(
-            id.0.to_string(),
-            TaskStatus::Working,
-            &timestamp,
-            &timestamp,
-        )
-        .with_status_message(Phase::Queued.message())
-        .with_poll_interval_ms(500);
+        let task = Task::new(id.to_string(), TaskStatus::Working, &timestamp, &timestamp)
+            .with_status_message(Phase::Queued.message())
+            .with_poll_interval_ms(PollInterval::default().into());
         self.0.insert(
             id.clone(),
             ImportTask {
