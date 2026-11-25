@@ -240,6 +240,14 @@ rejected because they are outside the UI Host allowlist. A wildcard listener acc
 connections; a specific remote-interface listener needs a client supplying an
 allowed Host and network access to that interface.
 
+## Import bank statements
+
+Share a CSV, OFX or QFX statement with your agent. Compatible Streamable HTTP
+clients transfer the attachment directly to Desktop and can track a large
+import in the background. From the shell, `bk import` returns the same audit
+receipt and counts for recorded rows, duplicates and entries that need
+categorization. [Statement import guide](docs/statement-imports.md)
+
 ## Optional detail links
 
 Answer in words first. Agents can then offer a matching Desktop view with

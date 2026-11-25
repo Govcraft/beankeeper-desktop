@@ -8,6 +8,8 @@ pub mod browser;
 pub mod changes;
 pub mod cli;
 pub mod demo;
+#[doc(hidden)]
+pub mod imports;
 mod instance;
 mod ledger_rows;
 pub mod license;

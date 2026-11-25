@@ -9,7 +9,7 @@ use beankeeper_cli::{
 use beankeeper_desktop::{
     DesktopError, agents, bridge, browser, changes,
     cli::{self, OpenOptions, ServeOptions},
-    demo, links, onboarding, product, server, service, setup, updates,
+    demo, imports, links, onboarding, product, server, service, setup, updates,
 };
 use clap::{FromArgMatches, parser::ValueSource};
 
@@ -29,6 +29,7 @@ enum DesktopCommand {
     Bridge(bridge::BridgeOptions),
     Extension,
     Demo(demo::DemoOptions),
+    Import(Box<imports::command::ImportOptions>),
     Ledger,
 }
 
@@ -55,6 +56,9 @@ impl DesktopCommand {
                 service::ServiceOptions::from_arg_matches(options).map(Self::Service)
             }
             Some(("demo", options)) => demo::DemoOptions::from_arg_matches(options).map(Self::Demo),
+            Some(("import", options)) => imports::command::ImportOptions::from_arg_matches(options)
+                .map(Box::new)
+                .map(Self::Import),
             Some(("license", options)) => {
                 product::LicenseOptions::from_arg_matches(options).map(Self::License)
             }
@@ -84,16 +88,13 @@ fn main() -> ExitCode {
     let matches = cli::command().get_matches();
     let command = DesktopCommand::from_matches(&matches).unwrap_or_else(|error| error.exit());
     let result = match command {
+        DesktopCommand::Import(options) => {
+            let ledger = desktop_ledger_options(&matches);
+            return imports::command::run(&options, &ledger, selected_books(&matches, &ledger));
+        }
         DesktopCommand::Link(options) => {
-            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
-                .unwrap_or_else(|error| error.exit());
-            let books = if matches.value_source("db") == Some(ValueSource::DefaultValue) {
-                service::LinkBooks::ManagedOrDefault(&ledger.db)
-            } else {
-                service::LinkBooks::Explicit(&ledger.db)
-            };
-            links::run(*options, &ledger, books)
+            let ledger = desktop_ledger_options(&matches);
+            links::run(*options, &ledger, selected_books(&matches, &ledger))
         }
         DesktopCommand::Agents(options) => {
             let json = matches.get_flag("json")
@@ -177,6 +178,21 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn desktop_ledger_options(matches: &clap::ArgMatches) -> Cli {
+    let mut ledger = cli::ledger_options(matches).unwrap_or_else(|error| error.exit());
+    ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(matches)
+        .unwrap_or_else(|error| error.exit());
+    ledger
+}
+
+fn selected_books<'a>(matches: &clap::ArgMatches, ledger: &'a Cli) -> service::LinkBooks<'a> {
+    if matches.value_source("db") == Some(ValueSource::DefaultValue) {
+        service::LinkBooks::ManagedOrDefault(&ledger.db)
+    } else {
+        service::LinkBooks::Explicit(&ledger.db)
     }
 }
 
