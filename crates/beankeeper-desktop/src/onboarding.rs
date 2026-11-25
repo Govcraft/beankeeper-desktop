@@ -199,15 +199,7 @@ pub fn run_status(mut cli: Cli) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if use_json {
-                let envelope = Envelope {
-                    ok: false,
-                    meta,
-                    data: None::<SetupReport>,
-                    error: Some(EnvelopeError {
-                        code: error.code(),
-                        message: error.to_string(),
-                    }),
-                };
+                let envelope = Envelope::failure(meta, &error);
                 match serde_json::to_string_pretty(&envelope) {
                     Ok(response) => eprintln!("{response}"),
                     Err(_) => error.report(true, None),

@@ -155,6 +155,11 @@ Use `bk setup status --json` or the `setup_status` MCP tool to check setup
 progress. Both report the ledger counts and suggest the next step. For details
 on a particular book, use `bk setup book-show` or `ledger_setup_book_show`.
 
+Complete a monthly statement with `bk reconcile statement` or the
+`reconcile_statement` MCP tool. If the ending balances differ, the
+`STATEMENT_DISCREPANCY` error includes both balances and their difference in
+`details`. The statement stays open and the clearings are preserved.
+
 `bk serve` requires an existing ledger and resolves the passphrase once without
 prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
 `BEANKEEPER_PASSPHRASE_CMD`, then the stored credential for setup-enrolled ledgers.

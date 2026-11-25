@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Build Desktop against current Beankeeper main, preserving named setup and audit errors and exposing structured statement discrepancy details through the upstream CLI and MCP tools.
 - The transaction register hides reversed and cancelled pairs by default, with a checkbox and shareable links to include both entries.
 - Tailor encrypted fictional demo books to a short chat interview with `demo_start` or `bk demo start --profile`.
 - Open and pair the default browser on demand with `bk open` or the local `service_open` MCP tool. Desktop restores the requested view after pairing.
