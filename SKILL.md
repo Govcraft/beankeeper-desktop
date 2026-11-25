@@ -620,21 +620,31 @@ The import uses existing rules and the suspense account for unmatched entries.
 
 ### Import a statement
 
-Ask the owner to attach or share their CSV, OFX or QFX statement in chat.
-Establish the book, bank account, currency, date range and any earlier imports
-before writing. Use the book's distinct suspense account for entries without
-a matching rule. Call `ledger_setup_statement_import` with top-level
-`company`, `reference`, `bank`, `suspense`, `currency`, `format` and `content`.
-Send the bank and suspense account codes and the UTF-8 statement contents,
-up to 1 MiB and 5,000 rows. Use `format: "csv"` for CSV or `format: "ofx"`
-for OFX or QFX. For CSV, supply `csv` only for the mapping you need. Its
-fields are `date_col`, `description_col`, `amount_col`, `reference_col`,
-`date_format` and `positive_amount` (`inflow` or `outflow`). Use a new stable
-reference for each import and reuse the unchanged request for retries.
-Report the `created` and `preexisting` counts. Use `txn_show` with `company`
-and the returned transaction `id` to identify postings to suspense that
-still need categorization. Use the [posted category correction](#fix-a-posted-category)
-when the right category is known.
+Ask the owner to share their CSV, OFX or QFX statement in chat. Establish the
+book, bank account, currency, date range and any earlier imports before writing.
+Use the book's distinct suspense account for entries without a matching rule.
+
+If the installed `ledger_setup_statement_import` schema offers `file`, use the
+client's attachment picker to bind the statement to that argument. The client
+transfers the file directly to the local Beankeeper server. Keep its bytes out of
+the conversation and let the client handle the upload and task polling.
+For a client without file transfer, use a local file with `bk import` if you
+have shell access, or use the tool’s `content` argument for UTF-8 text.
+
+Send `company`, `reference`, `bank`, `suspense`, `currency` and `format`.
+Use `csv` for CSV or `ofx` for OFX and QFX, up to 1 MiB and 5,000 rows.
+For CSV, supply `csv` only for the mapping you need. Its fields are `date_col`,
+`description_col`, `amount_col`, `reference_col`, `date_format` and
+`positive_amount` (`inflow` or `outflow`). Use a new stable reference for each
+import and reuse the same reference and source when retrying.
+
+Once the import finishes, tell the owner how many transactions were recorded,
+skipped as duplicates or need categorization. Use `counts` when available, or
+count the `created` and `preexisting` rows and use `txn_show` to find new entries
+posted to suspense. Report any pending proposals separately. Offer the returned
+receipt and Desktop undo link for a direct import.
+
+[Statement imports from chat and the CLI](docs/statement-imports.md)
 
 ### Report each setup change and offer undo
 
