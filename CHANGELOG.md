@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.30] - 2026-11-25
+
 - Register and diagnose Beankeeper for local Codex in the ChatGPT desktop app with `bk agents connect chatgpt-codex` and `bk agents doctor chatgpt-codex`.
 - Open the latest signed Claude Desktop extension or get its verified local path with `bk agents extension` or the `agents_extension` MCP tool.
 - Import CSV, OFX, and QFX attachments over local MCP, track larger imports as Tasks, and get the same audited receipt and counts with `bk import`.
