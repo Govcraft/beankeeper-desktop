@@ -539,6 +539,10 @@ fn assert_managed_stdio_launchers(
             .into());
         };
         assert_eq!(initialized["result"]["serverInfo"]["name"], "beankeeper");
+        assert_eq!(
+            initialized["result"]["capabilities"]["extensions"][rmcp::model::SKILLS_EXTENSION_ID],
+            json!({})
+        );
         let instructions = initialized["result"]["instructions"]
             .as_str()
             .ok_or("instructions")?;
@@ -551,7 +555,88 @@ fn assert_managed_stdio_launchers(
         assert!(!instructions.contains("docs_url"));
         assert!(!state.join("claude-extension").exists());
         assert_managed_link(tools, link, navigation, base)?;
+        assert_managed_skill_discovery(configured().args(args))?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_managed_skill_discovery(command: &mut std::process::Command) -> TestResult {
+    use rmcp::model::SKILLS_EXTENSION_ID;
+
+    let mut pipe = McpPipe::spawn(command)?;
+    let discovered = pipe.request("server/discover", &inline_params(json!({})))?;
+    assert_eq!(
+        discovered["capabilities"]["extensions"][SKILLS_EXTENSION_ID],
+        json!({})
+    );
+    assert_eq!(discovered["capabilities"]["resources"], json!({}));
+    let listed = pipe.request("skills/list", &inline_params(json!({})))?;
+    let uri = &listed["skills"][0]["uri"];
+    assert_eq!(uri, "skill://beankeeper-desktop/SKILL.md");
+    let resources = pipe.request("resources/read", &inline_params(json!({"uri":uri})))?;
+    assert_eq!(
+        resources["contents"][0]["text"],
+        include_str!("../../../SKILL.md")
+    );
+    let list = pipe.request("tools/list", &inline_params(json!({})))?;
+    let tools = list["tools"].as_array().ok_or("missing managed tools")?;
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "company_list"),
+        "{list}"
+    );
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "setup_status"),
+        "{list}"
+    );
+    let companies = pipe.request(
+        "tools/call",
+        &inline_params(json!({"name":"company_list","arguments":{}})),
+    )?;
+    assert_ne!(companies["isError"], true, "{companies}");
+    assert_eq!(companies["content"][0]["type"], "text");
+    assert_inline_demo_target(&mut pipe, &companies)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_inline_demo_target(pipe: &mut McpPipe, original_companies: &Value) -> TestResult {
+    use beankeeper_cli::mcp::LEDGER_TARGET_META_KEY;
+
+    let transactions = inline_params(json!({"name":"txn_list","arguments":{"company":"personal"}}));
+    let original_transactions = demo_payload(&pipe.request("tools/call", &transactions)?)?;
+    let started = pipe.request("tools/call", &inline_params(json!({"name":"demo_start"})))?;
+    assert_eq!(started["structuredContent"]["state"], "active", "{started}");
+    let target = &started["structuredContent"]["target"];
+    let request = inline_params(json!({"name":"company_list"}));
+    let demo = pipe.request("tools/call", &request)?;
+    assert_eq!(demo["_meta"][LEDGER_TARGET_META_KEY], *target);
+    assert_ne!(demo_payload(&demo)?, demo_payload(original_companies)?);
+
+    let post = inline_params(json!({"name":"txn_post","arguments":demo_posting()}));
+    let posted = pipe.request("tools/call", &post)?;
+    assert_eq!(posted["_meta"][LEDGER_TARGET_META_KEY], *target);
+    assert_eq!(demo_payload(&posted)?["created"], true, "{posted}");
+
+    let mut demo_request = request.clone();
+    demo_request["_meta"][LEDGER_TARGET_META_KEY] = json!("missing-demo");
+    let missing = pipe.request("tools/call", &demo_request)?;
+    assert_eq!(missing["structuredContent"]["code"], "DEMO_UNAVAILABLE");
+    assert_eq!(missing["_meta"][LEDGER_TARGET_META_KEY], "missing-demo");
+    demo_request["_meta"][LEDGER_TARGET_META_KEY] = target.clone();
+    let explicit = pipe.request("tools/call", &demo_request)?;
+    assert_eq!(explicit["_meta"][LEDGER_TARGET_META_KEY], *target);
+
+    let removed = pipe.request("tools/call", &inline_params(json!({"name":"demo_remove"})))?;
+    assert_eq!(removed["structuredContent"]["state"], "removed");
+    let startup = pipe.request("tools/call", &request)?;
+    assert!(startup["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    assert_eq!(demo_payload(&startup)?, demo_payload(original_companies)?);
+    let startup = pipe.request("tools/call", &transactions)?;
+    assert!(startup["_meta"].get(LEDGER_TARGET_META_KEY).is_none());
+    assert_eq!(demo_payload(&startup)?, original_transactions);
+    let stale = pipe.request("tools/call", &demo_request)?;
+    assert_eq!(stale["structuredContent"]["code"], "DEMO_UNAVAILABLE");
     Ok(())
 }
 
@@ -1839,6 +1924,107 @@ fn managed_stdio_demo_does_not_fall_back_when_another_client_removes_it() -> Tes
     Ok(())
 }
 
+#[test]
+fn extension_publishes_the_bundled_skill_before_setup() -> TestResult {
+    use rmcp::model::{SKILLS_EXTENSION_ID, Skill, SkillResources};
+    const URI: &str = "skill://beankeeper-desktop/SKILL.md";
+
+    let root = tempfile::tempdir()?;
+    let mut command = isolated(root.path());
+    command.args(["mcp", "extension"]);
+    let mut pipe = McpPipe::spawn(&mut command)?;
+    assert_eq!(
+        pipe.frame("server/discover", &json!({}))?["error"]["code"],
+        -32602
+    );
+    let discover = pipe.request("server/discover", &inline_params(json!({})))?;
+    assert_eq!(discover["resultType"], "complete");
+    assert_eq!(
+        discover["capabilities"]["extensions"][SKILLS_EXTENSION_ID],
+        json!({})
+    );
+    assert_eq!(discover["capabilities"]["resources"], json!({}));
+    let instructions = discover["instructions"].as_str().ok_or("instructions")?;
+    for text in [
+        "call `demo_start` with a fictional `profile`",
+        "txn_recategorize",
+        "audit_undo",
+        "txn_reverse",
+        "changes_since",
+        "minor units",
+        "receipt number",
+        "You could ask:",
+    ] {
+        assert!(instructions.contains(text), "missing {text}");
+    }
+    let listed = pipe.request("skills/list", &inline_params(json!({})))?;
+    assert_eq!(listed["resultType"], "complete");
+    assert!(listed["ttlMs"].is_number());
+    assert!(listed["cacheScope"].is_string());
+    assert!(listed.get("nextCursor").is_none());
+    let [entry] = listed["skills"]
+        .as_array()
+        .ok_or("missing skill list")?
+        .as_slice()
+    else {
+        return Err("expected exactly one skill".into());
+    };
+    let skill: Skill = serde_json::from_value(entry.clone())?;
+    assert_eq!(skill.uri, URI);
+    assert_eq!(skill.name(), "beankeeper-desktop");
+    let params = inline_params(json!({"uri":URI}));
+    assert_eq!(pipe.request("skills/get", &params)?["skill"], *entry);
+    let read = pipe.request("resources/read", &params)?;
+    let file = &read["contents"][0];
+    assert_eq!(file["uri"], URI);
+    assert_eq!(file["mimeType"], "text/markdown");
+    let text = file["text"].as_str().ok_or("missing skill text")?;
+    assert_eq!(text, include_str!("../../../SKILL.md"));
+    let SkillResources::Files(files) = &skill.resources else {
+        return Err("expected the embedded skill manifest".into());
+    };
+    let [manifest] = files.as_slice() else {
+        return Err("expected only the embedded SKILL.md".into());
+    };
+    assert_eq!(manifest.uri, URI);
+    manifest.verify(text.as_bytes())?;
+    skill.validate()?;
+    let resources = pipe.request("resources/list", &inline_params(json!({})))?;
+    assert_eq!(
+        resources["resources"][0]["description"],
+        skill.frontmatter.description
+    );
+    for method in ["skills/get", "resources/read"] {
+        for invalid in [
+            json!({}),
+            json!({"uri":"file:///unrelated/SKILL.md"}),
+            json!({"uri":42}),
+        ] {
+            assert_eq!(
+                pipe.frame(method, &inline_params(invalid))?["error"]["code"],
+                -32602
+            );
+        }
+    }
+    let status = pipe.request(
+        "tools/call",
+        &inline_params(json!({"name":"setup_status","arguments":{}})),
+    )?;
+    assert_eq!(status["structuredContent"]["state"], "not_started");
+    assert!(!root.path().join("state").exists());
+    assert!(!root.path().join("data").exists());
+    Ok(())
+}
+
+fn inline_params(mut params: Value) -> Value {
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientInfo":{"name":"skill-test","version":"1"},
+        "io.modelcontextprotocol/clientCapabilities":{}
+    });
+    params
+}
+
 struct McpPipe {
     child: std::process::Child,
     input: std::process::ChildStdin,
@@ -1853,26 +2039,7 @@ impl McpPipe {
     }
 
     fn start(command: &mut std::process::Command) -> TestResult<Self> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let input = child.stdin.take().ok_or("missing stdin")?;
-        let output = child.stdout.take().ok_or("missing stdout")?;
-        let (send, frames) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(output).lines() {
-                if send.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let mut pipe = Self {
-            child,
-            input,
-            frames,
-            id: 0,
-        };
+        let mut pipe = Self::spawn(command)?;
         pipe.request(
             "initialize",
             &json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{
@@ -1888,11 +2055,40 @@ impl McpPipe {
         Ok(pipe)
     }
 
+    fn spawn(command: &mut std::process::Command) -> TestResult<Self> {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let input = child.stdin.take().ok_or("missing stdin")?;
+        let output = child.stdout.take().ok_or("missing stdout")?;
+        let (send, frames) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            input,
+            frames,
+            id: 0,
+        })
+    }
+
     fn tool(&mut self, tool: &str, arguments: &Value) -> TestResult<Value> {
         self.request("tools/call", &json!({"name":tool,"arguments":arguments}))
     }
 
     fn request(&mut self, method: &str, params: &Value) -> TestResult<Value> {
+        let frame = self.frame(method, params)?;
+        assert!(frame.get("error").is_none(), "{frame}");
+        Ok(frame["result"].clone())
+    }
+
+    fn frame(&mut self, method: &str, params: &Value) -> TestResult<Value> {
         self.id += 1;
         let id = self.id;
         writeln!(
@@ -1905,8 +2101,7 @@ impl McpPipe {
             let frame: Value =
                 serde_json::from_str(&self.frames.recv_timeout(Duration::from_secs(20))??)?;
             if frame["id"] == id {
-                assert!(frame.get("error").is_none(), "{frame}");
-                return Ok(frame["result"].clone());
+                return Ok(frame);
             }
         }
     }

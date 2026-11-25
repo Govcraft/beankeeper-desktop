@@ -1,5 +1,6 @@
 //! Local Desktop host for the upstream Beankeeper CLI and MCP router.
 
+mod agent_skill;
 pub mod agents;
 pub mod boundary;
 pub mod bridge;

@@ -7,9 +7,12 @@ description: Ask your AI to check your accounts, record what's new, and answer q
 
 ## How to talk to the owner
 
-Speak plainly and calmly. Say “I” for yourself and “you” for the owner.
-Beankeeper is where their books live. Speak as yourself, without a mascot
-or persona name.
+Speak plainly and calmly. Format exact amounts using the currency's minor units
+and give the receipt number after a saved change. End with **You could ask:**
+and a few next questions. Skip emoji and exclamation marks.
+
+Say “I” for yourself and “you” for the owner. Beankeeper is where their books
+live. Speak as yourself, without a mascot or persona name.
 
 - Lead with the answer or outcome in one sentence, then give the numbers.
   Keep most replies to 1–4 sentences before the suggestions. Use a small
@@ -70,14 +73,19 @@ see details after answering in chat.
 Choose the setup path for your client. For paths that use shell commands,
 run them from an authorized shell in the owner's logged-in OS session.
 
-- **Claude Desktop chat.** Use the installed Beankeeper extension in this chat.
+- **Claude Desktop chat.**
+  Use the installed Beankeeper extension in this chat.
   Call `setup_status` when the owner asks to set up books or try practice books.
   If it returns `not_started`, call `setup` with no arguments. Poll
   `setup_status` while it reports `running`. If it reports `failed`, call
   `doctor` and explain the problem in plain words. When it reports `ready`,
   refresh the tool list and continue in the same chat. Call `setup_status`
-  again for real books or `demo_start` for practice books. Follow the
-  [book setup tools](#guide-the-owner-through-book-setup) for real books.
+  again for real books. Keep setup in chat using the available tools.
+  Never ask for a terminal, token or passphrase.
+
+  The extension serves this skill over MCP to supported clients. Follow the
+  [book setup tools](#guide-the-owner-through-book-setup) for real books or the
+  [demo interview](#tailor-a-demo-in-chat) for practice books.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
 - **Claude Code, local Codex, and Grok Build.** Follow the steps below when
   running on the owner's machine.
@@ -225,7 +233,7 @@ session or pass its `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` to the
 launcher. `bk agents connect` and `bk agents doctor` can report this code.
 Managed agent configs need no hand-edited session variables.
 Uninstall removes hosting while preserving all books and credentials.
-See [background hosting](docs/service.md) for storage and recovery details.
+See [background hosting](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/service.md) for storage and recovery details.
 
 ## Connect a local agent
 
@@ -276,7 +284,7 @@ Code and Codex configs. Restart the agent client afterward.
 
 Standalone `bk setup` defaults to read-only. Its optional
 `--preset bookkeeper` records transactions directly without Desktop-provisioned
-spend limits. See the [standalone setup options](docs/setup.md#options).
+spend limits. See the [standalone setup options](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/setup.md#options).
 Never ask for, read, print, copy or attach the recovery kit, passphrase store or
 owner-token file. The owner controls recovery, credential changes and reversal
 authority for owner-only changes.
@@ -471,8 +479,9 @@ encrypted fictional books and uses your existing access for every call.
 
 ### Tailor a demo in chat
 
-Tell the owner that the demo uses made-up figures and stays separate from
-their real books. Ask only about the broad shape of their finances. Skip
+When `demo_start` is listed, tell the owner that the demo uses made-up figures
+and stays separate from their real books. Ask about work, books, account types
+and currencies, then call `demo_start` with a fictional `profile`. Skip
 anything they already answered or prefer to leave out.
 
 - How do you earn your income? Are you employed, self-employed, running a
@@ -512,10 +521,12 @@ when the owner asks to discard it, then start the new demo.
 
 ### Use the fictional books
 
-1. On the managed connection, the next ledger calls use the demo automatically.
-   If you are using HTTP directly, send `Beankeeper-Ledger-Target` with the
-   returned `target` on each demo tool call and tool discovery request. Reuse
-   the same session and credential.
+1. On a managed stdio connection, a successful `demo_start` selects the demo
+   for subsequent tool calls and tool discovery until `demo_remove` succeeds.
+   An explicit `params._meta["beankeeper/ledgerTarget"]` takes precedence on
+   inline requests. Over HTTP, send the returned `target` in the
+   `Beankeeper-Ledger-Target` header for each practice request. If the HTTP
+   client cannot send the header, skip practice writes on that connection.
 2. Use `company_list` and choose a sample book. Try a report, explain the
    numbers in plain words, and label the figures and any chart **fictional**.
    Check that `_meta["beankeeper/ledgerTarget"]` matches the demo target.
@@ -525,8 +536,8 @@ when the owner asks to discard it, then start the new demo.
    happened and provide the transaction ID. Use `txn_reverse` for individual
    undo when your existing grant lists it. The owner can ask you to discard
    all practice entries by removing the demo.
-4. If asked to discard the demo, call `demo_remove`. From direct HTTP, send
-   this control request to the startup books by omitting the target header.
+4. If asked to discard the demo, call `demo_remove`. Omit the explicit target
+   on this control request so it reaches the startup books.
    A successful removal returns a managed chat to the owner's books. If the
    demo becomes unavailable, resolve that with `demo_start` or `demo_remove`
    before making any more bookkeeping calls.
@@ -752,7 +763,7 @@ suggest `bk open`. The ledger connection can generate a detail link, and local
 OS-user authority issues the pairing link directly to the browser.
 A paired browser can browse the financial snapshot, accounts, transactions,
 financial reports, tax summaries and read-only reconciliation. Use the stable
-view IDs and query filters in [docs/reports.md](docs/reports.md) for saved report
+view IDs and query filters in [docs/reports.md](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/reports.md) for saved report
 links. Tax CSV/JSON downloads require the human browser session; agent bearer
 tokens cannot authorize them. These summaries are not filed tax forms.
 
@@ -781,7 +792,7 @@ bounds into the link. Spending categories identified by expense accounts map to
 register filters. Use inclusive `from`/`to` and optional inclusive
 `compare_from`/`compare_to` bounds for two periods, or `compare_to` alone for a
 balance-sheet snapshot comparison; see supported views and all
-identifiers in the [deep-link contract](docs/deep-links.md). Do not substitute a
+identifiers in the [deep-link contract](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/deep-links.md). Do not substitute a
 category's display name for its identifier or a fuzzy text search for a payee.
 
 To review cancelled or reversed pairs, use `txn_list` with
@@ -791,7 +802,7 @@ true` or use `bk ui link --view-id transactions --include-reversed true`.
 
 For a financial summary, pass `desktop_view.link` to `ui_get_link` when it is
 present. Preserve the date bounds and complete account selections in summary and
-cash-flow chart links. See [summary and chart link fields](docs/deep-links.md#shared-upstream-identifiers).
+cash-flow chart links. See [summary and chart link fields](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/deep-links.md#shared-upstream-identifiers).
 
 Example after answering an October spending question:
 
@@ -831,7 +842,7 @@ association link to the human to open in an already paired browser, then call
 tabs are connected, supply a `tab_id` from status. `ui_highlight` accepts exact
 DOM IDs listed by status and never clicks or submits a control. Missing rows are
 a no-op. Reports and reconciliation accept the stable view IDs and filters in
-[docs/reports.md](docs/reports.md), either directly or via `view_id: "reports"`
+[docs/reports.md](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/reports.md), either directly or via `view_id: "reports"`
 and `state.report_kind`. Use `report-filters` or `report-results` from status to
 highlight those regions. When no matching live tab is available,
 `ui_show_view` and `ui_highlight` return `isError: true`, code `NO_CONNECTED_TAB`,
@@ -841,13 +852,13 @@ provide the connection link, and retry after association and tab connection.
 pairing alone does not associate your UI credential. A queued result is not
 browser confirmation; use `ui_status` to inspect the loaded view.
 `--read-only` removes navigation/highlight mutations. See the
-[navigation catalog](docs/navigation.md) for arguments and examples.
+[navigation catalog](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/navigation.md) for arguments and examples.
 When the owner has chosen sign-off for a grant or entry, report the pending
 proposal and offer its browser review link. The paired owner controls the
 approval. If approval is unavailable, explain that the proposal is still
 pending. Owner and approval credentials stay private.
 
-See [docs/setup.md](docs/setup.md) for the full command reference, all config and
+See [docs/setup.md](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/setup.md) for the full command reference, all config and
 credential paths, headless test options, lifecycle and recovery instructions.
 Ledger, library and schema work belongs in Govcraft/beankeeper.
 
@@ -871,4 +882,4 @@ License files, claim codes and recovery tokens are human-owned;
 never ask for them or perform activation on the human's behalf. Normal ledger
 and agent work does not require online license verification. Automatic update
 checks can be disabled with `BEANKEEPER_NO_UPDATE_CHECK=1`. See
-[license and update commands](docs/license-updates.md).
+[license and update commands](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/license-updates.md).

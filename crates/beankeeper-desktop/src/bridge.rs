@@ -6,6 +6,7 @@
 //! notification stream is not needed for them.
 
 mod extension;
+mod protocol;
 
 use std::{
     error::Error,
@@ -17,18 +18,23 @@ use std::{
 
 use beankeeper_cli::mcp::{LEDGER_TARGET_HEADER, NamedLedgerTarget};
 use clap::Args;
+use protocol::{BridgeRequest, MethodKind};
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, Response},
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
     redirect::Policy,
 };
-use rmcp::model::{CallToolResult, JsonObject, ListToolsResult, Tool};
+use rmcp::{
+    ErrorData,
+    model::{CacheScope, CallToolResult, ErrorCode, JsonObject, ListToolsResult, Tool},
+};
 use secrecy::{ExposeSecret, zeroize::Zeroizing};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    agent_skill,
     demo::{DemoError, DemoOperation, DemoReport, target_meta},
     onboarding::STATUS_TOOL,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
@@ -73,6 +79,8 @@ pub enum BridgeError {
     Rejected(StatusCode),
     /// The client or server sent malformed or oversized JSON-RPC.
     Protocol,
+    /// The embedded agent skill could not supply valid MCP guidance.
+    EmbeddedSkill(ErrorData),
     /// The managed service rejected the read-only diagnostic call.
     ToolFailed,
 }
@@ -107,6 +115,7 @@ impl fmt::Display for BridgeError {
             Self::Rejected(status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)) => write!(f, "Desktop rejected MCP authentication (HTTP {status}); ask the owner to check or renew the agent credential"),
             Self::Rejected(status) => write!(f, "Desktop rejected the MCP bridge request (HTTP {status}); check the running server"),
             Self::Protocol => f.write_str("MCP bridge received malformed or oversized JSON-RPC"),
+            Self::EmbeddedSkill(error) => f.write_str(&error.message),
             Self::ToolFailed => f.write_str("Desktop rejected the read-only MCP diagnostic. Check the agent's ledger read access."),
         }
     }
@@ -174,7 +183,7 @@ fn run_connected(
     let mut transport = connected_transport(
         url,
         token_file,
-        Some(AgentAccess::mcp_instructions()),
+        Some(AgentAccess::mcp_instructions().map_err(BridgeError::EmbeddedSkill)?),
         Duration::from_secs(120),
     )?;
     transport.managed = managed_books.map(|books| ManagedConnection {
@@ -289,7 +298,7 @@ struct ManagedConnection {
     initialize: Option<Value>,
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 enum DemoSelection {
     #[default]
     Startup,
@@ -298,11 +307,8 @@ enum DemoSelection {
 }
 
 impl DemoSelection {
-    fn named(&self) -> Option<&NamedLedgerTarget> {
-        match self {
-            Self::Active(target) => Some(target),
-            Self::Startup | Self::Unavailable => None,
-        }
+    fn for_request(&self, explicit: Option<&NamedLedgerTarget>) -> Self {
+        explicit.cloned().map_or_else(|| self.clone(), Self::Active)
     }
 
     fn begin(&mut self, operation: DemoOperation) -> bool {
@@ -373,6 +379,18 @@ fn read_message(input: &mut impl BufRead) -> Result<Option<Value>, BridgeError> 
     }
 }
 
+fn rpc_reply(
+    output: &mut impl Write,
+    id: &Value,
+    result: Result<Value, ErrorData>,
+) -> Result<(), BridgeError> {
+    let message = match result {
+        Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+        Err(error) => json!({"jsonrpc":"2.0", "id":id, "error":error}),
+    };
+    write_message(output, &message)
+}
+
 impl Transport {
     fn forward(
         &mut self,
@@ -390,9 +408,43 @@ impl Transport {
         message: &Value,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
+        let request = match BridgeRequest::try_from(message) {
+            Ok(request) => request,
+            Err(error) => {
+                return message
+                    .get("id")
+                    .map_or(Ok(()), |id| rpc_reply(output, id, Err(error)));
+            }
+        };
+        self.forward_negotiated(&request, output)
+    }
+
+    fn forward_negotiated(
+        &mut self,
+        request: &BridgeRequest<'_>,
+        output: &mut impl Write,
+    ) -> Result<(), BridgeError> {
+        let message = request.message();
+        let inline = request.inline();
+        if let MethodKind::Skill(method) = request.kind()
+            && self.instructions.is_some()
+        {
+            return message.get("id").map_or(Ok(()), |id| {
+                let result = if self.protocol.is_some() || inline.is_some() {
+                    agent_skill::result(method, &message["params"])
+                } else {
+                    Err(ErrorData::new(
+                        ErrorCode(-32002),
+                        "Initialize Beankeeper first.",
+                        None,
+                    ))
+                };
+                rpc_reply(output, id, result)
+            });
+        }
         self.refresh_access(output)?;
-        let tool_request = message["method"] == "tools/call";
-        let tool_list = message["method"] == "tools/list";
+        let tool_request = request.kind() == MethodKind::ToolsCall;
+        let tool_list = request.kind() == MethodKind::ToolsList;
         let operation = if self.managed.is_some() && tool_request {
             message["params"]["name"]
                 .as_str()
@@ -402,7 +454,7 @@ impl Transport {
         };
         if let Some(operation) = operation {
             let entering_demo = self.demo.begin(operation);
-            let replies = self.exchange_startup(message, output)?;
+            let replies = self.exchange_startup(request, output)?;
             let changed = if let Some(reply) = replies
                 .iter()
                 .find(|reply| reply.get("id") == message.get("id"))
@@ -411,17 +463,26 @@ impl Transport {
             } else {
                 false
             };
-            if entering_demo || changed {
+            if inline.is_none() && (entering_demo || changed) {
                 tools_changed(output)?;
             }
             return Ok(());
         }
-        if (tool_request || tool_list) && !matches!(self.demo, DemoSelection::Startup) {
-            return self.exchange_demo(message, tool_list, output);
+        if tool_request || tool_list {
+            let explicit_target = inline.and_then(protocol::InlineProtocol::ledger_target);
+            match self.demo.for_request(explicit_target) {
+                DemoSelection::Startup => {}
+                DemoSelection::Unavailable => {
+                    return self.exchange_demo(request, tool_list, None, output);
+                }
+                DemoSelection::Active(target) => {
+                    return self.exchange_demo(request, tool_list, Some(&target), output);
+                }
+            }
         }
         if let Some(managed) = &self.managed
-            && self.protocol.is_some()
-            && message["method"] == "tools/call"
+            && (self.protocol.is_some() || inline.is_some())
+            && tool_request
             && matches!(
                 message["params"]["name"].as_str(),
                 Some(service::ACCESS_TOOL | service::OPEN_TOOL)
@@ -436,8 +497,8 @@ impl Transport {
             self.refresh_access(output)?;
             return Ok(());
         }
-        self.exchange_startup(message, output)?;
-        if message["method"] == "initialize"
+        self.exchange_startup(request, output)?;
+        if request.kind() == MethodKind::Initialize
             && let Some(managed) = &mut self.managed
         {
             managed.initialize = Some(message.clone());
@@ -447,18 +508,18 @@ impl Transport {
 
     fn exchange_startup(
         &mut self,
-        message: &Value,
+        request: &BridgeRequest<'_>,
         output: &mut impl Write,
     ) -> Result<Vec<Value>, BridgeError> {
-        match self.exchange(message, output) {
+        match self.exchange_target(request, None, output) {
             Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
                 if self.refresh_access(output)? =>
             {
-                self.exchange(message, output)
+                self.exchange_target(request, None, output)
             }
             Err(error) if self.managed.is_some() && lost_session(&error) => {
                 self.reconnect()?;
-                self.exchange(message, output)
+                self.exchange_target(request, None, output)
             }
             result => result,
         }
@@ -466,17 +527,17 @@ impl Transport {
 
     fn exchange_demo(
         &mut self,
-        message: &Value,
+        request: &BridgeRequest<'_>,
         tool_list: bool,
+        target: Option<&NamedLedgerTarget>,
         output: &mut impl Write,
     ) -> Result<(), BridgeError> {
-        let target = self.demo.named().cloned();
-        if let Some(target) = &target {
-            let result = match self.exchange_target(message, Some(target), output) {
+        if let Some(target) = target {
+            let result = match self.exchange_target(request, Some(target), output) {
                 Err(BridgeError::Rejected(StatusCode::UNAUTHORIZED))
                     if self.refresh_access(output)? =>
                 {
-                    self.exchange_target(message, Some(target), output)
+                    self.exchange_target(request, Some(target), output)
                 }
                 result => result,
             };
@@ -486,14 +547,16 @@ impl Transport {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(id) = message.get("id") {
-            let meta = target.as_ref().map(target_meta);
+        if let Some(id) = request.message().get("id") {
+            let meta = target.map(target_meta);
             let result = if tool_list {
                 let mut tools = demo_tools();
                 if self.extension_tools {
                     tools.extend(extension::tools(false));
                 }
-                let mut result = ListToolsResult::with_all_items(tools);
+                let mut result = ListToolsResult::with_all_items(tools)
+                    .with_ttl_ms(0)
+                    .with_cache_scope(CacheScope::Private);
                 result.meta = meta;
                 serde_json::to_value(result)
             } else {
@@ -550,15 +613,18 @@ impl Transport {
         message: &Value,
         output: &mut impl Write,
     ) -> Result<Vec<Value>, BridgeError> {
-        self.exchange_target(message, None, output)
+        let request = BridgeRequest::try_from(message).map_err(|_| BridgeError::Protocol)?;
+        self.exchange_target(&request, None, output)
     }
 
     fn exchange_target(
         &mut self,
-        message: &Value,
+        exchange: &BridgeRequest<'_>,
         target: Option<&NamedLedgerTarget>,
         output: &mut impl Write,
     ) -> Result<Vec<Value>, BridgeError> {
+        let message = exchange.message();
+        let method = exchange.kind();
         let mut request = self
             .client
             .post(self.url.clone())
@@ -568,17 +634,18 @@ impl Transport {
         if let Some(target) = target {
             request = request.header(LEDGER_TARGET_HEADER, target.as_ref());
         }
-        if let Some(session) = &self.session {
-            request = request.header("Mcp-Session-Id", session);
-        }
-        if let Some(protocol) = &self.protocol {
-            request = request.header("MCP-Protocol-Version", protocol);
+        if let Some(protocol) = exchange.inline() {
+            request = protocol.http_headers(request);
+        } else {
+            if let Some(session) = &self.session {
+                request = request.header("Mcp-Session-Id", session);
+            }
+            if let Some(protocol) = &self.protocol {
+                request = request.header("MCP-Protocol-Version", protocol);
+            }
         }
         if self.extension_tools
-            && matches!(
-                message["method"].as_str(),
-                Some("initialize" | "notifications/initialized")
-            )
+            && matches!(method, MethodKind::Initialize | MethodKind::Initialized)
         {
             request = request.timeout(Duration::from_secs(5));
         }
@@ -589,11 +656,16 @@ impl Transport {
         if let Some(session) = response.headers().get("Mcp-Session-Id") {
             self.session = Some(session.clone());
         }
-        let initial = message.get("method").and_then(Value::as_str) == Some("initialize");
-        let tool_list = message["method"] == "tools/list";
+        let initial = method == MethodKind::Initialize;
+        let discovery = method == MethodKind::Discover;
+        let tool_list = method == MethodKind::ToolsList;
         let relay = ReplyContext {
             request_id: message.get("id"),
-            instructions: if initial { self.instructions } else { None },
+            instructions: if initial || discovery {
+                self.instructions
+            } else {
+                None
+            },
             managed_initialize: initial && self.managed.is_some(),
             supplemental_tools: match (tool_list, target, &self.managed) {
                 (true, Some(_), _) => SupplementalTools::Demo,
@@ -778,6 +850,9 @@ fn emit(
             existing.push(' ');
         }
         existing.push_str(instructions);
+        if let Some(capabilities) = result.get_mut("capabilities") {
+            agent_skill::advertise(capabilities);
+        }
     }
     if context
         .request_id

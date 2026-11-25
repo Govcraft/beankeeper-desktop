@@ -7,11 +7,12 @@ use beankeeper_cli::{
     identity::{VerifiedAgent, WriteMode},
 };
 use clap::{Args, ValueEnum};
+use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_with::{As, DisplayFromStr};
 
-use crate::service::ACCESS_TOOL;
+use crate::{agent_skill, service::ACCESS_TOOL};
 
 static READ_ONLY_NOTE: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -223,12 +224,13 @@ impl AgentAccess {
         }
     }
 
-    pub(crate) fn mcp_instructions() -> &'static str {
-        static INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-            format!(
+    pub(crate) fn mcp_instructions() -> Result<&'static str, ErrorData> {
+        static INSTRUCTIONS: LazyLock<Result<String, ErrorData>> = LazyLock::new(|| {
+            let skill = agent_skill::EmbeddedSkill::get()?;
+            Ok(format!(
                 "When the owner asks to set up their books or a posting tool is missing, call \
                  setup_status on the ledger connection if listed. For setup, explain the next step \
-                 and ask for any missing facts. For service readiness, use service_status on the \
+                 and ask for any missing facts. {demo} For service readiness, use service_status on the \
                  lifecycle connection if available. Explain the verified agent_access. \
                  If preset is read-only, follow this guidance: {read_only} \
                  Call {ACCESS_TOOL} only when the owner asks to change access to those managed \
@@ -246,7 +248,7 @@ impl AgentAccess {
                  through to changes_mark_seen if listed. If changes_since is unavailable after a \
                  post, tell the owner what was recorded and give the book and transaction ID. \
                  With preset bookkeeper, \
-                 follow this correction guidance. {AGENT_UNDO_GUIDANCE} If a typed rule blocks \
+                 use txn_recategorize when listed to fix a posted category. {AGENT_UNDO_GUIDANCE} If a typed rule blocks \
                  a correction, explain it in plain words and take the next authorized step named \
                  by the error. If neither tool is available, explain that in chat and check for \
                  the CLI equivalent or a newer signed release. If an earlier hand-made offset \
@@ -257,17 +259,20 @@ impl AgentAccess {
                  Use the listed tools within its signed write mode. If agent_access itself is null, \
                  use the status and its error code to explain why access is unverified. Never ask \
                  for, read, or share owner and approval credentials, recovery material, or \
-                 passphrases. Answer in plain words with chartable data when available. Offer \
+                 passphrases. {voice} Include chartable data when available. Offer \
                  ui_get_link for optional Desktop detail.",
-                read_only = READ_ONLY_NOTE.as_str()
-            )
+                read_only = READ_ONLY_NOTE.as_str(),
+                demo = skill.demo(),
+                voice = skill.voice(),
+            ))
         });
-        &INSTRUCTIONS
+        INSTRUCTIONS.as_deref().map_err(Clone::clone)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rmcp::ErrorData;
     use serde_json::json;
 
     use super::{AgentAccess, ManagedAccess, Preset, WriteMode};
@@ -302,10 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn read_only_note_and_mcp_instructions_give_the_same_chat_guidance() {
+    fn read_only_note_and_mcp_instructions_give_the_same_chat_guidance() -> Result<(), ErrorData> {
         let access = AgentAccess::from(ManagedAccess::ReadOnly);
         let note = access.note();
-        let instructions = AgentAccess::mcp_instructions();
+        let instructions = AgentAccess::mcp_instructions()?;
         for guidance in [
             "Restarting cannot grant posting access",
             "“let my agent post” in chat",
@@ -323,11 +328,13 @@ mod tests {
             assert!(instructions.contains(guidance), "{instructions}");
         }
         assert!(!instructions.contains("docs_url"));
+        Ok(())
     }
 
     #[test]
-    fn mcp_instructions_keep_blocked_corrections_and_legacy_cleanup_in_chat() {
-        let instructions = AgentAccess::mcp_instructions();
+    fn mcp_instructions_keep_blocked_corrections_and_legacy_cleanup_in_chat()
+    -> Result<(), ErrorData> {
+        let instructions = AgentAccess::mcp_instructions()?;
         for guidance in [
             "Never make offsetting entries by hand",
             "Offer Desktop links only for viewing",
@@ -336,11 +343,13 @@ mod tests {
         ] {
             assert!(instructions.contains(guidance), "{guidance}");
         }
+        Ok(())
     }
 
     #[test]
-    fn mcp_instructions_cover_each_serialized_access_state() -> serde_json::Result<()> {
-        let instructions = AgentAccess::mcp_instructions();
+    fn mcp_instructions_cover_each_serialized_access_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let instructions = AgentAccess::mcp_instructions().map_err(|error| error.message)?;
         for (preset, write_mode, action) in [
             (
                 Some(Preset::ReadOnly),

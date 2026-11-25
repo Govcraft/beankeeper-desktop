@@ -12,6 +12,13 @@ a CSV, OFX or QFX statement you share in chat. It reports each change, and you
 can ask it to undo supported changes in the same chat.
 [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
 
+The extension serves the Beankeeper guide over MCP before you create books,
+and the guide updates with the extension. In local Claude Code sessions in
+the Desktop app, Anthropic currently excludes Desktop extensions and
+`claude_desktop_config.json` servers from automatic MCP skill loading. Those
+connections supply brief setup and tool guidance in the MCP handshake.
+[Anthropic's client support notes](https://code.claude.com/docs/en/mcp#where-mcp-skills-are-supported)
+
 In Claude Desktop, you only need the **Beankeeper** extension. If Desktop also
 shows `beankeeper` or `beankeeper-service` under **Local dev**, those are Claude
 Code's connections for ledger access and background service controls.
