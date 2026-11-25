@@ -140,12 +140,18 @@ async fn pair(
     }
     match (query.token, query.invite) {
         (Some(token), None) => {
-            let registry = state.lock(Instant::now())?;
+            let now = Instant::now();
+            let existing = state.session(&headers, now);
+            let registry = state.lock(now)?;
             let link = registry
                 .links
                 .get(&Secret::digest(&token))
                 .filter(|link| matches!(link.kind, LinkKind::Browser))
                 .ok_or(PairingError::InvalidLink)?;
+            if let Ok(session) = existing {
+                let destination = state.paired_destination(&session, &headers, &registry);
+                return Ok(Redirect::to(destination).into_response());
+            }
             // Displaying a link must never consume it: browsers and link handlers
             // may issue speculative or duplicate GETs before the human sees it.
             Ok(crate::ui::message("Pair this browser", &markup!("<p>Pair this browser to open your local Beankeeper workspace. This one-time link expires five minutes after it was created.</p><form method=\"post\" action=\"/pair\"><input type=\"hidden\" name=\"token\" value=\"{}\"><button type=\"submit\">Pair this browser</button></form>", link.secret.expose())).into_response())
@@ -167,7 +173,7 @@ async fn pair(
                     // to continue, without weakening its cookie policy.
                     return Ok((StatusCode::UNAUTHORIZED, crate::ui::message(
                         "Connect your agent",
-                        &markup!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise open the terminal's one-time pairing URL first, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
+                        &markup!("<p>If this browser is already paired, continue to confirm the agent connection. Otherwise ask your assistant to open Beankeeper Desktop, or run <code>bk open</code>. Pair this browser, then return here.</p><p><a href=\"/pair?invite={}\">Continue in this browser</a></p>", link.secret.expose())
                     )).into_response());
                 }
                 Err(error) => return Err(error),
@@ -264,10 +270,12 @@ pub(crate) async fn human_guard(
     match result {
         Ok(request) => next.run(request).await,
         Err(PairingError::Unauthorized) => {
-            let content = destination.as_ref().map_or_else(
-                || markup!("<p>Open the one-time pairing URL printed by <code>bk serve</code>. Use a fresh link if it has expired or was already used.</p>"),
-                |path| markup!("<p>Open the one-time pairing URL printed in the terminal by <code>bk serve</code>, then select <strong>Pair this browser</strong>. Your requested view will open automatically. Pairing links expire after five minutes; use a fresh link if needed.</p><p>If already paired, <a href=\"{}\">continue to your requested view</a>.</p>", path),
+            let mut content = markup!(
+                "<p>Ask your assistant to open Beankeeper Desktop, or run <code>bk open</code>. Then select <strong>Pair this browser</strong>.</p>"
             );
+            if let Some(path) = &destination {
+                content.append(&markup!("<p>Pair in this browser to return to your requested view. If already paired, <a href=\"{}\">continue to your requested view</a>.</p>", path));
+            }
             let mut response = (
                 StatusCode::UNAUTHORIZED,
                 crate::ui::message("Pair this browser", &content),

@@ -125,7 +125,7 @@ fn main() -> ExitCode {
                 server::serve(&ledger, bind, options.read_only)
             })
         }
-        DesktopCommand::Open(options) => browser::open(options.bind),
+        DesktopCommand::Open(options) => browser::open(options),
         DesktopCommand::ChangesSince | DesktopCommand::ChangesMarkSeen(_) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
             ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)

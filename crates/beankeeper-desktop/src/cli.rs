@@ -24,16 +24,9 @@ pub struct ServeOptions {
 /// Address of an already-running Desktop server.
 #[derive(Args, Debug, Clone, Copy)]
 pub struct OpenOptions {
-    /// Loopback address used by `bk serve`.
-    #[arg(long, default_value_t = ListenerAddress::default().into(), value_parser = loopback_address)]
-    pub bind: SocketAddr,
-}
-
-pub(crate) fn loopback_address(value: &str) -> Result<SocketAddr, String> {
-    value
-        .parse::<ListenerAddress>()
-        .map(Into::into)
-        .map_err(Into::into)
+    /// Select a loopback listener instead of the running managed service.
+    #[arg(long)]
+    pub(crate) bind: Option<ListenerAddress>,
 }
 
 /// The upstream CLI extended with Desktop onboarding, hosting and bridging.

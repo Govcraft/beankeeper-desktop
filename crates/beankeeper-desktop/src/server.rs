@@ -7,7 +7,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use axum::{Router, middleware, routing::get, serve::Listener};
+use axum::{
+    Router,
+    extract::connect_info::Connected,
+    middleware,
+    routing::get,
+    serve::{IncomingStream, Listener},
+};
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
@@ -26,7 +32,7 @@ use crate::{
     instance::{self, BooksPath, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
     onboarding::DesktopTools,
-    pairing::{self, PairingState},
+    pairing::{self, PairingState, owner},
     review, ui,
 };
 
@@ -91,10 +97,16 @@ pub fn application(
         bound,
         config,
         pairing,
-        InstanceId::default(),
-        None,
+        ApplicationMode::default(),
     )
     .map(|(router, _)| router)
+}
+
+#[derive(Default)]
+struct ApplicationMode {
+    id: InstanceId,
+    managed_books: Option<std::path::PathBuf>,
+    owner_key: Option<owner::OwnerKey>,
 }
 
 fn application_with_id(
@@ -103,8 +115,11 @@ fn application_with_id(
     bound: SocketAddr,
     config: StreamableHttpServerConfig,
     pairing: PairingState,
-    id: InstanceId,
-    managed_books: Option<std::path::PathBuf>,
+    ApplicationMode {
+        id,
+        managed_books,
+        owner_key,
+    }: ApplicationMode,
 ) -> Result<(Router, Option<DemoBooks>), DesktopError> {
     let boundary = LocalBoundary::new(bound.port());
     let config = config
@@ -164,11 +179,13 @@ fn application_with_id(
         (pairing.clone(), fallback, association_db),
         pairing::mcp_guard,
     ));
+    let owner_routes = owner_key.map(|key| owner::router(pairing.clone(), key, id.clone()));
     let router = ui::router(db, cli.company.clone(), pairing.clone())
         .merge(review)
         .merge(changes)
         .merge(navigation::router(navigation, pairing.clone()))
         .merge(pairing::router(pairing))
+        .merge(owner_routes.unwrap_or_default())
         .merge(mcp)
         .route("/health", get(move || async move { instance::health(&id) }))
         .layer(middleware::from_fn_with_state(boundary, boundary::guard));
@@ -211,24 +228,44 @@ fn serve_bound(
     let bound = listener.local_addr()?;
     let config = StreamableHttpServerConfig::default();
     let cancellation = config.cancellation_token.clone();
-    let (pairing, pairing_url) = PairingState::new(bound)?;
+    let owner_key = ListenerAddress::from_bound(bound)
+        .map(|address| owner::OwnerKey::generate().map(|key| (address, key)))
+        .transpose()?;
+    let (pairing, startup_link) = if managed_books.is_some() {
+        (PairingState::for_listener(bound), None)
+    } else {
+        let (pairing, link) = PairingState::new(bound)?;
+        (pairing, Some(link))
+    };
     let (app, demo) = application_with_id(
         cli,
         read_only,
         bound,
         config,
         pairing,
-        id.clone(),
-        managed_books,
+        ApplicationMode {
+            id: id.clone(),
+            managed_books,
+            owner_key: owner_key.as_ref().map(|(_, key)| key.clone()),
+        },
     )?;
     let directory = crate::product::state_dir().map_err(DesktopError::Product)?;
-    let serving = RegisteredListener::publish(listener, runtime.handle(), &directory, &cli.db, id)?;
+    let serving = RegisteredListener::publish(
+        listener,
+        runtime.handle(),
+        &directory,
+        &cli.db,
+        id,
+        owner_key,
+    )?;
     crate::updates::background(
         directory.join("updates.json"),
         crate::product::update_checks(),
     );
-    eprintln!("Pair this browser (one use, expires in 5 minutes): {pairing_url}");
-    eprintln!("Open the link, then select Pair this browser to confirm.");
+    if let Some(link) = startup_link {
+        eprintln!("Pair this browser (one use, expires in 5 minutes): {link}");
+        eprintln!("Open the link, then select Pair this browser to confirm.");
+    }
     eprintln!(
         "Beankeeper Desktop listening on {} (MCP: /mcp)",
         local_url(bound)
@@ -240,12 +277,15 @@ fn serve_bound(
     }
     runtime.block_on(async move {
         let shutdown = cancellation.clone();
-        let result = axum::serve(serving, app)
-            .with_graceful_shutdown(async move {
-                shutdown_signal().await;
-                shutdown.cancel();
-            })
-            .await;
+        let result = axum::serve(
+            serving,
+            app.into_make_service_with_connect_info::<owner::Peer>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        })
+        .await;
         cancellation.cancel();
         if let Some(demo) = demo
             && let Err(error) = demo.remove().await
@@ -261,6 +301,7 @@ struct RegisteredListener {
     // Fields drop in declaration order. Remove the record before the OS can
     // give the port to another launch that would write a record at the same path.
     _registration: Option<Registration>,
+    _owner_key: Option<owner::KeyFile>,
     listener: tokio::net::TcpListener,
 }
 
@@ -271,6 +312,7 @@ impl RegisteredListener {
         state: &Path,
         books: &Path,
         id: InstanceId,
+        owner_key: Option<(ListenerAddress, owner::OwnerKey)>,
     ) -> Result<Self, DesktopError> {
         listener.set_nonblocking(true)?;
         let listener = {
@@ -281,8 +323,13 @@ impl RegisteredListener {
             .map(|address| Registration::publish(state, books.try_into()?, address, id))
             .transpose()
             .map_err(|error| DesktopError::Service(Box::new(error)))?;
+        let key_file = owner_key
+            .map(|(address, key)| key.publish(state, address))
+            .transpose()
+            .map_err(|error| DesktopError::Service(Box::new(error)))?;
         Ok(Self {
             _registration: registration,
+            _owner_key: key_file,
             listener,
         })
     }
@@ -298,6 +345,12 @@ impl Listener for RegisteredListener {
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
         self.listener.local_addr()
+    }
+}
+
+impl Connected<IncomingStream<'_, RegisteredListener>> for owner::Peer {
+    fn connect_info(stream: IncomingStream<'_, RegisteredListener>) -> Self {
+        Self(*stream.remote_addr())
     }
 }
 
@@ -349,6 +402,7 @@ mod tests {
             state.path(),
             &books,
             id.clone(),
+            None,
         )?;
         #[cfg(unix)]
         assert_eq!(serving.listener.as_raw_fd(), original_socket);

@@ -2,6 +2,7 @@
 
 mod agent_key;
 mod browser_session_id;
+pub(crate) mod owner;
 mod routes;
 
 pub(crate) const PAIR_ROUTE: &str = "/pair";
@@ -51,8 +52,8 @@ pub enum PairingError {
 impl fmt::Display for PairingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidLink => "Pairing link expired or already used. Use a fresh link from the terminal or a paired browser.",
-            Self::Unauthorized => "Pair this browser using the link printed by `bk serve`. Human writes also require the same Origin and a CSRF token.",
+            Self::InvalidLink => "Pairing link expired or already used. Ask your assistant to open Beankeeper Desktop again, or run `bk open`.",
+            Self::Unauthorized => "A paired browser and valid request credentials are required.",
             Self::Capacity => "Too many pairing links or browser sessions. Wait for a link to expire or sign out a browser.",
             Self::Unavailable => "Browser session state is unavailable. Restart `bk serve`.",
             Self::Entropy(_) => "Could not generate a browser credential.",
@@ -184,13 +185,17 @@ impl PairingState {
     /// # Errors
     /// Returns an entropy or state error; no weak credential fallback exists.
     pub fn new(bound: std::net::SocketAddr) -> Result<(Self, String), PairingError> {
-        let state = Self {
+        let state = Self::for_listener(bound);
+        let url = state.browser_link(Instant::now())?;
+        Ok((state, url))
+    }
+
+    pub(crate) fn for_listener(bound: std::net::SocketAddr) -> Self {
+        Self {
             registry: Arc::default(),
             base: crate::server::local_url(bound),
             cookie_name: format!("bk_desktop_{}", bound.port()),
-        };
-        let url = state.browser_link(Instant::now())?;
-        Ok((state, url))
+        }
     }
 
     fn destination_cookie_name(&self) -> String {
@@ -265,6 +270,17 @@ impl PairingState {
             .map_or_else(|| "/".into(), |destination| destination.path))
     }
 
+    fn paired_destination<'a>(
+        &self,
+        _session: &HumanSession,
+        headers: &HeaderMap,
+        registry: &'a Registry,
+    ) -> &'a str {
+        self.destination_key(headers)
+            .and_then(|key| registry.destinations.get(&key))
+            .map_or("/", |destination| destination.path.as_str())
+    }
+
     pub(crate) fn clear_destination_cookie(&self) -> String {
         format!(
             "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
@@ -282,12 +298,19 @@ impl PairingState {
     }
 
     fn insert_link(
-        &self,
         registry: &mut Registry,
         kind: LinkKind,
         now: Instant,
-    ) -> Result<String, PairingError> {
-        if registry.links.len() >= MAX_ENTRIES {
+    ) -> Result<&Link, PairingError> {
+        // Agent invitations must not fill the owner's browser-link capacity.
+        let kind_tag = std::mem::discriminant(&kind);
+        if registry
+            .links
+            .values()
+            .filter(|link| std::mem::discriminant(&link.kind) == kind_tag)
+            .count()
+            >= MAX_ENTRIES
+        {
             return Err(PairingError::Capacity);
         }
         let link = Link {
@@ -295,11 +318,11 @@ impl PairingState {
             expires: now + LINK_LIFETIME,
             kind,
         };
-        let url = self.link_url(&link);
-        registry
+        Ok(registry
             .links
-            .insert(Secret::digest(link.secret.expose()), link);
-        Ok(url)
+            .entry(Secret::digest(link.secret.expose()))
+            .insert_entry(link)
+            .into_mut())
     }
 
     fn link_url(&self, link: &Link) -> String {
@@ -311,13 +334,15 @@ impl PairingState {
     }
 
     fn browser_link(&self, now: Instant) -> Result<String, PairingError> {
-        self.insert_link(&mut *self.lock(now)?, LinkKind::Browser, now)
+        let mut registry = self.lock(now)?;
+        let link = Self::insert_link(&mut registry, LinkKind::Browser, now)?;
+        Ok(self.link_url(link))
     }
 
     /// Return a five-minute, one-use agent association link for D4 navigation.
     ///
     /// The link cannot create a human session. A human must first pair using
-    /// the terminal URL, then confirm the association in that browser.
+    /// the owner's browser open flow, then confirm the association in that browser.
     /// Repeated requests reuse an outstanding link without extending its life.
     ///
     /// # Errors
@@ -331,7 +356,8 @@ impl PairingState {
         {
             return Ok(self.link_url(link));
         }
-        self.insert_link(&mut registry, LinkKind::AgentInvite(agent), now)
+        let link = Self::insert_link(&mut registry, LinkKind::AgentInvite(agent), now)?;
+        Ok(self.link_url(link))
     }
 
     /// Browser routing targets for an authenticated agent, excluding expired sessions.

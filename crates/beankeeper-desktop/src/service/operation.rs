@@ -3,7 +3,7 @@
 use std::{path::Path, str::FromStr};
 
 use clap::Args;
-use rmcp::model::{CallToolRequestParams, Tool};
+use rmcp::model::{CallToolRequestParams, Tool, ToolAnnotations};
 use schemars::JsonSchema;
 use serde::{Deserialize, de::DeserializeOwned};
 
@@ -11,6 +11,7 @@ use super::{ServiceCommand, ServiceError};
 use crate::setup::{AccessOptions, ClientRegistration, ManagedAccess, ServiceSecretStorage};
 
 pub(crate) const ACCESS_TOOL: &str = "access_set";
+pub(crate) const OPEN_TOOL: &str = "service_open";
 
 /// Options shared by the CLI and the `service_install` tool.
 #[derive(Args, Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
@@ -51,6 +52,7 @@ pub(super) enum ServiceOperation {
     Start,
     Stop,
     Status,
+    Open,
     AccessSet(ManagedAccess),
     InstallExtension,
 }
@@ -71,13 +73,14 @@ enum Exposure {
 }
 
 impl ServiceOperation {
-    pub(super) fn all() -> [Self; 7] {
+    pub(super) fn all() -> [Self; 8] {
         [
             Self::Install(InstallOptions::default()),
             Self::Uninstall,
             Self::Start,
             Self::Stop,
             Self::Status,
+            Self::Open,
             Self::AccessSet(ManagedAccess::default()),
             Self::InstallExtension,
         ]
@@ -103,7 +106,11 @@ impl ServiceOperation {
             },
             Self::Status => Exposure::Mcp {
                 name: "service_status",
-                description: "Report authenticated running status, version, the agent's grant and write mode, local MCP endpoint, books path and optional Desktop link. No secrets are returned.",
+                description: "Report authenticated running status, version, the agent's grant and write mode, local MCP endpoint, books path and optional Desktop link. At the owner's request, use service_open to help pair their browser.",
+            },
+            Self::Open => Exposure::Mcp {
+                name: OPEN_TOOL,
+                description: "At the owner's request, open Beankeeper Desktop in their default browser. If prompted, select Pair this browser. Desktop restores the view the owner just tried to open. This action does not post to the ledger.",
             },
             Self::AccessSet(_) => Exposure::Mcp {
                 name: ACCESS_TOOL,
@@ -121,11 +128,14 @@ impl ServiceOperation {
                     Self::AccessSet(_) => schemars::schema_for!(AccessOptions),
                     _ => schemars::schema_for!(NoArguments),
                 };
-                Some(Tool::new(
-                    name,
-                    description,
-                    schema.to_value().as_object()?.clone(),
-                ))
+                let tool = Tool::new(name, description, schema.to_value().as_object()?.clone());
+                Some(if matches!(self, Self::Open) {
+                    tool.with_annotations(
+                        ToolAnnotations::new().destructive(false).open_world(false),
+                    )
+                } else {
+                    tool
+                })
             }
             Exposure::CliOnly(CliOnlyReason::BundleFirstLaunch) => None,
         }
@@ -142,6 +152,7 @@ impl TryFrom<ServiceCommand> for ServiceOperation {
             ServiceCommand::Start => Self::Start,
             ServiceCommand::Stop => Self::Stop,
             ServiceCommand::Status { .. } => Self::Status,
+            ServiceCommand::Open => Self::Open,
             ServiceCommand::AccessSet { access, .. } => ManagedAccess::try_from(access)
                 .map(Self::AccessSet)
                 .map_err(|_| ServiceError::Arguments)?,
@@ -191,6 +202,10 @@ impl TryFrom<CallToolRequestParams> for ServiceOperation {
 
 pub(crate) fn access_tool() -> Option<Tool> {
     ServiceOperation::AccessSet(ManagedAccess::default()).tool()
+}
+
+pub(crate) fn open_tool() -> Option<Tool> {
+    ServiceOperation::Open.tool()
 }
 
 fn decode<T: DeserializeOwned>(arguments: serde_json::Value) -> Result<T, ServiceError> {

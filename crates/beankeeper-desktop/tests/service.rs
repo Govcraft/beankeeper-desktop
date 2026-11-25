@@ -148,6 +148,11 @@ fn check_lifecycle_tools(
             "tools/call",
             json!({"name":"service_install","arguments":{"file_store":"yes"}}),
         ),
+        (
+            7,
+            "tools/call",
+            json!({"name":"service_open","arguments":{}}),
+        ),
     ] {
         writeln!(
             input,
@@ -189,6 +194,15 @@ fn check_lifecycle_tools(
                     reply["result"]["structuredContent"]["code"],
                     "SERVICE_ARGUMENTS"
                 );
+            }
+            7 => {
+                let code = if installed {
+                    "SERVICE_NOT_RUNNING"
+                } else {
+                    "SERVICE_NOT_INSTALLED"
+                };
+                assert_eq!(reply["result"]["isError"], true);
+                assert_eq!(reply["result"]["structuredContent"]["code"], code);
             }
             _ => unreachable!(),
         }
@@ -933,6 +947,10 @@ struct LegacyService {
 #[cfg(target_os = "linux")]
 impl LegacyService {
     fn new() -> TestResult<Self> {
+        Self::with_port(8750)
+    }
+
+    fn with_port(port: u16) -> TestResult<Self> {
         use beankeeper_desktop::setup::keychain::{restrict_directory, restrict_file};
         use std::fs;
 
@@ -974,7 +992,7 @@ impl LegacyService {
             &config,
             serde_json::to_vec(&json!({
                 "books": fixture.books,
-                "port": 8750,
+                "port": port,
                 "executable": env!("CARGO_BIN_EXE_bk"),
             }))?,
         )?;
@@ -1021,6 +1039,142 @@ impl LegacyService {
         assert!(output.status.success(), "service access command failed");
         Ok(serde_json::from_slice(&output.stdout)?)
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_open_pairs_in_the_default_browser_and_restores_a_detail_link() -> TestResult {
+    use common::rpc;
+    use secrecy::ExposeSecret;
+    use std::net::TcpListener;
+
+    // Hold the configured port throughout the test to force a fallback.
+    let occupied = TcpListener::bind("127.0.0.1:0")?;
+    let preferred = occupied.local_addr()?;
+    let fixture = LegacyService::with_port(preferred.port())?;
+    let mut host = fixture.host()?;
+    assert_ne!(host.base, format!("http://{preferred}"));
+    assert!(host.pairing_url.is_none());
+    let reader = fixture.secret("agent-token")?;
+    let bearer = reader.expose_secret().trim();
+    host.initialize(Some(bearer))?;
+
+    let status = fixture.service_access(&["status", "--json"])?;
+    let desktop = status["desktop_url"].as_str().ok_or("Desktop URL")?;
+    assert_eq!(desktop, format!("{}/", host.base));
+    assert_eq!(host.client.get(desktop).send()?.status(), 401);
+    let detail = rpc(host.request(
+        "tools/call",
+        json!({"name":"ui_get_link","arguments":{
+            "view_id":"transactions","state":{"company":"personal","payee":"Café & Tea / 100%"}
+        }}),
+        Some(bearer),
+    )?)?;
+    let view = &detail["result"]["structuredContent"];
+    let url = view["url"].as_str().ok_or("detail URL")?;
+    let path = view["path"].as_str().ok_or("detail path")?;
+    assert_eq!(url, format!("{}{path}", host.base));
+    assert!(path.contains("Caf%C3%A9%20%26%20Tea%20%2F%20100%25"));
+    let response = host.client.get(url).send()?;
+    assert_eq!(response.status(), 401);
+    let pending = response.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("return cookie")?
+        .to_owned();
+    let html = response.text()?;
+    assert!(html.contains("Ask your assistant to open Beankeeper Desktop"));
+    assert!(!html.contains("terminal"));
+
+    let (cli_link, extension_link) = check_browser_launcher(&fixture, &host.base)?;
+    assert_eq!(host.client.get(&extension_link).send()?.status(), 200);
+    let token = extension_link.split_once('=').ok_or("browser token")?.1;
+    let pair = || {
+        host.client
+            .post(format!("{}/pair", host.base))
+            .header("Origin", &host.base)
+            .header("Cookie", &pending)
+            .form(&[("token", token)])
+            .send()
+    };
+    let paired = pair()?;
+    assert_eq!(paired.status(), 303);
+    assert_eq!(paired.headers()["location"], path);
+    assert_eq!(pair()?.status(), 410);
+    let cookie = paired.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("session cookie")?;
+    for target in [desktop, url] {
+        assert_eq!(
+            host.client
+                .get(target)
+                .header("Cookie", cookie)
+                .send()?
+                .status(),
+            200
+        );
+    }
+    let reopened = host.client.get(cli_link).header("Cookie", cookie).send()?;
+    assert_eq!(reopened.status(), 303);
+    assert_eq!(reopened.headers()["location"], "/");
+    assert!(reopened.headers().get("set-cookie").is_none());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn check_browser_launcher(fixture: &LegacyService, base: &str) -> TestResult<(String, String)> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    let bin = fixture.root.path().join("bin");
+    fs::create_dir(&bin)?;
+    let launcher = bin.join("xdg-open");
+    let handoff = fixture.root.path().join("browser-handoff");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\numask 077\nprintf '%s' \"$1\" > \"$BEANKEEPER_TEST_BROWSER_HANDOFF\"\n",
+    )?;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700))?;
+    let browser_command = || {
+        let mut command = fixture.command();
+        command
+            .env("PATH", &bin)
+            .env("BEANKEEPER_TEST_BROWSER_HANDOFF", &handoff);
+        command
+    };
+
+    let output = browser_command().arg("open").output()?;
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    let cli_link = fs::read_to_string(&handoff)?;
+    assert!(cli_link.starts_with(&format!("{base}/pair?token=")));
+
+    let mut lifecycle = browser_command();
+    lifecycle.args(["service", "mcp"]);
+    let result = stdio_tool(lifecycle, "service_open", &json!({}))?;
+    assert_eq!(result["opened"], true);
+    assert!(result["url"].is_null());
+    let lifecycle_link = fs::read_to_string(&handoff)?;
+    assert!(lifecycle_link.starts_with(&format!("{base}/pair?token=")));
+    assert!(
+        !lifecycle_link.eq(&cli_link),
+        "lifecycle must issue a fresh link"
+    );
+
+    let mut extension = browser_command();
+    extension.args(["mcp", "extension"]);
+    let result = stdio_tool(extension, "service_open", &json!({}))?;
+    assert_eq!(result["opened"], true);
+    assert!(result["url"].is_null());
+    let extension_link = fs::read_to_string(&handoff)?;
+    assert!(extension_link.starts_with(&format!("{base}/pair?token=")));
+    assert!(
+        !extension_link.eq(&lifecycle_link),
+        "extension must issue a fresh link"
+    );
+    Ok((cli_link, extension_link))
 }
 
 #[cfg(target_os = "linux")]

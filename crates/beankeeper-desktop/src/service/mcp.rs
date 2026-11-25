@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ServiceError, ServiceOperation, Status, execute};
+use super::{ServiceError, ServiceOperation, ServiceReply, execute};
 use crate::setup::AgentAccess;
 
 struct Lifecycle;
@@ -60,12 +60,12 @@ impl ServerHandler for Lifecycle {
     }
 }
 
-pub(crate) fn access_call(params: &serde_json::Value, books: &Path) -> CallToolResult {
+pub(crate) fn local_call(params: &serde_json::Value, books: &Path) -> CallToolResult {
     let Ok(request) = CallToolRequestParams::deserialize(params) else {
         return failure(&ServiceError::Arguments);
     };
     match ServiceOperation::try_from(request) {
-        Ok(operation @ ServiceOperation::AccessSet(_)) => {
+        Ok(operation @ (ServiceOperation::AccessSet(_) | ServiceOperation::Open)) => {
             match execute(operation, None, Some(books)) {
                 Ok(status) => reply(status),
                 Err(error) => failure(&error),
@@ -76,7 +76,13 @@ pub(crate) fn access_call(params: &serde_json::Value, books: &Path) -> CallToolR
     }
 }
 
-fn reply(status: Status) -> CallToolResult {
+fn reply(reply: ServiceReply) -> CallToolResult {
+    let ServiceReply::Status(status) = reply else {
+        let message = ServiceReply::OPENED_MESSAGE;
+        let mut result = CallToolResult::structured(json!({"opened": true, "message": message}));
+        result.content = vec![ContentBlock::text(message)];
+        return result;
+    };
     let mut message = status.plain_text();
     if let Some(warning) = &status.warning {
         message.push('\n');

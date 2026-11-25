@@ -89,7 +89,7 @@ impl ListenerAddress {
         Ok(url)
     }
 
-    fn filename(self) -> String {
+    pub(crate) fn filename(self) -> String {
         let family = if self.0.is_ipv6() { 6 } else { 4 };
         format!("v{family}-{}.json", self.0.port())
     }
@@ -266,7 +266,7 @@ impl Health {
         id: Option<&InstanceId>,
     ) -> Option<LiveListener> {
         if self.address == address && self.pid == pid && self.id.as_ref() == id {
-            Some(LiveListener(address))
+            Some(self.into())
         } else {
             None
         }
@@ -274,18 +274,35 @@ impl Health {
 }
 
 /// The listener matched the recorded process at the time of discovery.
-#[derive(Clone, Copy)]
-pub(crate) struct LiveListener(ListenerAddress);
+pub(crate) struct LiveListener {
+    address: ListenerAddress,
+    id: Option<InstanceId>,
+}
 
-impl From<LiveListener> for ListenerAddress {
-    fn from(listener: LiveListener) -> Self {
-        listener.0
+impl LiveListener {
+    pub(crate) fn id(&self) -> Option<&InstanceId> {
+        self.id.as_ref()
+    }
+}
+
+impl From<&Health> for LiveListener {
+    fn from(health: &Health) -> Self {
+        Self {
+            address: health.address,
+            id: health.id.clone(),
+        }
+    }
+}
+
+impl From<&LiveListener> for ListenerAddress {
+    fn from(listener: &LiveListener) -> Self {
+        listener.address
     }
 }
 
 impl From<LiveListener> for SocketAddr {
     fn from(listener: LiveListener) -> Self {
-        listener.0.into()
+        listener.address.into()
     }
 }
 

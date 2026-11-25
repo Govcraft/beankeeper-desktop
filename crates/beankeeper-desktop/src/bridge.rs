@@ -414,10 +414,13 @@ impl Transport {
         if let Some(managed) = &self.managed
             && self.protocol.is_some()
             && message["method"] == "tools/call"
-            && message["params"]["name"] == service::ACCESS_TOOL
+            && matches!(
+                message["params"]["name"].as_str(),
+                Some(service::ACCESS_TOOL | service::OPEN_TOOL)
+            )
             && let Some(id) = message.get("id")
         {
-            let result = service::access_call(&message["params"], &managed.books);
+            let result = service::local_call(&message["params"], &managed.books);
             write_message(
                 output,
                 &json!({"jsonrpc": "2.0", "id": id, "result": result}),
@@ -760,7 +763,10 @@ fn emit(
             let supplemental = if context.demo_tools {
                 demo_tools()
             } else if context.managed_tools {
-                service::access_tool().into_iter().collect()
+                service::access_tool()
+                    .into_iter()
+                    .chain(service::open_tool())
+                    .collect()
             } else {
                 Vec::new()
             };
