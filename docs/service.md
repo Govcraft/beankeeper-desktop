@@ -33,6 +33,9 @@ passphrase. Ordinary `bk setup` continues to require an explicit file-store opt-
 | `bk service access-set --preset read-only --json` | Change the managed agent’s grant under the local owner’s authority. See the write modes below. |
 | `bk service uninstall` | Stop and remove hosting. Preserve all books, secrets, recovery material and MCP configuration. |
 | `bk service mcp` | Serve local lifecycle tools over stdio, including while the HTTP service is stopped. |
+| `bk service extension setup` | Run the same per-user provisioning as the Claude extension’s `setup` tool and wait for the result. |
+| `bk service extension status` | Report whether the extension can reach the local service. In Claude, `setup_status` also shows in-chat progress, then guides book setup. |
+| `bk service extension doctor` | Exercise the authenticated read-only ledger connection, as the extension’s `doctor` tool does. |
 
 `bk --db /absolute/path/books.db service install` selects other books on the first
 install. Existing books must have compatible Desktop enrollment and credentials.
@@ -64,9 +67,10 @@ a plain-language answer plus a structured result or a named error. `service_inst
 optional boolean arguments `file_store` and `no_agents`, equivalent to `--file-store` and
 `--no-agents`. Both default to false. MCP installs use the managed books path.
 Use `bk --db BOOKS service install` to select a particular ledger on first
-install. The internal `install-extension` command is reserved for the native
-bundle's first launch, when the bundle owns client registration and uses the
-OS keychain.
+install. The internal `install-extension` command provisions the native
+bundle’s service under the current user account. On fresh extension installs,
+the native credential store is required. The extension connects detected
+companion apps and leaves Claude Desktop’s own configuration to Claude.
 
 Use `service_open` when the owner asks for help opening a Desktop link. It works
 after startup and when the managed service uses a fallback port. It reports a

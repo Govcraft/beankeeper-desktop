@@ -1,33 +1,42 @@
 # Connect Beankeeper to Claude Desktop
 
-1. Download `bk-VERSION-TARGET.mcpb` and its `.sigstore` bundle from the same
-   GitHub release. Choose Apple Silicon or Intel on macOS, x64 on Windows, or
-   x64 or arm64 on Linux. Verify the bundle with the release checksum and
-   Sigstore identity before opening it. [Desktop releases](https://github.com/Govcraft/beankeeper-desktop/releases)
-2. Sign in to Claude Desktop, open the verified bundle, and confirm the
-   installation. If the installation prompt does not appear, open
-   **Settings → Desktop app**, choose **Manage** next to **Extensions**, then
-   choose **Advanced settings → Install Extension** and select the file.
-   Linux requires the Claude Desktop beta and a system compatible with the
-   Beankeeper release binary. The release build targets glibc 2.35 or newer.
-   The published 0.1.0-rc.11 bundle requires glibc 2.39.
-   [Claude Desktop extension installation](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
-3. Enable the extension in a Claude Desktop chat and ask **Set up my books**.
-   Claude can set up your books and accounts, post opening balances and import
-   a CSV, OFX or QFX statement you share in chat. It uses the existing Direct
-   bookkeeper connection, reports each change, and can undo supported changes
-   when you ask in chat. [Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
+1. When **Get it for the Claude app** is available, download Beankeeper from
+   [beankeeper.app](https://beankeeper.app/).
+2. Double-click the downloaded file and click **Install** in the Claude app.
+   [Anthropic’s extension installation instructions](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
+3. Say **Set up my books** in Claude. To try fictional transactions first,
+   say **Create demo books**.
+
+Claude can set up your books and accounts, post opening balances, and import
+a CSV, OFX or QFX statement you share in chat. It reports each change, and you
+can ask it to undo supported changes in the same chat.
+[Chat setup guide](../SKILL.md#guide-the-owner-through-book-setup)
 
 In Claude Desktop, you only need the **Beankeeper** extension. If Desktop also
 shows `beankeeper` or `beankeeper-service` under **Local dev**, those are Claude
 Code's connections for ledger access and background service controls.
 
-On its first launch, the extension sets up encrypted local books and starts
-per-user background hosting if Beankeeper is not already configured. It uses
-the OS secret store and creates a private recovery kit beside the books. Keep
-an offline copy under your control. Claude receives the ledger's agent access
-over stdio and can request the tools that its grants allow. [Service storage
-and recovery](service.md#platform-behavior-and-files)
+On your first setup request, the extension creates encrypted books, saves the
+passphrase in your computer’s credential store, and starts Beankeeper in the
+background under your account. It saves a private recovery kit beside the
+books. Setup continues in the same chat. Other supported apps detected during
+setup can load their new connections the next time you open them.
+[Service storage and recovery](service.md#platform-behavior-and-files)
+
+## First-open messages
+
+During testing, Claude may show **Developer: unknown** until its extension
+signature verification supports the signed bundle. On macOS, Gatekeeper may
+say **Apple cannot check ‘bk’ for malicious software** or **‘bk’ cannot be
+opened because the developer cannot be verified**. On Windows, SmartScreen may
+show **Windows protected your PC**.
+These messages can appear while OS code signing is pending. If you downloaded
+the official test bundle and independently confirmed it with your test
+coordinator, macOS offers **System Settings > Privacy & Security > Open Anyway**
+for eligible warnings. On Windows, the corresponding choice is
+**More info > Run anyway** when available. Stop if the OS reports malware or
+your organization blocks the extension.
+[Apple’s Gatekeeper guidance](https://support.apple.com/en-us/102445)
 
 If Claude says it can only read your books, say **Let my agent post** in chat
 when you want it to record transactions. Claude uses the extension's
@@ -38,8 +47,11 @@ If a detail link asks you to pair the browser, say **Open Beankeeper Desktop**
 in chat. The extension opens your default browser. Select **Pair this browser**
 there to continue to the detail you requested.
 
-If setup fails, check the extension's log in Claude Desktop and make sure
-your OS login session and keychain are available.
+If Claude can see the extension but setup fails, say **Check my Beankeeper
+connection**. Claude can check setup progress and explain any issue with
+the local connection. If Claude cannot see the extension at all, follow
+Anthropic’s extension troubleshooting instructions.
+[Anthropic’s extension troubleshooting](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
 
 ## Remove the extension
 
