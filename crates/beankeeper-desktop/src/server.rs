@@ -17,10 +17,7 @@ use axum::{
 use beankeeper_cli::{
     cli::Cli,
     db::Db,
-    mcp::{
-        LedgerTargets, StreamableHttpServerConfig, http_router_with_host_tools,
-        http_router_with_ledger_targets,
-    },
+    mcp::{LedgerTargets, StreamableHttpServerConfig, http_router_with_ledger_targets},
     passphrase::resolve_passphrase,
 };
 
@@ -81,7 +78,7 @@ pub fn local_url(bound: SocketAddr) -> String {
 
 /// Merge upstream MCP with embedded UI routes and a listener-wide guard.
 ///
-/// Call during synchronous startup: the upstream factory performs blocking I/O.
+/// Call during synchronous startup so Desktop can prepare the startup ledger.
 /// The caller must cancel `config.cancellation_token` on shutdown.
 ///
 /// # Errors
@@ -156,20 +153,16 @@ fn application_with_id(
         company: cli.company.clone(),
     };
     let request_limit = config.max_request_body_bytes;
-    let demo;
-    let mcp = if let Some(managed_books) = &tools.managed_books {
-        let targets = LedgerTargets::new(Db::open_existing(&cli.db, key)?);
-        demo = Some(DemoBooks::new(
+    let targets = LedgerTargets::new(backups.open()?);
+    let demo = tools.managed_books.as_ref().map(|managed_books| {
+        DemoBooks::new(
             targets.clone(),
             managed_books,
             config.cancellation_token.clone(),
-        ));
-        tools.demo.clone_from(&demo);
-        http_router_with_ledger_targets(cli, targets, read_only, config, tools)?
-    } else {
-        demo = None;
-        http_router_with_host_tools(cli, key, read_only, config, tools)?
-    };
+        )
+    });
+    tools.demo.clone_from(&demo);
+    let mcp = http_router_with_ledger_targets(cli, targets, read_only, config, tools)?;
     let db = Db::open_snapshot(&cli.db, key)?;
     let review = review::router(
         review_db,
@@ -178,7 +171,7 @@ fn application_with_id(
         &cli.db.with_extension("owner-token"),
     )?;
     let changes = changes::router(
-        Db::open_existing(&cli.db, key)?,
+        backups.open()?,
         books,
         cli.company.clone(),
         cli.db.with_extension("owner-token"),

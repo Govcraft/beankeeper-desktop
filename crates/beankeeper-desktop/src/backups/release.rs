@@ -4,14 +4,17 @@ use beankeeper_cli::error::CliError;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use super::git_oid::GitOid;
+
 /// The Desktop version and core Git object ID that produced a backup.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub(super) struct Release((Version, Option<String>));
+pub(super) struct Release {
+    desktop: Version,
+    core: GitOid,
+}
 
 impl Release {
-    const LEGACY_REVISION: &str = "unknown";
-
     pub(super) fn current() -> &'static Self {
         static CURRENT: OnceLock<Release> = OnceLock::new();
         const BUILT_RELEASE: &str =
@@ -38,27 +41,16 @@ impl FromStr for Release {
         let invalid =
             || CliError::Validation("expected a Desktop version and core Git revision".into());
         let (desktop, revision) = value.split_once('/').ok_or_else(invalid)?;
-        let desktop = desktop.parse().map_err(|_| invalid())?;
-        let core_revision = match revision {
-            // Earlier builds could write this sentinel. Keep those backups
-            // readable and let a known revision trigger a fresh backup.
-            Self::LEGACY_REVISION => None,
-            oid if matches!(oid.len(), 40 | 64)
-                && oid.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
-            {
-                Some(oid.to_ascii_lowercase())
-            }
-            _ => return Err(invalid()),
-        };
-        Ok(Self((desktop, core_revision)))
+        Ok(Self {
+            desktop: desktop.parse().map_err(|_| invalid())?,
+            core: revision.parse().map_err(|_| invalid())?,
+        })
     }
 }
 
 impl fmt::Display for Release {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self((desktop, core_revision)) = self;
-        let core = core_revision.as_deref().unwrap_or(Self::LEGACY_REVISION);
-        write!(f, "{desktop}/{core}")
+        write!(f, "{}/{}", self.desktop, self.core.as_ref())
     }
 }
 

@@ -3,12 +3,15 @@
 mod archive;
 mod books;
 mod catalog;
+mod git_oid;
 mod release;
 mod tools;
+mod upstream;
 
 pub(crate) use tools::BackupTool;
 
 pub use tools::{BackupOptions, run};
+pub use upstream::run_upstream;
 
 use std::{fs, path::Path, sync::Arc};
 
@@ -48,15 +51,36 @@ impl LocalBackups {
     }
 
     pub(crate) fn open(&self) -> Result<Db, CliError> {
+        self.with_state(false, |state| state.prepare()?.open())
+    }
+
+    fn open_for_provisioning(&self) -> Result<Db, CliError> {
+        self.with_state(false, |state| match state {
+            BooksState::Current(books) => books.open_existing(),
+            BooksState::NeedsMigration(books) => books.open(),
+        })
+    }
+
+    fn prepare(&self, replacing: bool) -> Result<(), CliError> {
+        self.with_state(replacing, |state| state.prepare().map(drop))
+    }
+
+    fn with_state<T>(
+        &self,
+        allow_plaintext: bool,
+        use_books: impl FnOnce(BooksState<'_>) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
         let location = self.location()?;
         let catalog = location.lock()?;
-        match BooksState::try_from((self, &catalog))? {
-            BooksState::Current(books) => {
-                Self::report_automatic(self.capture_if_due(&catalog));
-                books.open_existing()
+        let plaintext = Self::new(self.books.clone(), None);
+        let state = BooksState::try_from((self, &catalog)).or_else(|error| {
+            if allow_plaintext && self.key().is_some() {
+                BooksState::try_from((&plaintext, &catalog)).map_err(|_| error)
+            } else {
+                Err(error)
             }
-            BooksState::NeedsMigration(books) => books.open(),
-        }
+        })?;
+        use_books(state)
     }
 
     pub(crate) fn automatic(&self) {
@@ -77,9 +101,11 @@ impl LocalBackups {
 
     fn capture_if_due(&self, catalog: &Catalog<'_>) -> Result<(), CliError> {
         let retention = Retention::default();
-        let backups = catalog.rotate(&retention)?;
-        if let Some(reason) = retention.due(backups.first()) {
+        let backups = catalog.list()?;
+        if let Some(reason) = retention.due(&backups) {
             catalog.capture(self, reason)?;
+        } else {
+            catalog.rotate(&retention, &backups, None);
         }
         Ok(())
     }
@@ -105,6 +131,13 @@ impl LocalBackups {
 
 pub(crate) fn open(books: &Path, passphrase: Option<&SecretString>) -> Result<Db, CliError> {
     LocalBackups::new(books.try_into()?, passphrase.cloned()).open()
+}
+
+pub(crate) fn open_for_provisioning(
+    books: &Path,
+    passphrase: &SecretString,
+) -> Result<Db, CliError> {
+    LocalBackups::new(books.try_into()?, Some(passphrase.clone())).open_for_provisioning()
 }
 
 fn sync_directory(path: &Path) -> std::io::Result<()> {

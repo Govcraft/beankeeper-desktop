@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use beankeeper_cli::cli::Cli;
+use beankeeper_cli::cli::PassphraseOptions;
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::NamedTempFile;
 
@@ -359,30 +359,29 @@ impl StoredPassphrase {
 /// # Errors
 /// Returns credential lookup or private temporary-file failures.
 pub fn apply_stored_passphrase(
-    cli: &mut Cli,
+    options: &mut PassphraseOptions,
+    ledger: &Path,
     store: &dyn SecretStore,
 ) -> Result<Option<StoredPassphrase>, KeychainError> {
-    if cli.passphrase.passphrase_fd.is_some()
-        || cli.passphrase.passphrase_file.is_some()
+    if options.passphrase_fd.is_some()
+        || options.passphrase_file.is_some()
         || std::env::var("BEANKEEPER_PASSPHRASE_CMD").is_ok_and(|value| !value.is_empty())
     {
         return Ok(None);
     }
-    let Some(passphrase) = store.load(&cli.db)? else {
+    let Some(passphrase) = store.load(ledger)? else {
         return Ok(None);
     };
     validate_passphrase(&passphrase)?;
-    let mut file = NamedTempFile::new()?;
-    restrict_file(file.path())?;
-    file.write_all(passphrase.expose_secret().as_bytes())?;
-    file.flush()?;
-    cli.passphrase.passphrase_file = Some(file.path().to_owned());
+    let file = super::temporary_passphrase(&passphrase)?;
+    options.passphrase_file = Some(file.path().to_owned());
     Ok(Some(StoredPassphrase { file }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beankeeper_cli::cli::Cli;
     use clap::Parser;
 
     struct FixedStore;
@@ -408,7 +407,8 @@ mod tests {
     #[test]
     fn upstream_bridge_is_private_redacted_and_removed() -> Result<(), Box<dyn Error>> {
         let mut cli = Cli::try_parse_from(["bk", "company", "list"])?;
-        let guard = apply_stored_passphrase(&mut cli, &FixedStore)?.ok_or("missing guard")?;
+        let guard = apply_stored_passphrase(&mut cli.passphrase, &cli.db, &FixedStore)?
+            .ok_or("missing guard")?;
         let path = guard.path().to_owned();
         assert_eq!(fs::read_to_string(&path)?, "not-for-logs");
         assert!(!format!("{guard:?}").contains("not-for-logs"));
@@ -429,7 +429,7 @@ mod tests {
             vec!["bk", "--passphrase-fd", "3", "company", "list"],
         ] {
             let mut cli = Cli::try_parse_from(args)?;
-            assert!(apply_stored_passphrase(&mut cli, &FixedStore)?.is_none());
+            assert!(apply_stored_passphrase(&mut cli.passphrase, &cli.db, &FixedStore)?.is_none());
         }
         Ok(())
     }

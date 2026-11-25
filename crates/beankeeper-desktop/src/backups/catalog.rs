@@ -100,7 +100,6 @@ pub(super) struct Backup {
     release: Release,
     #[serde(deserialize_with = "schema_version")]
     schema_version: SchemaVersion,
-    #[serde(alias = "encrypted", deserialize_with = "archive::read_format")]
     archive_format: ArchiveFormat,
     bytes: u64,
     #[serde(with = "sha256_hex")]
@@ -168,24 +167,82 @@ impl Default for Retention {
 impl Retention {
     pub(super) const CHECK_INTERVAL: Duration = Duration::from_hours(1);
 
-    pub(super) fn due(&self, latest: Option<&Backup>) -> Option<Reason> {
-        let Some(latest) = latest else {
-            return Some(Reason::FirstBackup);
-        };
-        if &latest.release != Release::current() {
+    pub(super) fn due(&self, backups: &[Backup]) -> Option<Reason> {
+        let automatic = backups
+            .iter()
+            .find(|backup| !matches!(backup.reason, Reason::Requested));
+        if automatic
+            .or_else(|| backups.first())
+            .is_some_and(|latest| &latest.release != Release::current())
+        {
             return Some(Reason::Upgrade);
         }
+        let Some(latest) = automatic else {
+            return Some(Reason::FirstBackup);
+        };
         let age = Utc::now() - latest.created_at;
         (age >= TimeDelta::hours(i64::from(self.interval_hours))).then_some(Reason::Daily)
     }
 
-    fn check_size(&self, bytes: u64) -> Result<(), CliError> {
+    const fn protects(reason: Reason) -> bool {
+        matches!(reason, Reason::BeforeMigration | Reason::Upgrade)
+    }
+
+    fn protected(backups: &[Backup]) -> Option<&Backup> {
+        backups.iter().find(|backup| Self::protects(backup.reason))
+    }
+
+    fn capture_limit(&self, reason: Reason, backups: &[Backup]) -> u64 {
+        if Self::protects(reason) {
+            return self.max_bytes;
+        }
+        self.max_bytes - Self::protected(backups).map_or(0, |backup| backup.bytes)
+    }
+
+    fn available_after_snapshot(limit: u64, bytes: u64) -> Result<u64, CliError> {
+        limit.checked_sub(bytes).ok_or_else(|| {
+            CliError::Validation("backup exceeds the available local retention size limit".into())
+        })
+    }
+
+    fn check_manifest_size(&self, bytes: u64) -> Result<(), CliError> {
         if bytes > self.max_bytes {
             return Err(CliError::Validation(
                 "one backup exceeds the local retention size limit".into(),
             ));
         }
         Ok(())
+    }
+
+    fn expired<'a>(&self, backups: &'a [Backup], published: Option<&Backup>) -> Vec<&'a Backup> {
+        let protected = published
+            .filter(|backup| Self::protects(backup.reason))
+            .or_else(|| Self::protected(backups));
+        let mut remaining = self.max_bytes;
+        let mut slots = self.max_backups;
+        for backup in protected
+            .into_iter()
+            .chain(published.filter(|backup| protected.is_none_or(|keep| keep.id != backup.id)))
+        {
+            remaining -= backup.bytes;
+            slots -= 1;
+        }
+        backups
+            .iter()
+            .filter(|backup| {
+                if protected.is_some_and(|keep| keep.id == backup.id)
+                    || published.is_some_and(|keep| keep.id == backup.id)
+                {
+                    return false;
+                }
+                if slots == 0 || backup.bytes > remaining {
+                    return true;
+                }
+                remaining -= backup.bytes;
+                slots -= 1;
+                false
+            })
+            .collect()
     }
 }
 
@@ -253,12 +310,18 @@ impl Catalog<'_> {
     fn entries(&self) -> Result<Vec<(BackupId, PathBuf)>, CliError> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&self.location.0)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir()
-                && let Some(name) = entry.file_name().to_str()
-                && let Ok(id) = name.parse()
-            {
-                entries.push((id, entry.path()));
+            match entry.and_then(|entry| Ok((entry.file_type()?, entry))) {
+                Ok((kind, entry)) if kind.is_dir() => {
+                    if let Some(id) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse().ok())
+                    {
+                        entries.push((id, entry.path()));
+                    }
+                }
+                Ok(_) => (),
+                Err(error) => eprintln!("Cannot read a local backup directory entry: {error}"),
             }
         }
         Ok(entries)
@@ -266,8 +329,16 @@ impl Catalog<'_> {
 
     fn clean_incomplete(&self) -> Result<(), CliError> {
         for (_, path) in self.entries()? {
-            if !path.join(MANIFEST).try_exists()? {
-                fs::remove_dir_all(path)?;
+            // A manifest is the commit record. Broken links and other unreadable
+            // records belong to listing diagnostics, not incomplete cleanup.
+            if let Err(error) = fs::symlink_metadata(path.join(MANIFEST))
+                && error.kind() == io::ErrorKind::NotFound
+                && let Err(error) = fs::remove_dir_all(&path)
+            {
+                eprintln!(
+                    "Cannot remove incomplete local backup {}: {error}",
+                    path.display()
+                );
             }
         }
         Ok(())
@@ -277,24 +348,29 @@ impl Catalog<'_> {
         let mut backups = self
             .entries()?
             .into_iter()
-            .map(|(id, path)| read_manifest(&id, &path))
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|(id, path)| match read_manifest(&id, &path) {
+                Ok(backup) => Some(backup),
+                Err(error) => {
+                    eprintln!("Skipping unreadable local backup {id}: {error}");
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         backups.sort_by_key(|backup| std::cmp::Reverse(backup.created_at));
         Ok(backups)
     }
 
-    pub(super) fn rotate(&self, retention: &Retention) -> Result<Vec<Backup>, CliError> {
-        let mut remaining = retention.max_bytes;
-        let mut kept = Vec::new();
-        for backup in self.list()? {
-            if kept.len() == retention.max_backups || backup.bytes > remaining {
-                fs::remove_dir_all(self.entry(backup.id()))?;
-            } else {
-                remaining -= backup.bytes;
-                kept.push(backup);
+    pub(super) fn rotate(
+        &self,
+        retention: &Retention,
+        backups: &[Backup],
+        published: Option<&Backup>,
+    ) {
+        for backup in retention.expired(backups, published) {
+            if let Err(error) = fs::remove_dir_all(self.entry(backup.id())) {
+                eprintln!("Cannot rotate local backup {}: {error}", backup.id());
             }
         }
-        Ok(kept)
     }
 
     pub(super) fn capture(
@@ -302,6 +378,13 @@ impl Catalog<'_> {
         books: &LocalBackups,
         reason: Reason,
     ) -> Result<(Backup, VerifiedSnapshot), CliError> {
+        let retention = Retention::default();
+        let existing = if Retention::protects(reason) {
+            None
+        } else {
+            Some(self.list()?)
+        };
+        let limit = retention.capture_limit(reason, existing.as_deref().unwrap_or_default());
         let id = BackupId::default();
         let directory = self.entry(&id);
         fs::create_dir(&directory)?;
@@ -314,20 +397,16 @@ impl Catalog<'_> {
             &database,
             SnapshotOverwrite::default(),
         )?;
-        let retention = Retention::default();
-        retention.check_size(proof.bytes())?;
         let archive_format = ArchiveFormat::from(proof.encrypted());
         let attachments = archive::capture(
             books.path(),
             &pending.0,
             archive_format,
             books.key(),
-            retention.max_bytes - proof.bytes(),
+            Retention::available_after_snapshot(limit, proof.bytes())?,
         )?;
         let database_sha256 = digest(&database)?;
-        let bytes = proof
-            .bytes()
-            .saturating_add(attachments.as_ref().map_or(0, Archive::bytes));
+        let bytes = proof.bytes() + attachments.as_ref().map_or(0, Archive::bytes);
         let backup = Backup {
             id,
             created_at: Utc::now(),
@@ -339,10 +418,12 @@ impl Catalog<'_> {
             database_sha256,
             attachments: attachments.map(AttachmentManifest::from),
         };
-        retention.check_size(bytes)?;
         pending.commit(&backup)?;
         sync_directory(&self.location.0)?;
-        self.rotate(&retention)?;
+        match existing.map_or_else(|| self.list(), Ok) {
+            Ok(backups) => self.rotate(&retention, &backups, Some(&backup)),
+            Err(error) => eprintln!("Cannot rotate local backups: {error}"),
+        }
         Ok((backup, proof))
     }
 
@@ -380,6 +461,7 @@ fn read_manifest(id: &BackupId, path: &Path) -> Result<Backup, CliError> {
             "local backup {id} has mismatched metadata"
         )));
     }
+    Retention::default().check_manifest_size(backup.bytes)?;
     Ok(backup)
 }
 

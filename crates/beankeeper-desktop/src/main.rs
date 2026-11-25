@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use beankeeper_cli::{cli::Cli, commands, db::companies::CompanySlug};
+use beankeeper_cli::cli::Cli;
 use beankeeper_desktop::{
     DesktopError, agents, backups, bridge, browser, changes,
     cli::{self, OpenOptions, ServeOptions},
@@ -166,7 +166,7 @@ fn main() -> ExitCode {
             return demo::run(&options, json);
         }
         DesktopCommand::Extension => bridge::run_extension().map_err(DesktopError::Bridge),
-        DesktopCommand::Ledger => return upstream(&matches),
+        DesktopCommand::Ledger => return backups::run_upstream(&matches),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -254,31 +254,4 @@ fn install_update() -> Result<(), DesktopError> {
         );
     }
     Ok(())
-}
-
-fn upstream(matches: &clap::ArgMatches) -> ExitCode {
-    let mut cli = Cli::from_arg_matches(matches).unwrap_or_else(|error| error.exit());
-    let _passphrase = match setup::stored_passphrase(&mut cli) {
-        Ok(guard) => guard,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let json_mode = cli.is_json();
-    let meta = json_mode.then(|| {
-        cli.meta(
-            commands::operation(&cli.command),
-            cli.company.as_ref().map(CompanySlug::as_str),
-        )
-    });
-    let result = commands::dispatch(&cli, meta.clone());
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            let meta = meta.map(|meta| cli.meta(meta.command, meta.company.as_deref()));
-            error.report(json_mode, meta);
-            ExitCode::from(error.exit_code())
-        }
-    }
 }

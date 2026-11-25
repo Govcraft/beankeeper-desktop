@@ -12,6 +12,10 @@
 
 use std::{error::Error, io, path::Path};
 
+#[path = "src/backups/git_oid.rs"]
+mod git_oid;
+use git_oid::GitOid;
+
 fn main() -> Result<(), Box<dyn Error>> {
     // The unoptimized upstream clap command tree exceeds Windows' 1 MiB
     // default main stack. Reserve the usual Unix main-stack budget; pages
@@ -30,7 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::path::PathBuf::from(&manifest_dir).join("../../packaging/license-embed.json");
     let lock_path = std::path::PathBuf::from(manifest_dir).join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock_path.display());
-    rustc_env("BK_CORE_REVISION", &core_revision(&lock_path)?);
+    rustc_env("BK_CORE_REVISION", core_revision(&lock_path)?.as_ref());
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
@@ -70,7 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn core_revision(lock_path: &Path) -> Result<String, Box<dyn Error>> {
+fn core_revision(lock_path: &Path) -> Result<GitOid, Box<dyn Error>> {
     let lock = toml_edit::Document::parse(std::fs::read_to_string(lock_path)?)?;
     let revision = lock
         .get("package")
@@ -83,7 +87,6 @@ fn core_revision(lock_path: &Path) -> Result<String, Box<dyn Error>> {
         .and_then(|source| source.strip_prefix("git+"))
         .and_then(|source| source.rsplit_once('#'))
         .map(|(_, revision)| revision)
-        .filter(|revision| !revision.is_empty())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -93,7 +96,7 @@ fn core_revision(lock_path: &Path) -> Result<String, Box<dyn Error>> {
                 ),
             )
         })?;
-    Ok(revision.to_owned())
+    Ok(revision.parse()?)
 }
 
 struct LicenseEmbed {

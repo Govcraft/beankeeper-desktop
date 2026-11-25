@@ -52,22 +52,6 @@ impl ArchiveFormat {
     }
 }
 
-pub(super) fn read_format<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<ArchiveFormat, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StoredFormat {
-        Current(ArchiveFormat),
-        Legacy(bool),
-    }
-
-    Ok(match StoredFormat::deserialize(deserializer)? {
-        StoredFormat::Current(format) => format,
-        StoredFormat::Legacy(encrypted) => encrypted.into(),
-    })
-}
-
 pub(super) struct Archive {
     manifest: AttachmentManifest,
     bytes: u64,

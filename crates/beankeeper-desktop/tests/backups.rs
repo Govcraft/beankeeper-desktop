@@ -233,15 +233,6 @@ fn agent_restores_encrypted_backup_and_attachments_and_undoes_with_either_interf
     assert_eq!(undone["undo_of"], undo);
     assert!(contains_txn(&ledger, later)?);
 
-    // Earlier Desktop builds stored the archive format as a Boolean.
-    let manifest = directory.join("backup.json");
-    let mut legacy: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
-    legacy
-        .as_object_mut()
-        .ok_or("backup metadata")?
-        .remove("archive_format");
-    legacy["encrypted"] = true.into();
-    fs::write(&manifest, serde_json::to_vec(&legacy)?)?;
     fs::remove_file(&earlier_path)?;
     let cli_restore = data(cli(&ledger, &admin).args(["restore", id]))?;
     let second_undo = cli_restore["undo_id"].as_i64().ok_or("CLI undo receipt")?;
@@ -267,21 +258,7 @@ fn backup_catalog_rotates_and_same_schema_upgrade_takes_a_new_backup() -> TestRe
     let admin = admin(&ledger)?;
     let mut server = Server::start(&ledger, &["serve"], None)?;
     server.initialize(Some(&admin))?;
-    let on_demand = call(&server, &admin, "backup_create", &json!({}))?;
-    let first = on_demand["backup"]["id"].as_str().ok_or("backup ID")?;
-    let limit = data(cli(&ledger, &admin).arg("list"))?["retention"]["max_backups"]
-        .as_u64()
-        .ok_or("retention limit")?;
-    for _ in 0..limit {
-        data(cli(&ledger, &admin).arg("create"))?;
-    }
     let list = data(cli(&ledger, &admin).arg("list"))?;
-    assert_eq!(
-        list["backups"].as_array().ok_or("backups")?.len(),
-        usize::try_from(limit)?
-    );
-    assert!(!local_backup(&ledger, first).exists());
-
     // Simulate a build with the same Desktop and schema versions but a different core revision.
     let id = list["backups"][0]["id"]
         .as_str()
@@ -302,27 +279,107 @@ fn backup_catalog_rotates_and_same_schema_upgrade_takes_a_new_backup() -> TestRe
     assert_ne!(list["backups"][0]["id"], id);
     assert_eq!(list["backups"][0]["reason"], "upgrade");
 
-    let id = list["backups"][0]["id"]
+    let upgrade = list["backups"][0]["id"]
         .as_str()
         .ok_or("upgrade backup ID")?;
-    let manifest = local_backup(&ledger, id).join("backup.json");
+    let limit = list["retention"]["max_backups"].as_u64().ok_or("limit")?;
+    let mut server = server;
+    server.initialize(Some(&admin))?;
+    let on_demand = call(&server, &admin, "backup_create", &json!({}))?;
+    let first = on_demand["backup"]["id"].as_str().ok_or("backup ID")?;
+    for _ in 0..limit {
+        data(cli(&ledger, &admin).arg("create"))?;
+    }
+    let rotated = data(cli(&ledger, &admin).arg("list"))?;
+    assert_eq!(
+        rotated["backups"].as_array().ok_or("backups")?.len(),
+        usize::try_from(limit)?
+    );
+    assert!(!local_backup(&ledger, first).exists());
+    assert!(local_backup(&ledger, upgrade).join("books.db").is_file());
+    assert!(
+        rotated["backups"]
+            .as_array()
+            .ok_or("backups")?
+            .iter()
+            .any(|backup| backup["id"] == upgrade && backup["reason"] == "upgrade")
+    );
+
+    let manifest = local_backup(&ledger, upgrade).join("backup.json");
     let mut yesterday: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
     yesterday["created_at"] = (chrono::Utc::now() - chrono::TimeDelta::hours(25))
         .to_rfc3339()
         .into();
-    // Isolate the daily timing from newer backup entries left by rotation.
-    for backup in list["backups"].as_array().ok_or("backups")?.iter().skip(1) {
-        fs::remove_dir_all(local_backup(
-            &ledger,
-            backup["id"].as_str().ok_or("backup ID")?,
-        ))?;
-    }
     fs::write(manifest, serde_json::to_vec(&yesterday)?)?;
     drop(server);
     let _server = Server::start(&ledger, &["serve"], None)?;
     let list = data(cli(&ledger, &admin).arg("list"))?;
-    assert_ne!(list["backups"][0]["id"], id);
+    assert_ne!(list["backups"][0]["id"], upgrade);
     assert_eq!(list["backups"][0]["reason"], "daily");
+    assert!(local_backup(&ledger, upgrade).is_dir());
+    Ok(())
+}
+
+#[test]
+fn unreadable_manifest_is_reported_and_other_backups_stay_available() -> TestResult {
+    let ledger = Ledger::new()?;
+    let admin = admin(&ledger)?;
+    let bad = data(cli(&ledger, &admin).arg("create"))?;
+    let bad = bad["backup"]["id"].as_str().ok_or("backup ID")?;
+    let manifest = local_backup(&ledger, bad).join("backup.json");
+    fs::write(&manifest, b"unreadable manifest")?;
+
+    let created = data(cli(&ledger, &admin).arg("create"))?;
+    let id = created["backup"]["id"].as_str().ok_or("backup ID")?;
+    let output = cli(&ledger, &admin).arg("list").output()?;
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains(&format!("Skipping unreadable local backup {bad}")));
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        envelope["data"]["backups"]
+            .as_array()
+            .ok_or("backups")?
+            .len(),
+        1
+    );
+    assert_eq!(envelope["data"]["backups"][0]["id"], id);
+    assert!(manifest.is_file());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn committed_capture_succeeds_when_an_expired_backup_cannot_be_removed() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let ledger = Ledger::new()?;
+    let admin = admin(&ledger)?;
+    let first = data(cli(&ledger, &admin).arg("create"))?;
+    let first = first["backup"]["id"].as_str().ok_or("backup ID")?;
+    let directory = local_backup(&ledger, first);
+    let manifest = directory.join("backup.json");
+    let mut expired: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
+    expired["bytes"] = data(cli(&ledger, &admin).arg("list"))?["retention"]["max_bytes"].clone();
+    fs::write(&manifest, serde_json::to_vec(&expired)?)?;
+    let original = fs::metadata(&directory)?.permissions();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))?;
+    let output = cli(&ledger, &admin).arg("create").output();
+    if directory.exists() {
+        fs::set_permissions(&directory, original)?;
+    }
+    let output = output?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(output.status.success(), "{stderr}");
+    // Root can remove a directory regardless of its permission bits.
+    if directory.exists() {
+        assert!(stderr.contains(&format!("Cannot rotate local backup {first}")));
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout)?;
+    let id = envelope["data"]["backup"]["id"]
+        .as_str()
+        .ok_or("backup ID")?;
+    assert!(local_backup(&ledger, id).join("backup.json").is_file());
     Ok(())
 }
 

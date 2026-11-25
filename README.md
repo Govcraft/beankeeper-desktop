@@ -200,10 +200,11 @@ your agent to list the backups or restore one. After restoring, the agent can
 put your books back using the undo receipt.
 
 Backups stay beside the books and use the books' existing passphrase.
-Desktop keeps up to seven backups totaling at most 2 GiB per ledger. It takes
-a backup on first use, before migrating the books, on the first open with a
-new Desktop or core build, and daily while the service runs. A failed
-pre-migration backup stops the migration.
+Desktop retains up to seven readable backups totaling up to 2 GiB per ledger,
+keeping the newest pre-migration or upgrade backup. It takes a backup on first
+use, before migrating the books, on the first open with a new Desktop or core
+build, and daily while the service runs. A failed pre-migration backup stops
+the migration.
 
 The agent uses `backup_list`, `backup_create`, `backup_restore` and `backup_undo`
 on the ledger connection. Their CLI equivalents are `bk backups list`,

@@ -43,6 +43,30 @@ impl<'a> BooksState<'a> {
             Self::NeedsMigration(books) => Err(books.error),
         }
     }
+
+    pub(super) fn prepare(self) -> Result<PreparedBooks<'a>, CliError> {
+        match self {
+            Self::Current(books) => {
+                books.automatic();
+                Ok(PreparedBooks::Current(books))
+            }
+            Self::NeedsMigration(books) => books.open().map(PreparedBooks::Migrated),
+        }
+    }
+}
+
+pub(super) enum PreparedBooks<'a> {
+    Current(CurrentBooks<'a>),
+    Migrated(Db),
+}
+
+impl PreparedBooks<'_> {
+    pub(super) fn open(self) -> Result<Db, CliError> {
+        match self {
+            Self::Current(books) => books.open_existing(),
+            Self::Migrated(db) => Ok(db),
+        }
+    }
 }
 
 pub(super) struct CurrentBooks<'a> {
@@ -52,6 +76,10 @@ pub(super) struct CurrentBooks<'a> {
 }
 
 impl CurrentBooks<'_> {
+    fn automatic(&self) {
+        LocalBackups::report_automatic(self.books.capture_if_due(self.catalog));
+    }
+
     pub(super) fn snapshot(&self) -> &Db {
         &self.snapshot
     }
@@ -78,8 +106,8 @@ impl NeedsMigration<'_> {
     }
 }
 
-// The linked core exposes this mismatch as a Database diagnostic. Match its
-// exact shape and require a supported, older schema. Other errors pass through.
+// Stopgap until core exposes a typed schema probe or mismatch. Accept only its
+// exact Database diagnostic for a supported, older schema. Fail closed on changes.
 fn is_older_schema(error: &CliError) -> bool {
     let CliError::Database(message) = error else {
         return false;

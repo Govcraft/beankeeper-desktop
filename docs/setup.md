@@ -153,9 +153,12 @@ ledger. Each backup has a core `books.db` snapshot, backup metadata, and, when
 there are attachments, an archive of the content-addressed files in
 `attachments/`. For encrypted books, the snapshot and the
 `attachments.tar.age` archive both use the original passphrase.
-Desktop retains up to seven backups totaling at most 2 GiB per ledger. A
-single backup that exceeds this size is reported as an error. Core manages the
-separate undo snapshot recorded in each restore receipt.
+Desktop retains up to seven readable backups totaling up to 2 GiB per ledger. It
+keeps the newest pre-migration or upgrade backup. If a new daily or requested
+backup cannot fit alongside that copy, Desktop reports a size error. Desktop
+also reports unreadable entries and rotation errors in its log or CLI
+diagnostics. Core manages the separate undo snapshot recorded in each restore
+receipt.
 
 Ask your agent to list or restore a backup. With a ledger administrator grant,
 the agent can restore directly and give you the receipt. It can undo that
@@ -166,8 +169,13 @@ restore or undo are available locally.
 ### Recover a missing ledger file
 
 The private recovery kit contains the original passphrase. If the live file
-is missing, a local administrator can use
-`bk --db <new-ledger> --passphrase-file <private-file> recover --input <backup-dir>/books.db`.
+is missing, a local administrator can run this from the original ledger's
+directory.
+
+```text
+bk --db <new-ledger> --passphrase-file <private-file> recover --input .beankeeper-backups/<ledger-filename>/<bkbackup_…>/books.db
+```
+
 Supply the appropriate credential through `BK_AGENT_TOKEN` if enforcement
 requires it. Preserve any existing sibling `attachments/` directory. If it
 was also lost, decrypt the age archive with the same passphrase and extract it
