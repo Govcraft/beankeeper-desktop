@@ -244,6 +244,25 @@ Managed agent configs need no hand-edited session variables.
 Uninstall removes hosting while preserving all books and credentials.
 See [background hosting](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/service.md) for storage and recovery details.
 
+## List or restore a local backup
+
+Desktop backs up the local books and their documents automatically. Tell the
+owner when the available backups were taken using `backup_list`. Take an
+extra backup with `backup_create` when asked.
+
+When the owner asks you to restore a backup, identify it with `backup_list`,
+then call `backup_restore` with its `backup_id`. Say what changed, give the
+receipt, and offer to put the previous books back. Use `backup_undo` with the
+returned `undo_id` if the owner asks you to undo. It returns its own receipt.
+A later bookkeeping change can supersede an undo. If a tool returns that
+error, explain it and leave the later work intact.
+
+Create, restore, and undo require an already authorized ledger administrator
+connection. If that access is unavailable, explain which permission is
+required. Keep the owner's private credentials and recovery kit out of chat.
+Use the local tools yourself when authorized. Leave backup scheduling to
+Desktop and handle restoration in chat.
+
 ## Connect a local agent
 
 Installers register Beankeeper with detected clients by default. Run

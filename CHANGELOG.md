@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Automatically back up local books and attachments before migrations and upgrades, and list, restore, or undo backups through Desktop MCP and the CLI.
+
 ## [0.1.0-rc.30] - 2026-11-25
 
 - Register and diagnose Beankeeper for local Codex in the ChatGPT desktop app with `bk agents connect chatgpt-codex` and `bk agents doctor chatgpt-codex`.
