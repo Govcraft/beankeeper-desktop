@@ -205,11 +205,10 @@ books file and has its own browser session. A different listener needs an initia
 pairing. Visiting it leaves the original session available. Regenerate a saved
 link if the associated listener address changes.
 
-An unpaired browser sees
-the pairing explanation. It remembers the local destination for five minutes
-while the human opens the terminal's one-time pairing URL in that same browser
-and confirms **Pair this browser**. Confirmation returns to that destination,
-including its encoded filters. Opening multiple detail links before pairing
+The pairing page remembers the requested view for five minutes. Ask your
+assistant to open Desktop with the local `service_open` tool or run `bk open`.
+Select **Pair this browser** in the same browser to return to that view with
+its encoded filters. Opening multiple detail links before pairing
 keeps the most recently visited destination. After expiry or restart, reopen the
 original detail link before pairing. At the 64-entry limit, a new destination
 evicts the oldest remembered entry and the pairing page still loads. The owner
@@ -218,5 +217,5 @@ cookie grants no authority. See [pairing and recovery](browser-pairing.md#return
 
 An existing paired browser arriving from chat may initially withhold its Strict
 cookie. The same-origin **continue to your requested view** link restores that
-session without changing cookie policy. No agent token, association invitation,
-or terminal pairing secret belongs in a saved or shared detail URL.
+session without changing cookie policy. Saved and shared detail URLs carry only
+the view and filters.

@@ -34,6 +34,10 @@ when you want it to record transactions. Claude uses the extension's
 `access_set` tool. Say **Make me read-only** to turn posting off. Beankeeper
 respects your choice to stay read-only. Restarting cannot grant posting access.
 
+If a detail link asks you to pair the browser, say **Open Beankeeper Desktop**
+in chat. The extension opens your default browser. Select **Pair this browser**
+there to continue to the detail you requested.
+
 If setup fails, check the extension's log in Claude Desktop and make sure
 your OS login session and keychain are available.
 

@@ -50,7 +50,7 @@ Explicit invalid credentials override fallback credentials and fail authenticati
 
 ## Pairing and tab selection
 
-First pair a browser using the one-time terminal URL from `bk serve`. Call
+First pair a browser using `bk open` or the local `service_open` tool. Call
 `ui_status` with the UI token, open its association URL in that paired browser,
 and confirm **Connect agent to this browser**. The association URL alone cannot
 log a browser in. Pairing a browser opens its navigation channel but does not
