@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::links::{
     LinkError,
-    values::{AccountSelection, Clearance, Currency, Date, MinorAmount, Offset},
+    values::{AccountSelection, Clearance, Currency, Date, IncludeReversed, MinorAmount, Offset},
 };
 
 use super::{ViewError, append_url_param, encode};
@@ -31,6 +31,7 @@ pub(crate) struct ViewQuery {
     pub search: Option<String>,
     pub status: Option<String>,
     pub offset: Option<i64>,
+    pub include_reversed: Option<bool>,
     pub currency: Option<String>,
     pub cash_account: Option<String>,
     pub receivable_account: Option<String>,
@@ -195,6 +196,7 @@ pub(crate) struct Filters {
     pub(super) search: Option<Search>,
     pub(super) status: Option<Clearance>,
     pub(super) offset: Offset,
+    pub(super) include_reversed: IncludeReversed,
 }
 
 impl TryFrom<&Filters> for SummaryDates {
@@ -266,6 +268,7 @@ impl ViewQuery {
                 .transpose()
                 .map_err(|LinkError(message)| ViewError::Invalid(message))?
                 .unwrap_or_default(),
+            include_reversed: self.include_reversed.map(Into::into).unwrap_or_default(),
             currency,
             cash_account: parse_optional(self.cash_account)?,
             receivable_account: parse_optional(self.receivable_account)?,
@@ -323,6 +326,11 @@ impl Filters {
         );
         append_url_param(&mut url, "status", self.status.as_ref());
         append_url_param(&mut url, "currency", self.currency.as_ref());
+        append_url_param(
+            &mut url,
+            "include_reversed",
+            bool::from(self.include_reversed).then_some(true),
+        );
         append_url_param(&mut url, "offset", (offset > 0).then_some(offset));
         url
     }

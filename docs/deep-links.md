@@ -70,7 +70,7 @@ directly. They keep opening the same page after the agent marks it seen.
 | `dashboard` | `/` | `company`, `currency` |
 | `financial-summary` | `/summary` | `company`, `currency`, date and comparison bounds, `cash_account`, `receivable_account`, `payable_account` |
 | `accounts` | `/accounts` | `company` |
-| `transactions` | `/transactions` | `company`, `account`, `category`, `payee`, `from`, `to`, `compare_from`, `compare_to`, `currency`, `search`, `status`, `min_amount`, `max_amount`, `offset` |
+| `transactions` | `/transactions` | `company`, `account`, `category`, `payee`, `from`, `to`, `compare_from`, `compare_to`, `currency`, `search`, `status`, `min_amount`, `max_amount`, `include_reversed`, `offset` |
 | `transaction` | `/transactions/ID` | `transaction_id` (positive integer in the path), `company`, audit `offset` |
 | `reports` | `/reports` | `company`, `currency`; or `report_kind` selecting one of the reports below with its filters |
 | `income-statement` | `/reports/income-statement` | `company`, `currency`, `from`, `to`, comparison bounds |
@@ -115,6 +115,12 @@ view. Empty date and amount strings are invalid; omit an unused filter or use
 
 Register amount bounds are inclusive integer minor units. Include `currency`
 when the company records transactions in multiple currencies.
+
+Register links hide both sides of audited reversals by default. To include them
+in both periods, set the boolean `state.include_reversed` to `true` in
+`ui_get_link` or `ui_show_view`, use `--include-reversed true` with
+`bk ui link --view-id transactions`, or add `include_reversed=true` to the URL.
+Transaction detail links can still open either posting directly.
 
 Compile-time invariants (tenet 2): the enum and per-view filter structs prevent
 attaching register filters to reports, report-specific filters to another report,

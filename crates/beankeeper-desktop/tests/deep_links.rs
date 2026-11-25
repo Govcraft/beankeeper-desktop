@@ -206,6 +206,7 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
     server.pair()?;
     assert_view_links_resolve(&server, reader, transaction_id)?;
     assert_link_cli_parity(&server, reader, &ledger.path, state.path())?;
+    assert_link_filter_validation(&server, reader)?;
     assert_inherited_company_parity(&server, reader, &ledger.path, state.path())?;
     Ok(())
 }
@@ -214,8 +215,7 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
 fn pairing_restores_the_exact_view_without_granting_access_on_get() -> TestResult {
     let ledger = Ledger::new()?;
     let server = Server::start(&ledger, &["serve"], None)?;
-    let destination =
-        "/transactions?company=acme&payee=Caf%C3%A9%20%26%20Tea&from=2026-10-01&to=2026-10-31";
+    let destination = "/transactions?company=acme&payee=Caf%C3%A9%20%26%20Tea&from=2026-10-01&to=2026-10-31&include_reversed=true";
     let response = server
         .client
         .get(format!("{}{destination}", server.base))
@@ -488,6 +488,8 @@ fn assert_link_cli_parity(server: &Server, reader: &str, books: &Path, state: &P
             "2026-10-01",
             "--to",
             "2026-10-31",
+            "--include-reversed",
+            "true",
         ])
         .output()?;
     assert!(
@@ -496,15 +498,39 @@ fn assert_link_cli_parity(server: &Server, reader: &str, books: &Path, state: &P
         String::from_utf8_lossy(&output.stderr)
     );
     let cli: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        cli["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("&include_reversed=true"))
+    );
     assert_eq!(
         cli,
         link(
             server,
             reader,
             "transactions",
-            json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31"})
+            json!({"company":"acme","account":"5000","category":"sched-c:24b","payee":"Café & Tea / 100%","from":"2026-10-01","to":"2026-10-31","include_reversed":true})
         )?
     );
+    let page = server
+        .client
+        .get(cli["url"].as_str().ok_or("register URL")?)
+        .send()?
+        .error_for_status()?
+        .text()?;
+    assert!(page.contains("name=\"include_reversed\" value=\"true\" checked"));
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/transactions?include_reversed=yes", server.base))
+            .send()?
+            .status(),
+        400
+    );
+    Ok(())
+}
+
+fn assert_link_filter_validation(server: &Server, reader: &str) -> TestResult {
     for arguments in [
         json!({"view_id":"settings","state":{"company":"ignored"}}),
         json!({"view_id":"transactions","state":{"compare_from":"2026-10-01"}}),
@@ -528,6 +554,16 @@ fn assert_link_cli_parity(server: &Server, reader: &str, books: &Path, state: &P
             "transactions",
             json!({"min_amount":"2","max_amount":"1"}),
             vec!["--min-amount", "2", "--max-amount", "1"],
+        ),
+        (
+            "transactions",
+            json!({"include_reversed":"yes"}),
+            vec!["--include-reversed", "yes"],
+        ),
+        (
+            "accounts",
+            json!({"include_reversed":true}),
+            vec!["--include-reversed", "true"],
         ),
         (
             "balance-sheet",

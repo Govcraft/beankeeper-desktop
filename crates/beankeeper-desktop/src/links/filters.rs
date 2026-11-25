@@ -7,7 +7,8 @@ use super::{
     encode_path, fields,
     values::{
         AccountCode, AccountSelection, BudgetWindow, Clearance, Currency, Date, DecimalAmount,
-        LinkCompany, MinorAmount, Offset, ProposalId, Threshold, TransactionId, Year,
+        IncludeReversed, LinkCompany, MinorAmount, Offset, ProposalId, Threshold, TransactionId,
+        Year,
     },
 };
 use schemars::JsonSchema;
@@ -103,6 +104,7 @@ filter_set!(Transactions {
     status: Clearance,
     offset: Offset,
     currency: Currency,
+    include_reversed: IncludeReversed,
 });
 filter_set!(Catalog {
     company: LinkCompany,
