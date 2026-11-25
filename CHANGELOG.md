@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Deliver Beankeeper's setup, correction, and reporting guide through Skills over MCP in the Claude extension and the `beankeeper` stdio connection.
 - Install Desktop from beankeeper.app by default, with an optional download mirror and required Sigstore and SHA-256 verification.
 - Set up encrypted local books or start practice books from the installed Claude extension, with one Mac download for Apple Silicon and Intel.
 - Use plain language, exact amounts, receipts, and suggested next questions in Beankeeper chat, with a clearer Claude extension description.

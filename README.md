@@ -49,6 +49,10 @@ When **Get it for the Claude app** is available on beankeeper.app, download
 the Beankeeper extension, double-click it, and click **Install** in Claude.
 Then say **Set up my books** or **Create demo books**. Claude sets up encrypted
 books on your computer and continues in the same chat.
+[Skills over MCP](https://skills.extensions.modelcontextprotocol.io/) lets
+compatible clients load Beankeeper's setup, correction, and reporting guide
+directly from the extension or the `beankeeper` stdio connection. The guide
+updates with Beankeeper and needs no separate installation.
 [Claude Desktop setup and removal](docs/claude-desktop.md)
 
 ## Unsigned builds
