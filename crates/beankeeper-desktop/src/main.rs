@@ -104,7 +104,9 @@ fn main() -> ExitCode {
             return agents::run(options, json, matches.get_flag("quiet"));
         }
         DesktopCommand::Service(options) => {
-            let ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
+            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
+                .unwrap_or_else(|error| error.exit());
             service::run(
                 &options,
                 ledger,
