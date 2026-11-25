@@ -87,12 +87,14 @@ run them from an authorized shell in the owner's logged-in OS session.
   [book setup tools](#guide-the-owner-through-book-setup) for real books or the
   [demo interview](#tailor-a-demo-in-chat) for practice books.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
-- **Claude Code, local Codex, and Grok Build.** Follow the steps below when
+- **ChatGPT desktop app in local Codex mode.** Choose **Codex** and
+  **This computer**. Follow the steps below from that local session.
+  [ChatGPT connection guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/chatgpt.md)
+- **Claude Code, the local Codex CLI, and Grok Build.** Follow the steps below when
   running on the owner's machine.
-- **ChatGPT Work with local shell access.** Run setup, then check for the
-  local Beankeeper MCP tools in this session. If they are unavailable,
-  continue in local Codex on the same machine.
-  [ChatGPT MCP](https://learn.chatgpt.com/docs/extend/mcp)
+- **Regular ChatGPT chat, Work, or ChatGPT web.** Direct the owner to
+  **Codex** and **This computer** in the ChatGPT desktop app. Give them the
+  same install prompt to use there.
 - **Grok Bot with approved local execution.** Run setup, then connect through
   Grok Build or another supported local client. Grok Bot's Command MCP runs
   on its cloud computer.
@@ -179,6 +181,13 @@ unavailable cosign, or a checksum mismatch. If the service or registration
 fails, report the status and the specific step. Repair that step before
 resuming installation.
 
+In local Codex, run `bk agents connect codex --json` and
+`bk agents doctor codex --json` from the owner's local session once the
+service is running. Explicit registration also works before a Codex config
+file exists. In the ChatGPT desktop app, have the owner select **Settings →
+MCP servers → Restart** and open a new Codex chat on **This computer** if the
+current chat still lacks the tools. Ask them to say **Set up my books** there.
+
 Explain where the private recovery kit was created on first installation. Ask
 the owner to open the kit directly and keep an offline copy. Only the owner
 handles the key. Use the installed location or restart the agent client when it
@@ -244,12 +253,11 @@ connection, use `bk agents connect --all` or select one client, such as
 Use `bk agents doctor --json` to check the managed configuration and make a
 read-only tool call through the local service.
 
-Supported clients are Claude Desktop, Claude Code, Codex CLI, Cursor, Gemini
-CLI, VS Code with Copilot, and Grok Build. An installed Beankeeper extension
-manages its own Claude Desktop connection. For local Codex in the ChatGPT
-desktop app, run `bk agents connect codex --json`, then restart the servers
-from **Settings → MCP servers**. Confirm that `company_list` responds in a
-local Codex chat.
+Supported clients are Claude Desktop, Claude Code, local Codex (including
+the ChatGPT desktop app), Cursor, Gemini CLI, VS Code with Copilot, and
+Grok Build. An installed Beankeeper extension manages its own Claude Desktop
+connection. `chatgpt-codex` is an alias for the `codex` client on versions
+that list it in `bk agents connect --help`.
 [ChatGPT MCP settings](https://learn.chatgpt.com/docs/extend/mcp)
 
 For Grok Build, run `bk agents connect grok-build --json` and restart the client.
