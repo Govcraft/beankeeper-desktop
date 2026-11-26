@@ -1,6 +1,6 @@
 # Beankeeper Desktop License Agreement and Source-Available Terms
 
-**Licensor:** DIAM General Services LLC, doing business as Govcraft ("Govcraft," "we," "us"), a Texas limited liability company
+**Licensor:** DIAM General Services LLC, doing business as Beankeeper ("Beankeeper," "we," "us"), a Texas limited liability company
 **Address:** 615 N Upper Broadway St, Ste 639, Corpus Christi, TX 78401, United States
 **Support:** support@beankeeper.app
 
@@ -12,7 +12,7 @@ This agreement covers **Beankeeper Desktop**—the background service, local bro
 
 - **Buy once, keep it.** A paid license is a one-time purchase of $79, not a subscription. One purchase covers every 1.x release of Beankeeper Desktop, forever. A 2.0 release would be a new purchase.
 - **One computer, one set of books.** Each license covers one set of books and may be used on one computer at a time. If you keep books for more than one client, each client's books need their own license, even when they all live on the same computer. You may move a license to a replacement computer by deactivating it on the old computer and activating it on the new one.
-- **Your books stay yours.** Your books live on your computer, encrypted with a recovery kit you control. Govcraft never holds your books and cannot lock you out of your own data.
+- **Your books stay yours.** Your books live on your computer, encrypted with a recovery kit you control. Beankeeper never holds your books and cannot lock you out of your own data.
 - **Open-source core stays free.** The Beankeeper ledger engine (`Govcraft/beankeeper`, licensed under MIT and Apache-2.0) is separate open-source software. This agreement never limits or revokes your rights to the open-source ledger.
 - **No phone-home.** Beankeeper Desktop checks your license on your own computer. It does not call home to keep working.
 - **60-day automatic refund.** If you want a refund within 60 days of buying, ask your AI to return your license (or run `bk license return`). Your license is deactivated and revoked, and your refund is issued automatically.
@@ -32,8 +32,8 @@ This agreement covers **Beankeeper Desktop**—the background service, local bro
 
 ## 3. Purchase, perpetual license grant, and updates
 
-1. **One-time purchase.** Paid licenses are sold for a one-time fee of $79 (plus any applicable taxes). **Govcraft (DIAM General Services LLC) is the licensor.** You may buy a license on beankeeper.app or from an authorized reseller or merchant of record (for example Paddle, Polar, Etsy, Lemon Squeezy, or an app store). Where a merchant of record or store handles the payment, its checkout terms also apply to payment and tax. The license itself, the 60-day automatic refund on in-app return, and revocation are Govcraft's and apply no matter where you bought the license. A refund is issued through the original seller. Govcraft does not store your payment card number.
-2. **Perpetual grant for eligible releases.** Once you activate a valid, signed license file issued for your purchase, Govcraft grants you a non-exclusive, worldwide, perpetual license (unless returned or terminated under Section 8) to install and run eligible releases of Beankeeper Desktop for your own personal, household, or internal business bookkeeping, or for a client's books you are engaged to keep, on the computer and ledger terms in Section 3.4.
+1. **One-time purchase.** Paid licenses are sold for a one-time fee of $79 (plus any applicable taxes). **DIAM General Services LLC, doing business as Beankeeper, is the licensor.** You may buy a license on beankeeper.app or from an authorized reseller or merchant of record (for example Paddle, Polar, Etsy, Lemon Squeezy, or an app store). Where a merchant of record or store handles the payment, its checkout terms also apply to payment and tax. The license itself, the 60-day automatic refund on in-app return, and revocation are Beankeeper's and apply no matter where you bought the license. A refund is issued through the original seller. Beankeeper does not store your payment card number.
+2. **Perpetual grant for eligible releases.** Once you activate a valid, signed license file issued for your purchase, Beankeeper grants you a non-exclusive, worldwide, perpetual license (unless returned or terminated under Section 8) to install and run eligible releases of Beankeeper Desktop for your own personal, household, or internal business bookkeeping, or for a client's books you are engaged to keep, on the computer and ledger terms in Section 3.4.
 3. **Eligible releases (major version).**
    - A license purchased for Beankeeper Desktop 1.x covers **every 1.x release, forever**. You may install and keep using any 1.x version, including versions released after you bought the license.
    - A 2.0 release (or any later major version) is a new product for licensing purposes and requires a new purchase at the price offered at that time. A 1.x license does not cover 2.0 or later major versions.
@@ -83,7 +83,7 @@ Except as expressly allowed in Section 4 or by non-waivable law, you may **not**
 
 1. **60-day automatic refund via license return.**
    - Within **60 days** of your purchase date, you may return your license through the app by asking your AI to return your license (or running `bk license return`).
-   - Desktop explains what will happen before you confirm. Once confirmed, Desktop removes that license from this computer, notifies the license server to revoke it, and triggers a **full refund automatically** through the original seller (the site, reseller, or merchant of record where you bought)—no manual approval from Govcraft is required.
+   - Desktop explains what will happen before you confirm. Once confirmed, Desktop removes that license from this computer, notifies the license server to revoke it, and triggers a **full refund automatically** through the original seller (the site, reseller, or merchant of record where you bought)—no manual approval from Beankeeper is required.
    - If an automatic refund fails for a technical reason, contact `support@beankeeper.app` and we will process it promptly.
 2. **Returns after 60 days.** You may still return a license through the app more than 60 days after purchase. Desktop will explain plainly before you confirm that returning after 60 days revokes and deactivates the license with **no refund**.
 3. **Read-Only Mode.** On official non-rc 1.0.0 and later releases, after these terms are final (`#96`), a set of books with no active license—or whose license has been returned, refunded, deactivated, or revoked—is in **Read-Only Mode**. Release candidates are never placed in Read-Only Mode for lack of a license. Read-Only Mode is per ledger: other books on the same computer that have their own active license stay writable.
@@ -95,7 +95,7 @@ Except as expressly allowed in Section 4 or by non-waivable law, you may **not**
 
 ## 8. Transfer and termination
 
-1. **Transfer.** You may move your license between computers you own or control, as described in Section 3.4 (one computer at a time). You may also transfer this license in connection with a sale or merger of the business whose books the license covers (business succession). You may not resell, gift, or otherwise assign this license to another person, or to a different business, except for that business succession. Govcraft may assign this agreement in connection with a reorganization or sale of its business.
+1. **Transfer.** You may move your license between computers you own or control, as described in Section 3.4 (one computer at a time). You may also transfer this license in connection with a sale or merger of the business whose books the license covers (business succession). You may not resell, gift, or otherwise assign this license to another person, or to a different business, except for that business succession. Beankeeper may assign this agreement in connection with a reorganization or sale of its business.
 2. **Termination.**
    - You may terminate your license at any time by returning it through the app or deleting all copies of your license file and Desktop binaries.
    - Your license terminates automatically if your purchase is refunded, reversed by chargeback or payment dispute, or if you materially breach Section 3.4 or Section 5 and fail to cure within 14 days of notice (or immediately for uncurable circumvention or redistribution).
@@ -105,8 +105,8 @@ Except as expressly allowed in Section 4 or by non-waivable law, you may **not**
 
 ## 9. Not tax, accounting, or legal advice; your AI and third parties
 
-1. **Not professional advice.** Beankeeper helps you keep records and ask questions about them. It is not a bookkeeper, CPA, accountant, tax preparer, or lawyer. Nothing in the software, on `beankeeper.app`, or from Govcraft is tax, accounting, or legal advice. You are solely responsible for your books, tax filings, and financial decisions.
-2. **Your AI and banks.** You connect Beankeeper to an AI you choose (such as the Claude app or another compatible AI), under that provider's own terms and privacy policy. Govcraft is not responsible for what third-party AI apps or bank/statement connectors do, say, or store. Beankeeper itself does not connect directly to your bank.
+1. **Not professional advice.** Beankeeper helps you keep records and ask questions about them. It is not a bookkeeper, CPA, accountant, tax preparer, or lawyer. Nothing in the software, on `beankeeper.app`, or from Beankeeper is tax, accounting, or legal advice. You are solely responsible for your books, tax filings, and financial decisions.
+2. **Your AI and banks.** You connect Beankeeper to an AI you choose (such as the Claude app or another compatible AI), under that provider's own terms and privacy policy. Beankeeper is not responsible for what third-party AI apps or bank/statement connectors do, say, or store. Beankeeper itself does not connect directly to your bank.
 
 ---
 
@@ -139,6 +139,6 @@ Beankeeper Desktop uses standard encryption and is subject to United States expo
 
 ## 13. Changes, governing law, and general terms
 
-1. **Changes to these terms.** Govcraft may update these terms for future versions and future purchases. A change will never retroactively reduce the perpetual use rights, major-version update coverage, or 60-day automatic refund right of a license you already bought, except as required by law.
-2. **Governing law and venue.** This agreement is governed by the laws of the **State of Texas**, without regard to conflict-of-law rules. Any dispute arising out of or relating to this agreement or Beankeeper Desktop that goes to court must be brought in the **state or federal courts located in Texas**, and you and Govcraft consent to the personal jurisdiction and exclusive venue of those courts.
-3. **General.** If any provision of this agreement is held unenforceable, the remaining provisions remain in effect. Failure to enforce a provision is not a waiver. Together with your checkout receipt, the Website Terms of Service (`https://beankeeper.app/terms/`), and the Privacy Policy (`https://beankeeper.app/privacy/`), this agreement is the entire agreement between you and Govcraft regarding Beankeeper Desktop.
+1. **Changes to these terms.** Beankeeper may update these terms for future versions and future purchases. A change will never retroactively reduce the perpetual use rights, major-version update coverage, or 60-day automatic refund right of a license you already bought, except as required by law.
+2. **Governing law and venue.** This agreement is governed by the laws of the **State of Texas**, without regard to conflict-of-law rules. Any dispute arising out of or relating to this agreement or Beankeeper Desktop that goes to court must be brought in the **state or federal courts located in Texas**, and you and Beankeeper consent to the personal jurisdiction and exclusive venue of those courts.
+3. **General.** If any provision of this agreement is held unenforceable, the remaining provisions remain in effect. Failure to enforce a provision is not a waiver. Together with your checkout receipt, the Website Terms of Service (`https://beankeeper.app/terms/`), and the Privacy Policy (`https://beankeeper.app/privacy/`), this agreement is the entire agreement between you and Beankeeper regarding Beankeeper Desktop.
