@@ -2,11 +2,12 @@
 
 ## [Unreleased]
 
-- Fail stable release preflight before packaging when the issuer-signed revocation snapshot is missing or invalid.
+## [1.0.2] - 2026-11-26
 
 - Report stale Claude extensions through CLI and MCP and open signed upgrades with in-process verification, trust-rotation recovery, and restart guidance.
 - Report absent and already-returned licenses with receipt evidence through CLI and MCP, and give CLI-specific return retry guidance.
 - Show the canonical two-bean Beankeeper mark in the Claude Desktop extension with a crisp 512×512 icon.
+- Fail stable release preflight before packaging when the issuer-signed revocation snapshot is missing or invalid, and refresh the embedded snapshot.
 
 ## [1.0.1] - 2026-11-26
 
