@@ -3290,6 +3290,7 @@ dependencies = [
  "tracing",
  "unicode-general-category",
  "unicode-normalization",
+ "url",
  "uuid",
 ]
 

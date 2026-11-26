@@ -5,7 +5,7 @@ use reqwest::Url;
 use super::ProductError;
 
 /// A license service origin that can safely receive claim and recovery codes.
-pub(super) struct LicenseServiceUrl(Url);
+pub(in crate::product) struct LicenseServiceUrl(Url);
 
 impl FromStr for LicenseServiceUrl {
     type Err = ProductError;
@@ -30,16 +30,16 @@ impl FromStr for LicenseServiceUrl {
 }
 
 impl LicenseServiceUrl {
-    pub(super) fn requires_https(&self) -> bool {
+    pub(in crate::product) fn requires_https(&self) -> bool {
         self.0.scheme() == "https"
     }
 
-    pub(super) fn bypasses_proxy(&self) -> bool {
+    pub(in crate::product) fn bypasses_proxy(&self) -> bool {
         // A validated HTTP origin is already known to be loopback.
         !self.requires_https() || is_loopback(&self.0)
     }
 
-    pub(super) fn endpoint(&self, path: &str) -> Url {
+    pub(in crate::product) fn endpoint(&self, path: &str) -> Url {
         let mut url = self.0.clone();
         url.set_path(path);
         url

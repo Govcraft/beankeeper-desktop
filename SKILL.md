@@ -968,6 +968,21 @@ Keep signed text, claim codes, and private recovery information out of replies.
 Desktop handles recovery itself. Use the local lifecycle connection for
 activation if the ledger connection only lists `license_status`.
 
+When the owner requests a return, explain before the single confirmation:
+"Returns within 60 days of purchase are refunded automatically. If the 60-day
+window has closed, the return is not accepted, your license stays active and
+nothing changes." Say that confirming requests the return and refund; paid
+features stop on this computer on success; the books stay theirs and readable;
+the books are never touched. Do not infer eligibility from local dates.
+Use `license_return` on the local lifecycle connection. Supported clients elicit
+the single confirmation. Otherwise convey the tool's explanation and call again
+with `confirm: true` only after the owner confirms. Select `license_id` when
+several licenses are installed. The CLI equivalent is `bk license return`, with
+`--yes` for an agent acting on that confirmation. Report the structured outcome
+and receipt in plain words. A pending refund is recorded and is being submitted
+automatically. Failures preserve the local license; a closed window leaves it
+active. Complimentary licenses require support@beankeeper.app.
+
 Offer **License and updates** using the report's `settings_url` if the owner
 wants the details in their paired browser. Cached update results show readable
 UTC attempt times and explain failed or incomplete checks. Results are tied to

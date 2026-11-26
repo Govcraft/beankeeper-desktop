@@ -12,27 +12,31 @@ use super::{
     BooksSelection, LicenseRequest, ProductError,
     activation::{ActivationInputs, Storefront},
     report::{LicenseErrorCode, LicenseResponse},
+    returns::{self, ReturnConfirmation, ReturnRequest, ReturnResponse},
 };
 #[derive(Clone, Copy)]
 pub(crate) enum LicenseTool {
     Status,
     Activate,
+    Return,
 }
 
 impl LicenseTool {
     pub(crate) const STATUS: &str = "license_status";
+    const RETURN: &str = "license_return";
     const ACTIVATE: &str = "license_activate";
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             Self::STATUS => Some(Self::Status),
             Self::ACTIVATE => Some(Self::Activate),
+            Self::RETURN => Some(Self::Return),
             _ => None,
         }
     }
 
     pub(crate) fn tools() -> impl Iterator<Item = Tool> {
-        [Self::Status, Self::Activate]
+        [Self::Status, Self::Activate, Self::Return]
             .into_iter()
             .filter_map(Self::tool)
     }
@@ -49,15 +53,65 @@ impl LicenseTool {
                 "Activate the license the owner provided for these books. Use exactly one signed license, local license file, or claim code. Activate directly and tell the owner what happened. Keep license text, codes and private recovery information out of replies.",
                 schemars::schema_for!(ActivateArguments),
             ),
+            Self::Return => (
+                Self::RETURN,
+                returns::POLICY,
+                schemars::schema_for!(ReturnArguments),
+            ),
         };
         let annotations = ToolAnnotations::new()
             .read_only(matches!(self, Self::Status))
-            .destructive(false)
-            .open_world(matches!(self, Self::Activate));
+            .destructive(matches!(self, Self::Return))
+            .open_world(!matches!(self, Self::Status));
         Some(
             Tool::new(name, description, schema.to_value().as_object()?.clone())
                 .with_annotations(annotations),
         )
+    }
+
+    pub(crate) async fn call_with_context(
+        self,
+        request: CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> CallToolResult {
+        if !matches!(self, Self::Return) {
+            return tokio::task::spawn_blocking(move || self.call_request(request, None))
+                .await
+                .unwrap_or_else(|_| worker_failure());
+        }
+        let arguments = Value::Object(request.arguments.unwrap_or_default());
+        let mut arguments = match decode::<ReturnArguments>(arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => return failure(&error),
+        };
+        if !arguments.confirm.is_confirmed()
+            && context
+                .peer
+                .supported_elicitation_modes()
+                .contains(&rmcp::service::ElicitationMode::Form)
+        {
+            let Ok(schema) = rmcp::model::ElicitationSchema::builder()
+                .required_bool("confirm")
+                .build()
+            else {
+                return worker_failure();
+            };
+            let elicitation = rmcp::model::ElicitRequestParams::FormElicitationParams {
+                meta: None,
+                message: returns::POLICY.to_owned(),
+                requested_schema: schema,
+            };
+            let result = context.peer.create_elicitation(elicitation).await;
+            arguments.confirm = result
+                .ok()
+                .filter(|result| result.action == rmcp::model::ElicitationAction::Accept)
+                .and_then(|result| result.content)
+                .and_then(|content| serde_json::from_value::<ConfirmationAnswer>(content).ok())
+                .map_or_else(ReturnConfirmation::default, |answer| answer.confirm);
+        }
+        tokio::task::spawn_blocking(move || return_reply(&arguments.into_request().execute()))
+            .await
+            .unwrap_or_else(|_| worker_failure())
     }
 
     pub(crate) fn call(self, params: &Value, books: Option<&Path>) -> CallToolResult {
@@ -83,6 +137,13 @@ impl LicenseTool {
     ) -> Result<CallToolResult, ProductError> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let request = match self {
+            Self::Return => {
+                return Ok(return_reply(
+                    &decode::<ReturnArguments>(arguments)?
+                        .into_request()
+                        .execute(),
+                ));
+            }
             Self::Status => {
                 decode::<NoArguments>(arguments)?;
                 LicenseRequest::Status
@@ -96,6 +157,41 @@ impl LicenseTool {
         let settings_url = target.settings_url();
         Ok(reply(&report.response(settings_url.as_deref())))
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmationAnswer {
+    confirm: ReturnConfirmation,
+}
+
+/// Shared typed inputs for return tools and service elicitation.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReturnArguments {
+    /// Select an installed license when more than one is present.
+    #[schemars(with = "Option<String>")]
+    license_id: Option<crate::license::LicenseId>,
+    /// Explicitly request the return and refund after reading the policy.
+    #[serde(default)]
+    pub(crate) confirm: ReturnConfirmation,
+}
+
+impl ReturnArguments {
+    pub(crate) fn into_request(self) -> ReturnRequest {
+        ReturnRequest::new(self.license_id, self.confirm)
+    }
+}
+
+pub(crate) fn return_reply(response: &ReturnResponse) -> CallToolResult {
+    let payload = json!(response);
+    let mut result = if response.is_error() {
+        CallToolResult::structured_error(payload)
+    } else {
+        CallToolResult::structured(payload)
+    };
+    result.content = vec![ContentBlock::text(response.message())];
+    result
 }
 
 #[derive(Deserialize, JsonSchema)]

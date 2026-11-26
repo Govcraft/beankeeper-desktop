@@ -23,6 +23,7 @@ use std::{
 mod activation;
 pub(crate) mod mcp;
 mod report;
+pub(crate) mod returns;
 
 pub use activation::Storefront;
 use activation::{ActivationInputs, ActivationSource};
@@ -145,6 +146,15 @@ pub struct LicenseOptions {
 /// Local license commands, including offline activation and online redemption.
 #[derive(Subcommand)]
 pub enum LicenseCommand {
+    /// Request a license return and refund without changing your books.
+    Return {
+        /// Select an installed license when more than one is present.
+        #[arg(long)]
+        license_id: Option<LicenseId>,
+        /// Confirm the return and refund after reading the return policy.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Verify and store a license, or redeem a storefront key with a configured service.
     Activate {
         /// Signed license file. Offline activation makes no network request.
@@ -426,6 +436,9 @@ pub fn run_license(
 ) -> Result<ExitCode, ProductError> {
     let request = match options.command {
         None => LicenseRequest::Status,
+        Some(LicenseCommand::Return { license_id, yes }) => {
+            return run_return(license_id, yes.into(), json);
+        }
         Some(LicenseCommand::Trust { json }) => {
             if OFFICIAL_BUILD {
                 license::release_revocations(&trusted_keys()?)?;
@@ -454,6 +467,37 @@ pub fn run_license(
     let report = request.run(&target)?;
     report.write_cli(json, &target)
 }
+fn run_return(
+    license_id: Option<LicenseId>,
+    confirmation: returns::ReturnConfirmation,
+    json: bool,
+) -> Result<ExitCode, ProductError> {
+    let request = returns::ReturnRequest::new(license_id.clone(), confirmation);
+    let mut response = request.execute();
+    if response.needs_confirmation() && !json {
+        use std::io::Write;
+        eprintln!("{}", returns::POLICY);
+        eprint!("Request the return and refund? [y/N] ");
+        io::stderr().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let confirmed = answer
+            .parse::<returns::ReturnConfirmation>()
+            .unwrap_or_else(|never| match never {});
+        response = returns::ReturnRequest::new(license_id, confirmed).execute();
+    }
+    if json {
+        println!("{}", serde_json::json!(response));
+    } else {
+        println!("{}", response.message());
+    }
+    Ok(if response.is_error() || response.needs_confirmation() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
 /// Whether a license command requires its selected books to exist.
 #[derive(Clone, Copy)]
 pub enum BooksRequirement {
