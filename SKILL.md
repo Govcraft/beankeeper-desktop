@@ -838,6 +838,34 @@ structured numbers and chartable series from ledger tools to draw charts in the
 conversation when useful. The owner never needs Desktop to understand the answer.
 Offer a deep link only when a chart or detailed view helps the owner.
 
+### Color financial charts by meaning
+
+Choose series colors by financial meaning, never by a value's sign or the
+client's default palette. A positive liability balance is still money owed.
+
+- Cash and assets may use green or another positive/cash color.
+- Liabilities and debt must use a neutral or warning color, such as gray or
+  amber. Never use green or the same positive/cash color as cash or assets.
+- Net worth combines assets and debt; give it a distinct neutral color, such
+  as blue, rather than the cash color. Negative net worth must use a neutral
+  or warning color, never green or another positive/cash color.
+- Keep each series' meaning and color consistent across periods. Label the
+  series and exact amounts, retain negative signs, and include a legend or
+  direct labels so color is never the only distinction. Do not negate debt
+  balances merely to make the chart look right.
+
+Use structured semantic-role hints when the installed tool supplies them;
+otherwise identify roles from the tool's account types and metric definitions.
+Do not infer roles from a display name or amount sign. If the role is unclear,
+use a neutral color and explain the uncertainty. If the chart client cannot
+control series colors, give labeled numbers in words or a table instead of a
+misleading chart. Offer the matching Desktop detail link only as an option.
+
+Fictional demo example: cash $4,000.00 is green, debt owed $1,500.00 is amber,
+and net worth $2,500.00 is blue. In a second fictional case with cash $1,000.00
+and debt owed $1,500.00, net worth is −$500.00 in blue or amber, never green.
+Label both examples and their charts **fictional**.
+
 Call `ui_get_link` on the managed ledger connection (`ledger/read`) with the
 same `view_id` and `state` used by `ui_show_view`. This tool succeeds without a
 paired browser, UI credential or live tab, works under `--read-only`, and never

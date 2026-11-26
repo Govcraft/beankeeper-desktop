@@ -1,17 +1,17 @@
 import hashlib
-import os
-import sys
 import importlib.util
 import io
 import json
-from pathlib import Path
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
 import zipfile
+from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
@@ -275,6 +275,28 @@ class PackagingTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, section)
+
+    def test_skill_teaches_financial_chart_semantics(self):
+        guide = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        _, heading, rest = guide.partition("\n### Color financial charts by meaning\n")
+        self.assertTrue(heading, "missing financial chart guidance")
+        section = rest.split("\nCall `ui_get_link`", 1)[0]
+        for requirement in (
+            "never by a value's sign",
+            "Liabilities and debt must use a neutral or warning color",
+            "Never use green or the same positive/cash color",
+            "Net worth combines assets and debt",
+            "Negative net worth must use a neutral",
+            "color is never the only distinction",
+            "Do not negate debt",
+            "Do not infer roles from a display name or amount sign",
+            "If the chart client cannot",
+            "table instead of a",
+            "\u2212$500.00",
+            "**fictional**",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, " ".join(section.split()))
 
     def test_checksums_cover_every_final_asset_and_exclude_bundles(self):
         for suffix in ("tar.gz", "deb", "pkg", "exe", "zip", "mcpb"):
