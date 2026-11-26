@@ -59,13 +59,22 @@ struct Report {
 #[serde(untagged)]
 enum DesktopUpdates {
     Status(updates::UpdateStatus),
-    Unavailable { code: &'static str, message: String },
+    Unavailable {
+        code: UpdateCheckErrorCode,
+        message: String,
+    },
+}
+
+#[derive(Serialize)]
+enum UpdateCheckErrorCode {
+    #[serde(rename = "DESKTOP_UPDATE_CHECK_UNAVAILABLE")]
+    Unavailable,
 }
 
 impl From<product::ProductError> for DesktopUpdates {
     fn from(error: product::ProductError) -> Self {
         Self::Unavailable {
-            code: "DESKTOP_UPDATE_CHECK_UNAVAILABLE",
+            code: UpdateCheckErrorCode::Unavailable,
             message: format!("Could not check Desktop updates: {error}"),
         }
     }

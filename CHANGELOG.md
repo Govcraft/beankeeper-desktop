@@ -8,7 +8,6 @@
 
 - Embed the license issuer's signed revocation snapshot so official stable builds package; 1.0.0 was tagged but never published, so 1.0.1 is the first stable release.
 
-
 ## [1.0.0] - 2026-11-26
 
 - Release Beankeeper Desktop 1.0, the first stable release: a $79 one-time license per computer covers all 1.x releases, with a 60-day in-app return.
