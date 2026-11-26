@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -226,7 +227,18 @@ class PackagingTests(unittest.TestCase):
                     self.assertEqual(archive.read(member), self.binary.read_bytes())
                     self.assertEqual(archive.read("SKILL.md"), (ROOT / "SKILL.md").read_bytes())
                     self.assertEqual(archive.read("LICENSE.md"), (ROOT / "LICENSE.md").read_bytes())
-                    self.assertTrue(archive.read(manifest["icon"]).startswith(b"\x89PNG"))
+                    icon = archive.read(manifest["icon"])
+                    self.assertEqual(icon[:8], b"\x89PNG\r\n\x1a\n")
+                    self.assertEqual(icon[8:16], b"\x00\x00\x00\rIHDR")
+                    width, height = struct.unpack(">II", icon[16:24])
+                    self.assertGreaterEqual(width, 256)
+                    self.assertGreaterEqual(height, 256)
+                    # Pin the reviewed two-bean render, not whatever source file
+                    # happens to be present when the bundle is built.
+                    self.assertEqual(
+                        hashlib.sha256(icon).hexdigest(),
+                        "df800be58153b2c68c71f25466dec67fc358607d993352a9641550b2393a1da6",
+                    )
 
     def test_universal_macos_bundle_uses_both_packaged_slices(self):
         release_version = "1.2.3"
