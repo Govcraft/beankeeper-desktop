@@ -154,6 +154,33 @@ impl Ledger {
         Ok(conn)
     }
 
+    /// Classify an existing asset as cash through the audited CLI, as an owner would.
+    /// # Errors
+    /// Returns an error when the CLI rejects the classification.
+    pub fn classify_cash(&self, company: &str, code: &str) -> TestResult {
+        let output = self
+            .command()
+            .args([
+                "--company",
+                company,
+                "--agent-token",
+                self.owner_token.expose_secret(),
+                "account",
+                "classify",
+                code,
+                "cash",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "classify {company}/{code}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn command(&self) -> Command {
         let mut command = clean_command();

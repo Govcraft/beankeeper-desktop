@@ -107,6 +107,9 @@ fn fixture() -> TestResult<Ledger> {
     let ledger = Ledger::new()?;
     let db = ledger.db()?;
     seed_report_accounts(&db, ledger.owner())?;
+    for company in ["acme", "other"] {
+        ledger.classify_cash(company, "1000")?;
+    }
     for &(company, date, currency, debit, credit, amount, category) in FIXTURE_POSTINGS {
         let metadata = json!({"payee":"Vendor, \"quoted\"\n<script>", "tin":"000-00-0000", "payee_address":"A & B", "applies_to":"sale"}).to_string();
         let entries = [
