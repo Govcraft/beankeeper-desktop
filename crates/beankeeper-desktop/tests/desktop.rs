@@ -106,7 +106,7 @@ fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> T
     let directory = tempfile::tempdir()?;
     let state_dir = directory.path().join("desktop-state");
     let keys_path = directory.path().join("keys.json");
-    let input_path = directory.path().join("license.json");
+    let input_path = directory.path().join("input.license");
     std::fs::write(
         &keys_path,
         include_bytes!("fixtures/license-public-keys.json"),
@@ -129,9 +129,9 @@ fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> T
         command
     };
     for (fixture, major) in [
-        (include_str!("fixtures/license.json"), 1),
-        (include_str!("fixtures/license-major-2.json"), 2),
-        (include_str!("fixtures/license.json"), 1),
+        (include_str!("fixtures/license-v4.public.txt"), 1),
+        (include_str!("fixtures/license-major-2-v4.public.txt"), 2),
+        (include_str!("fixtures/license-v4.public.txt"), 1),
     ] {
         std::fs::write(&input_path, fixture)?;
         let activated = license_command()
@@ -158,9 +158,9 @@ fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> T
     }
     assert!(html.contains("Automatic update checks are disabled"));
 
-    let license_path = state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02q.json");
+    let license_path = state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02q.license");
     let original = std::fs::read_to_string(&license_path)?;
-    let tampered = original.replace("aUm3Ia_", "bUm3Ia_");
+    let tampered = original.replacen("v4.public.eyJ", "v4.public.fyJ", 1);
     std::fs::write(&license_path, &tampered)?;
     let html = server.client.get(&settings).send()?.text()?;
     assert!(html.contains("covers all 2.x releases"));
@@ -171,7 +171,7 @@ fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> T
         )
     );
 
-    std::fs::remove_file(state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02r.json"))?;
+    std::fs::remove_file(state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02r.license"))?;
     for (license, keys, reason) in [
         (
             tampered,

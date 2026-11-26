@@ -580,6 +580,7 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "rustix",
+ "rusty_paseto",
  "schemars",
  "secrecy",
  "self-replace",

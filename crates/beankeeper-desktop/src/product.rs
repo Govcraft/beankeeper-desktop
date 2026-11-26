@@ -1,6 +1,6 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
-    license::{self, LicenseError, TrustedKeys, VerifiedLicense},
+    license::{self, LicenseError, MAX_LICENSE_INPUT, TrustedKeys, VerifiedLicense},
     private_file::PrivateFile,
     updates::{self, UpdateError},
 };
@@ -69,14 +69,17 @@ pub struct LicenseOptions {
     #[command(subcommand)]
     pub command: Option<LicenseCommand>,
 }
-/// Sources for an offline file or an explicitly requested online redemption.
+/// Local license commands, including offline activation and online redemption.
 #[derive(Subcommand)]
 pub enum LicenseCommand {
     /// Verify and store a license, or redeem a storefront key with a configured service.
     Activate {
-        /// License JSON file. Offline activation makes no network request.
-        #[arg(required_unless_present = "code_file", conflicts_with = "code_file")]
+        /// Plain-text file containing the license token.
+        #[arg(required_unless_present_any = ["token", "code_file"], conflicts_with_all = ["token", "code_file"])]
         file: Option<PathBuf>,
+        /// Paste the license token for offline activation.
+        #[arg(long, conflicts_with = "code_file")]
+        token: Option<String>,
         /// Private text file containing a storefront key or single-use claim code.
         #[arg(long)]
         code_file: Option<PathBuf>,
@@ -106,33 +109,50 @@ pub enum Storefront {
 
 enum LicenseSource {
     File(PathBuf),
+    Token(String),
     Code {
         file: PathBuf,
         storefront: Storefront,
     },
 }
 
-impl LicenseSource {
-    fn from_args(
-        file: Option<PathBuf>,
-        code_file: Option<PathBuf>,
-        storefront: Option<Storefront>,
-    ) -> Result<Self, ProductError> {
-        match (file, code_file, storefront) {
-            (Some(file), None, None) => Ok(Self::File(file)),
-            (None, Some(file), storefront) => Ok(Self::Code {
+impl
+    TryFrom<(
+        Option<PathBuf>,
+        Option<String>,
+        Option<PathBuf>,
+        Option<Storefront>,
+    )> for LicenseSource
+{
+    type Error = ProductError;
+
+    fn try_from(
+        (file, token, code_file, storefront): (
+            Option<PathBuf>,
+            Option<String>,
+            Option<PathBuf>,
+            Option<Storefront>,
+        ),
+    ) -> Result<Self, Self::Error> {
+        match (file, token, code_file, storefront) {
+            (Some(file), None, None, None) => Ok(Self::File(file)),
+            (None, Some(token), None, None) => Ok(Self::Token(token)),
+            (None, None, Some(file), storefront) => Ok(Self::Code {
                 file,
                 storefront: storefront.unwrap_or_default(),
             }),
             _ => Err(ProductError::Configuration(
-                "select one license file or --code-file",
+                "select one license file, --token, or --code-file",
             )),
         }
     }
+}
 
+impl LicenseSource {
     fn read(self) -> Result<Vec<u8>, ProductError> {
         match self {
-            Self::File(file) => bounded_file(&file, 32_768),
+            Self::File(file) => bounded_file(&file, MAX_LICENSE_INPUT as u64),
+            Self::Token(token) => Ok(token.into_bytes()),
             Self::Code { file, storefront } => redeem(&file, storefront),
         }
     }
@@ -353,7 +373,7 @@ pub fn license_status() -> Result<String, ProductError> {
     let activations = load_activations()?;
     if activations.licenses.is_empty() {
         return Ok(
-            "License status: not activated. No Desktop license activated. Use `bk license activate FILE`."
+            "License status: not activated. No Desktop license activated. Paste your license with `bk license activate --token TOKEN` or supply a license file."
                 .into(),
         );
     }
@@ -480,12 +500,13 @@ fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> 
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|_| ProductError::Redemption)?;
     let mut bytes = Vec::new();
-    response.take(32_769).read_to_end(&mut bytes)?;
-    if bytes.len() > 32_768 {
+    response
+        .take(MAX_LICENSE_INPUT as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_LICENSE_INPUT {
         return Err(ProductError::Redemption);
     }
-    // D10 returns the direct LicenseFile JSON attachment. The caller verifies
-    // the envelope independently before storing any activation.
+    // The issuer returns a plain-text token that activation verifies offline.
     Ok(bytes)
 }
 /// Execute the explicitly selected license command without touching a ledger.
@@ -498,10 +519,11 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
         Some(LicenseCommand::Trust { json }) => write_embedded_trust(json)?,
         Some(LicenseCommand::Activate {
             file,
+            token,
             code_file,
             storefront,
         }) => {
-            let source = LicenseSource::from_args(file, code_file, storefront)?;
+            let source = LicenseSource::try_from((file, token, code_file, storefront))?;
             // Resolve trust before redeeming a potentially single-use claim.
             let keys = trusted_keys()?;
             let bytes = source.read()?;
@@ -542,8 +564,11 @@ mod tests {
         let keys =
             TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))
                 .expect("fixture public keys");
-        let claims = verify_offline(include_bytes!("../tests/fixtures/license.json"), &keys)
-            .expect("verified fixture");
+        let claims = verify_offline(
+            include_bytes!("../tests/fixtures/license-v4.public.txt"),
+            &keys,
+        )
+        .expect("verified fixture");
         let status = describe(&[claims]);
         assert_eq!(
             status,

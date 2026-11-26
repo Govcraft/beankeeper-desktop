@@ -11,7 +11,7 @@ fn command(directory: &std::path::Path) -> Command {
     command
 }
 
-const ACTIVATION_PATH: &str = "state/licenses/lic_01h455vb4pex5vsknk084sn02q.json";
+const ACTIVATION_PATH: &str = "state/licenses/lic_01h455vb4pex5vsknk084sn02q.license";
 
 #[test]
 fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tampering() -> TestResult {
@@ -22,8 +22,8 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
         include_bytes!("fixtures/license-public-keys.json"),
     )?;
     fs::write(
-        directory.join("input.json"),
-        include_bytes!("fixtures/license.json"),
+        directory.join("input.license"),
+        include_bytes!("fixtures/license-v4.public.txt"),
     )?;
     let initial = command(directory).arg("license").output()?;
     assert!(
@@ -35,7 +35,7 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
     assert!(String::from_utf8_lossy(&initial.stdout).contains("License status: not activated."));
     let activated = command(directory)
         .args(["license", "activate"])
-        .arg(directory.join("input.json"))
+        .arg(directory.join("input.license"))
         .output()?;
     assert!(
         activated.status.success(),
@@ -53,16 +53,42 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
     assert!(String::from_utf8_lossy(&status.stdout).contains("covers all 1.x releases"));
     assert!(String::from_utf8_lossy(&status.stdout).contains("License status: active and valid."));
     let original = fs::read(directory.join(ACTIVATION_PATH))?;
-    let tampered = String::from_utf8(original.clone())?.replace("aUm3Ia_", "bUm3Ia_");
-    fs::write(directory.join("input.json"), tampered)?;
+    let tampered =
+        String::from_utf8(original.clone())?.replacen("v4.public.eyJ", "v4.public.fyJ", 1);
+    fs::write(directory.join("input.license"), tampered)?;
     let rejected = command(directory)
         .args(["license", "activate"])
-        .arg(directory.join("input.json"))
+        .arg(directory.join("input.license"))
         .output()?;
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("signature"));
     assert_eq!(fs::read(directory.join(ACTIVATION_PATH))?, original);
     assert!(!directory.join("state/updates.json").exists());
+    Ok(())
+}
+
+#[test]
+fn pasted_token_activates_offline_and_status_reads_saved_token() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let directory = dir.path();
+    fs::write(
+        directory.join("keys.json"),
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    let token = include_str!("fixtures/license-v4.public.txt").trim_end();
+    let output = command(directory)
+        .args(["license", "activate", "--token", token])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("covers all 1.x releases forever."));
+    assert_eq!(fs::read_to_string(directory.join(ACTIVATION_PATH))?, token);
+    let status = command(directory).arg("license").output()?;
+    assert!(status.status.success());
+    assert_eq!(status.stdout, output.stdout);
     Ok(())
 }
 
@@ -75,13 +101,13 @@ fn stored_license_verification_failures_never_report_active_status() -> TestResu
         include_bytes!("fixtures/license-public-keys.json"),
     )?;
     fs::write(
-        directory.join("input.json"),
-        include_bytes!("fixtures/license.json"),
+        directory.join("input.license"),
+        include_bytes!("fixtures/license-v4.public.txt"),
     )?;
     assert!(
         command(directory)
             .args(["license", "activate"])
-            .arg(directory.join("input.json"))
+            .arg(directory.join("input.license"))
             .status()?
             .success()
     );
@@ -89,7 +115,7 @@ fn stored_license_verification_failures_never_report_active_status() -> TestResu
     let original = fs::read_to_string(&stored_path)?;
     for (stored, keys, reason) in [
         (
-            original.replace("aUm3Ia_", "bUm3Ia_"),
+            original.replacen("v4.public.eyJ", "v4.public.fyJ", 1),
             include_str!("fixtures/license-public-keys.json"),
             "invalid license signature",
         ),
@@ -116,7 +142,7 @@ fn stored_license_verification_failures_never_report_active_status() -> TestResu
 }
 
 #[test]
-fn schema_one_activation_is_refused_at_the_legacy_location() -> TestResult {
+fn json_envelope_is_refused_at_the_legacy_location() -> TestResult {
     let dir = tempfile::tempdir()?;
     let directory = dir.path();
     let legacy = directory.join("state/license.json");
@@ -126,12 +152,14 @@ fn schema_one_activation_is_refused_at_the_legacy_location() -> TestResult {
     )?;
     fs::create_dir(directory.join("state"))?;
     let mut file = tempfile::NamedTempFile::new_in(directory.join("state"))?;
-    std::io::Write::write_all(&mut file, include_bytes!("fixtures/license-v1.json"))?;
+    std::io::Write::write_all(&mut file, br#"{"format":"beankeeper-license-v1","key_id":"test-2026","payload":"e30","signature":"old"}"#)?;
     beankeeper_desktop::setup::keychain::restrict_file(file.path())?;
     file.persist(&legacy)?;
     let status = command(directory).arg("license").output()?;
     assert!(!status.status.success());
-    assert!(String::from_utf8_lossy(&status.stderr).contains("unsupported schema"));
+    assert!(
+        String::from_utf8_lossy(&status.stderr).contains("Ask the issuer for a current license")
+    );
     assert!(!String::from_utf8_lossy(&status.stdout).contains("active and valid"));
     Ok(())
 }
@@ -199,6 +227,53 @@ fn redemption_requires_configured_service_and_trust_before_claim_consumption() -
         .output()?;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("BEANKEEPER_LICENSE_SERVICE_URL"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redemption_activates_the_issuers_plain_text_response() -> TestResult {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use serde_json::{Value, json};
+
+    let dir = tempfile::tempdir()?;
+    let directory = dir.path();
+    fs::write(
+        directory.join("keys.json"),
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    let code_file = tempfile::NamedTempFile::new_in(directory)?;
+    beankeeper_desktop::setup::keychain::restrict_file(code_file.path())?;
+    fs::write(code_file.path(), "test-polar-code\n")?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let router = Router::new().route(
+        "/api/v1/licenses/redeem",
+        post(|Json(request): Json<Value>| async move {
+            if request
+                != json!({"storefront":"polar", "key":"test-polar-code", "recovery_token":null})
+            {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            include_str!("fixtures/license-v4.public.txt").into_response()
+        }),
+    );
+    let server = tokio::spawn(async { axum::serve(listener, router).await });
+    let output = command(directory)
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", origin)
+        .args(["license", "activate", "--code-file"])
+        .arg(code_file.path())
+        .output();
+    server.abort();
+    let output = output?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(directory.join(ACTIVATION_PATH))?,
+        include_bytes!("fixtures/license-v4.public.txt")
+    );
     Ok(())
 }
 
