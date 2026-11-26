@@ -1,105 +1,59 @@
-# Offline license contract
+# Offline Desktop license contract
 
-Desktop consumes claims schema 2 in the issuer's `beankeeper-license-v1`
-Ed25519 envelope. Agent authentication uses separate PASETO bearer tokens.
-No license, activation or update operation changes the ledger schema.
-[Issuer's license format](https://github.com/Govcraft/beankeeper-license/blob/main/docs/license-format.md)
+A Desktop license is a single PASETO v4.public token. Desktop verifies it
+offline using an independently provisioned Ed25519 public key. Agent
+authentication uses separate tokens. [Issuer contract](https://github.com/Govcraft/beankeeper-license/issues/12)
 
-## Envelope and exact signed bytes
+## Token and issuer keys
 
-The JSON envelope has exactly four string fields. Unknown and duplicate fields
-are rejected:
+The token is `v4.public.<body>.<footer>`. Both segments use unpadded base64url.
+The body holds the claims JSON and its Ed25519 signature. The clear footer
+contains one JSON field, `kid`, for example `{"kid":"prod-2026"}`. The key ID
+has 1 to 64 ASCII letters, digits, hyphens or underscores. A token may be at most
+16,384 bytes. Text files may end in LF or CRLF.
 
-```json
-{
-  "format": "beankeeper-license-v1",
-  "key_id": "issuer-2026",
-  "payload": "<base64url of exact claims JSON bytes, without padding>",
-  "signature": "<base64url of 64 Ed25519 signature bytes, without padding>"
-}
-```
+Desktop uses `kid` to select a key from the local trust map. The map associates
+key IDs with 32-byte Ed25519 public keys encoded as unpadded base64url. Desktop
+authenticates the original payload and exact footer bytes with the selected key
+and the implicit assertion `beankeeper-desktop`. An empty map or unknown key
+fails verification. Rotation adds a key before the issuer uses it. Keep prior
+keys available to verify previously issued licenses.
 
-Plain Ed25519 signs the UTF-8 bytes of `format`, LF, `key_id`, LF, `payload`,
-with no trailing newline. The exact signing message is:
-
-```text
-beankeeper-license-v1\n<key_id>\n<payload>
-```
-
-Here `\n` means a single LF byte. Outer whitespace and field order do not affect
-verification. The payload string is limited to 16,384 bytes; Desktop also bounds
-the complete envelope at 32,768 bytes. Both encodings require the RFC 4648
-URL-safe alphabet, no padding, and canonical trailing bits. The verifier checks
-the signature before decoding claims; reserializing claims before verification
-would change the signed contract.
-
-Key identifiers have 1 to 64 ASCII letters, digits, underscores or hyphens.
-Desktop selects the identifier from a separately provisioned public-key trust
-store, never from a public key or URL supplied in the license. A trust-store JSON
-object maps each exact identifier to a canonical unpadded base64url encoding of
-its 32-byte Ed25519 public key. An empty trust store fails verification.
+The issuer's public test token and key are under
+`crates/beankeeper-desktop/tests/fixtures/`. Production trust is provisioned
+separately. [Trust configuration and activation](license-updates.md)
 
 ## Authenticated claims
 
-```json
-{
-  "schema_version": 2,
-  "license_id": "lic_01h455vb4pex5vsknk084sn02q",
-  "product": "beankeeper-desktop",
-  "purchaser_ref": "customer-fixture-1",
-  "storefront": "polar",
-  "issued_at": "2026-11-20T12:00:00Z",
-  "eligible_major": 1,
-  "seats": 1
-}
-```
+| Claim | Rule |
+| --- | --- |
+| `jti` | Canonical `lic_` TypeID. |
+| `iat` | Required RFC 3339 issue time. |
+| `nbf` | Optional RFC 3339 earliest use time. The issuer sets it to `iat` on new licenses. |
+| `product` | `beankeeper-desktop`. |
+| `storefront` | `polar`, `etsy`, `direct`, `stripe`, `comp`, or the reserved `gumroad`. |
+| `purchaser_ref` | Opaque reference of 1 to 256 UTF-8 bytes with at least one non-whitespace character, no control characters and no `@`. |
+| `eligible_major` | Positive unsigned 32-bit integer identifying the one covered major release line. |
+| `seats` | The integer 1, the one-computer limit per license. Omission defaults to 1. |
 
-The verifier rejects unsupported schema versions, duplicate and unknown fields,
-a noncanonical `lic_` TypeID, and products other than `beankeeper-desktop`.
-`purchaser_ref` is an opaque nonempty reference with at most 256 UTF-8 bytes,
-without control characters or `@`; it is never an email address. `storefront` has
-1 to 32 lowercase ASCII letters, digits, underscores or hyphens. Timestamps are
-RFC 3339, with UTC year 1970 through 9999. The service normalizes timestamps to
-UTC. `eligible_major` is a JSON integer from 1 through 4,294,967,295 inclusive.
-`seats` is the integer 1, the contractual limit of one computer per license.
-The signed file carries no device or ledger identifier.
+Desktop rejects duplicate and unknown claims, including `exp`. Both timestamps
+must fall in UTC years 1970 through 9999 and be at most five minutes ahead of the
+local verifier clock. Each license covers all releases in its signed major
+version for perpetual use. A 1.x license covers 1.0.0 and 1.4.2. A 2.x release
+requires a 2.x license.
 
-Use is perpetual. A release is covered when the major version in its signed
-manifest equals `eligible_major`. A major-1 license covers 1.0.0, 1.4.2 and
-1.99.0-rc.1 for perpetual use. Verifying coverage requires local license bytes,
-the issuer's public key and signed release metadata. Desktop rejects schema 1
-files. Ask for a schema 2 file if you still have a schema 1 test license.
+`license::verify_offline` authenticates a token supplied as text or bytes and
+returns a `VerifiedLicense`. The original claims JSON is deserialized directly
+into Rust types after signature verification. The verifier keeps the token
+format, entitlement, and local activation separate from ledger operations.
 
-The service's public fixture key, ID `test-2026`, is:
+## Activation and redemption
 
-```text
-6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw
-```
+Paste the token or supply a plain-text `.license` file. Activation verifies the
+token before atomically storing it by signed license ID. Status re-verifies
+saved activations offline. If you have a file in the older JSON envelope format,
+ask the issuer for a current license token.
 
-It comes from a public seed of 32 bytes equal to `0x07`. Desktop's tests verify
-D10's independently generated [license-v2.json fixture](https://github.com/Govcraft/beankeeper-license/blob/main/tests/fixtures/license-v2.json).
-This fixture key is **not trusted by default**. Production builds must provision
-production public keys separately; signing secrets never ship in Desktop.
-Rotation introduces a new identifier and public key before the service uses it.
-Retain previous public keys to keep old perpetual licenses verifiable. Removing
-a key deliberately rejects its previously issued files. Offline files cannot be
-recalled by a server-side revocation; revocation blocks future downloads only.
-
-## Isolation and storage
-
-`crates/beankeeper-desktop/src/license.rs` exposes `verify_offline`, `activate`, `load`, and `entitlement`.
-The server and ledger code do not implement license signatures or policy.
-Activation verifies before atomically saving a private local file keyed by the
-signed license ID. Failed verification preserves existing activations. Desktop
-refuses symbolic links and publicly accessible license files. It re-verifies
-the local files without an HTTP request. [License and update commands](license-updates.md)
-
-## Optional redemption
-
-D10 exposes `POST /api/v1/licenses/redeem` with JSON fields `storefront`, `key`,
-and `recovery_token`. An Etsy claim code is single-use. Retain the recovery token
-before redeeming; a retry after a lost response may already have spent the code.
-`POST /api/v1/licenses/recover` returns the original file using that private
-recovery token. Activation always verifies the returned license independently
-before storing it. Network redemption is an explicit activation operation;
-verification and normal Desktop use remain offline.
+Claim-code redemption is an explicit online action. The issuer returns the same
+plain-text token used for offline activation. Desktop verifies it with the
+provisioned keys before saving it. [Redemption and recovery](license-updates.md#redeem-a-key-or-claim-code)

@@ -471,9 +471,10 @@ Release candidates are free to use without a license. You can still open, query,
 export, back up, and restore your books in read-only mode, and use your recovery
 kit. Your encrypted books stay on your computer.
 
-To activate a downloaded schema 2 license offline, run
-`bk license activate /path/to/license.json`. Repeat for each license and run
-`bk license` to see the activated licenses.
+You can give your agent a pasted Desktop license token or the downloaded
+license file. An agent with CLI access can activate it offline with
+`bk license activate --token TOKEN` or `bk license activate /path/to/downloaded.license`,
+then check the activation with `bk license`.
 
 Both `bk license` and **License and updates** (`/settings`) explicitly show
 `active and valid` after offline verification and list the major version each
@@ -511,13 +512,13 @@ export BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON="{\"$KEY_ID\":\"$PUBLIC_KEY\"}"
 # optional, if you will redeem a claim code against a local server:
 # export BEANKEEPER_LICENSE_SERVICE_URL="http://127.0.0.1:8080"
 cargo build -p beankeeper-desktop
-./target/debug/bk license activate "$HOME/beankeeper-desktop-license.json"
+./target/debug/bk license activate "$HOME/beankeeper-desktop.license"
 ./target/debug/bk license
 ```
 
-The license service issues that file with `beankeeper-license issue --email --plan --expires`
-or `POST /api/v1/admin/licenses`. See the license service README for the full
-local test flow.
+The license service issues the token through its operator CLI or admin API.
+See the [issuer contract](https://github.com/Govcraft/beankeeper-license/issues/12)
+for the token format.
 
 See the [license/update command reference](docs/license-updates.md),
 [offline license contract](docs/license-format.md), and
