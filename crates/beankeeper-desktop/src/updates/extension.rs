@@ -1,8 +1,9 @@
 //! Prepare the native Claude bundle using the Desktop release trust policy.
 
 use super::{
-    BundleVerifier, Cosign, GithubRelease, MAX_ARCHIVE, MAX_METADATA, RELEASE_API, ReleaseVersion,
-    Sha256Digest, Target, UpdateError, asset_url, download, listed_checksum, verify_bytes,
+    BundleVerifier, GithubRelease, MAX_ARCHIVE, MAX_METADATA, RELEASE_API, ReleaseVersion,
+    Sha256Digest, Sigstore, Target, UpdateError, asset_url, download, listed_checksum,
+    verify_bytes,
 };
 use crate::setup::keychain::{restrict_directory, restrict_file};
 use sha2::{Digest, Sha256};
@@ -118,7 +119,7 @@ impl VerifiedBundle {
 }
 
 pub(crate) fn prepare(state: &Path) -> Result<PreparedBundle, UpdateError> {
-    prepare_with(state, Target::current()?, download, &Cosign)
+    prepare_with(state, Target::current()?, download, &Sigstore)
 }
 
 fn prepare_with(

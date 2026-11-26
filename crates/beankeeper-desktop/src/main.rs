@@ -13,7 +13,7 @@ enum DesktopCommand {
     Agents(agents::AgentOptions),
     Service(service::ServiceOptions),
     License(product::LicenseOptions),
-    CheckForUpdate,
+    Diagnostic(beankeeper_desktop::diagnostics::Diagnostic),
     InstallUpdate,
     Serve(ServeOptions),
     Open(OpenOptions),
@@ -61,7 +61,12 @@ impl DesktopCommand {
             Some(("license", options)) => {
                 product::LicenseOptions::from_arg_matches(options).map(Self::License)
             }
-            Some(("update-check", _)) => Ok(Self::CheckForUpdate),
+            Some(("doctor", _)) => Ok(Self::Diagnostic(
+                beankeeper_desktop::diagnostics::Diagnostic::Doctor,
+            )),
+            Some(("update-check", _)) => Ok(Self::Diagnostic(
+                beankeeper_desktop::diagnostics::Diagnostic::UpdateCheck,
+            )),
             Some(("self-update", _)) => Ok(Self::InstallUpdate),
             Some(("serve", options)) => ServeOptions::from_arg_matches(options).map(Self::Serve),
             Some(("open", options)) => OpenOptions::from_arg_matches(options).map(Self::Open),
@@ -116,7 +121,7 @@ fn main() -> ExitCode {
             .map_err(|error| DesktopError::Service(Box::new(error)))
         }
         DesktopCommand::License(options) => return run_license(options, &matches),
-        DesktopCommand::CheckForUpdate => check_updates(),
+        DesktopCommand::Diagnostic(operation) => return run_diagnostic(operation, &matches),
         DesktopCommand::InstallUpdate => install_update(),
         DesktopCommand::Serve(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
@@ -238,18 +243,16 @@ fn selected_books<'a>(matches: &clap::ArgMatches, ledger: &'a Cli) -> service::L
     }
 }
 
-fn check_updates() -> Result<(), DesktopError> {
-    product::state_dir()
-        .and_then(|dir| {
-            let status = updates::check(
-                &dir.join("updates.json"),
-                product::update_checks(),
-                updates::now(),
-            )?;
-            println!("{status}");
-            Ok(())
-        })
-        .map_err(DesktopError::Product)
+fn run_diagnostic(
+    operation: beankeeper_desktop::diagnostics::Diagnostic,
+    matches: &clap::ArgMatches,
+) -> ExitCode {
+    let json = matches.get_flag("json")
+        || matches!(
+            matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
+            Some(beankeeper_cli::cli::OutputFormat::Json)
+        );
+    beankeeper_desktop::diagnostics::run(operation, json)
 }
 
 fn install_update() -> Result<(), DesktopError> {
@@ -264,7 +267,8 @@ fn install_update() -> Result<(), DesktopError> {
                 updates::UpdateChecks::Enabled,
                 updates::now(),
             )?;
-            updates::self_update(&dir.join("updates.json"), &executable)?;
+            let version = updates::self_update(&dir.join("updates.json"), &executable)?;
+            beankeeper_desktop::diagnostics::after_update(version);
             Ok(())
         })
         .map_err(DesktopError::Product)?;

@@ -3,6 +3,7 @@
 mod adapters;
 mod config;
 pub(crate) mod extension;
+pub(crate) mod extension_status;
 
 use std::{
     env,
@@ -71,6 +72,7 @@ enum Operation {
 #[derive(Debug)]
 enum AgentError {
     Home,
+    Version,
     Binary(io::Error),
     InvalidBinary(PathBuf),
     ClaudeProfileAmbiguous,
@@ -89,6 +91,7 @@ impl AgentError {
     fn code(&self) -> &'static str {
         match self {
             Self::Home => "AGENT_HOME_UNAVAILABLE",
+            Self::Version => "AGENT_VERSION_INVALID",
             Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
             Self::ClaudeProfileAmbiguous => "AGENT_CLAUDE_PROFILE_AMBIGUOUS",
             Self::Invalid(_) => "AGENT_INVALID_CONFIG",
@@ -105,6 +108,7 @@ impl fmt::Display for AgentError {
             Self::Home => {
                 f.write_str("Beankeeper needs the desktop user's absolute home directory.")
             }
+            Self::Version => f.write_str("Desktop has an invalid semantic version."),
             Self::Binary(error) => write!(f, "cannot locate the installed bk executable: {error}"),
             Self::InvalidBinary(path) => write!(
                 f,

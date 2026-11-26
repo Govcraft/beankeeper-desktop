@@ -1,0 +1,16 @@
+09c71436210c3b6bfd757178381f599e4aa5dc6e8f2aa54a620b13e77b38acba  bk-0.1.0-rc.33-aarch64-apple-darwin.mcpb
+70da6733a1cd6eb2c1b97743a3a6210725b9cd58e1f3596fbf75c8fe7d81ce5a  bk-0.1.0-rc.33-aarch64-apple-darwin.pkg
+9debaf39e051360c9c264469fb0c5229733c03d430f8c73fe7ff0bf977713f53  bk-0.1.0-rc.33-aarch64-apple-darwin.tar.gz
+78c906e62e5316226ffd53500afab412ee2e80ee89ab460977ea689b9955f75f  bk-0.1.0-rc.33-aarch64-unknown-linux-gnu.deb
+6b82068cc2ed3b4267d0120d9ae604098714c3f41a10a0384f33fd00eaa765c0  bk-0.1.0-rc.33-aarch64-unknown-linux-gnu.mcpb
+c398f2aa8c6590c59b7753f275d076b165249ad4ccc39920ce72248866e607e3  bk-0.1.0-rc.33-aarch64-unknown-linux-gnu.tar.gz
+a11145f93ae524b4b0c58ea66890993449c580fefcc972fa7302308dbce7b50b  bk-0.1.0-rc.33-universal-apple-darwin.mcpb
+8a2dbe8ae711f2fb79ccc0b6308d2de2d274e5664307a7176f47eac8a77370e3  bk-0.1.0-rc.33-x86_64-apple-darwin.mcpb
+8c7fa9b625527e8283c251901eadd590036a72b199d126d6ca90b0f2d0fc5da1  bk-0.1.0-rc.33-x86_64-apple-darwin.pkg
+46a94149575b3e2bdced6502a02f1c259f974df0e8f4771421aa7c326a79115c  bk-0.1.0-rc.33-x86_64-apple-darwin.tar.gz
+52d4ab914e23856eb8149a95bddd19fb358a262701168283594ef7db74a89962  bk-0.1.0-rc.33-x86_64-pc-windows-msvc-setup.exe
+db5ad636fa6f0ba9ecc1f6d2740d2e0b1367df0eeafe116afb215af7a38cebe5  bk-0.1.0-rc.33-x86_64-pc-windows-msvc.mcpb
+dc18d946acab97ce3d8a2a78e00c6e0e2654776e774170c981344bb0543e53f0  bk-0.1.0-rc.33-x86_64-pc-windows-msvc.zip
+18e13a10aa1092523a1a4d69e5706528f973bde582ec5ce4ece1b33f65c55362  bk-0.1.0-rc.33-x86_64-unknown-linux-gnu.deb
+7c3abea1a9e0fcde6ba6f340235529bb20e16c04a141a842e1d1ac4324cef6c4  bk-0.1.0-rc.33-x86_64-unknown-linux-gnu.mcpb
+a2adc5a368ce6ed374f12ab2132551efbac5979d101189f1c467258b6eb1c148  bk-0.1.0-rc.33-x86_64-unknown-linux-gnu.tar.gz

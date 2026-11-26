@@ -119,6 +119,8 @@ pub enum ServiceError {
     EndpointConnect,
     /// The responding endpoint did not match the service descriptor.
     EndpointIdentity,
+    /// The service health response contains an invalid semantic version.
+    Version,
     /// A fresh browser link could not be obtained using local OS-user authority.
     BrowserPairing,
     /// The OS could not launch its default browser.
@@ -155,6 +157,7 @@ impl ServiceError {
             Self::Worker => "SERVICE_INTERNAL",
             Self::EndpointConnect => "SERVICE_ENDPOINT_UNREACHABLE",
             Self::EndpointIdentity => "SERVICE_ENDPOINT_IDENTITY",
+            Self::Version => "SERVICE_VERSION_INVALID",
             Self::BrowserPairing => "DESKTOP_BROWSER_PAIRING_UNAVAILABLE",
             Self::BrowserLaunch => "DESKTOP_BROWSER_LAUNCH_FAILED",
             Self::BooksNotServed(_) => "DESKTOP_BOOKS_NOT_SERVED",
@@ -180,6 +183,7 @@ impl fmt::Display for ServiceError {
             Self::Worker => f.write_str("Service operation could not complete. Run service_status to inspect the result."),
             Self::EndpointConnect => f.write_str("Cannot connect to the published Desktop endpoint. Run bk service status --json and inspect the private service log."),
             Self::EndpointIdentity => f.write_str("The published endpoint did not identify itself as the expected Beankeeper process. Run bk service status --json and inspect the private service log."),
+            Self::Version => f.write_str("The service returned an invalid semantic version."),
             Self::BrowserPairing => f.write_str("Could not request a fresh browser link for this Desktop instance. Check that Desktop is running under your OS account, then try again."),
             Self::BrowserLaunch => f.write_str("Could not open your default browser. Check your browser settings and try again."),
             Self::BooksNotServed(books) => write!(f, "No matching Desktop instance is serving {}. Each instance serves one books file. Start Desktop for these books, or answer without a detail link.", books.display()),
@@ -359,7 +363,7 @@ pub struct Status {
     /// Whether the managed server accepts this ledger's agent credential.
     pub running: bool,
     /// Running Desktop version; absent when stopped.
-    pub version: Option<String>,
+    pub version: Option<semver::Version>,
     /// Discovered local MCP endpoint; absent when stopped.
     pub mcp_endpoint: Option<String>,
     /// Optional browser view for the owner.
@@ -480,7 +484,7 @@ pub(crate) struct Endpoint {
     url: Url,
     books: PathBuf,
     token_file: PathBuf,
-    version: String,
+    version: semver::Version,
     pid: u32,
 }
 
@@ -525,7 +529,7 @@ fn endpoint_at(paths: &Paths, books: &Path) -> Result<Option<Endpoint>, ServiceE
         url: runtime.bind.url("/mcp")?,
         books: runtime.books.as_ref().into(),
         token_file: runtime.books.as_ref().with_extension("agent-token"),
-        version: health.version,
+        version: health.version.parse().map_err(|_| ServiceError::Version)?,
         pid: runtime.pid.get(),
     }))
 }

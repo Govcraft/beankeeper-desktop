@@ -309,8 +309,8 @@ archive layout and signature requirements as stable manifests. Stable clients
 never install prereleases.
 
 The client parses bounded metadata only to select the expected tag identity,
-then runs `cosign verify-blob --bundle ... --certificate-identity ...
---certificate-oidc-issuer https://token.actions.githubusercontent.com`. The exact
+then verifies the Sigstore bundle in-process, requiring the GitHub Actions issuer,
+certificate chain, SCT, and Rekor inclusion proof and signed checkpoint. The exact
 identity is this repository's `release.yml@refs/tags/beankeeper-desktop-vVERSION`,
 as shown above. It uses the [official cosign verification contract](https://docs.sigstore.dev/cosign/verifying/verify/).
 

@@ -441,6 +441,34 @@ impl Transport {
         self.forward_negotiated(&request, output)
     }
 
+    fn local_tool(&self, message: &Value, output: &mut impl Write) -> Result<bool, BridgeError> {
+        if let Some(managed) = &self.managed
+            && let Some(tool) = message["params"]["name"]
+                .as_str()
+                .and_then(LicenseTool::from_name)
+            && let Some(id) = message.get("id")
+        {
+            return write_message(
+                output,
+                &json!({"jsonrpc": "2.0", "id": id, "result": tool.call(&message["params"], Some(&managed.books))}),
+            ).map(|()| true);
+        }
+        if self.managed.is_some()
+            && let Some(operation) = message["params"]["name"]
+                .as_str()
+                .and_then(|name| name.parse::<crate::diagnostics::Diagnostic>().ok())
+            && let Some(id) = message.get("id")
+        {
+            let params = rmcp::model::CallToolRequestParams::deserialize(&message["params"])
+                .map_err(|_| BridgeError::Protocol)?;
+            return write_message(
+                output,
+                &json!({"jsonrpc":"2.0","id":id,"result":crate::diagnostics::call(operation, params)}),
+            ).map(|()| true);
+        }
+        Ok(false)
+    }
+
     fn forward_negotiated(
         &mut self,
         request: &BridgeRequest<'_>,
@@ -466,18 +494,11 @@ impl Transport {
         }
         let tool_request = request.kind() == MethodKind::ToolsCall;
         let tool_list = request.kind() == MethodKind::ToolsList;
-        if let Some(managed) = &self.managed
-            && tool_request
+        if tool_request
             && (self.protocol.is_some() || inline.is_some())
-            && let Some(tool) = message["params"]["name"]
-                .as_str()
-                .and_then(LicenseTool::from_name)
-            && let Some(id) = message.get("id")
+            && self.local_tool(message, output)?
         {
-            return write_message(
-                output,
-                &json!({"jsonrpc": "2.0", "id": id, "result": tool.call(&message["params"], Some(&managed.books))}),
-            );
+            return Ok(());
         }
         self.refresh_access(output)?;
         let operation = if self.managed.is_some() && tool_request {
@@ -590,6 +611,7 @@ impl Transport {
                     tools.extend(extension::tools(false));
                 } else {
                     tools.extend(LicenseTool::tools());
+                    tools.extend(crate::diagnostics::tools());
                 }
                 let mut result = ListToolsResult::with_all_items(tools)
                     .with_ttl_ms(0)
@@ -955,7 +977,11 @@ fn emit(
                 .chain(
                     context
                         .license_tools
-                        .then(LicenseTool::tools)
+                        .then(|| {
+                            LicenseTool::tools()
+                                .chain(crate::diagnostics::tools())
+                                .collect::<Vec<_>>()
+                        })
                         .into_iter()
                         .flatten(),
                 )

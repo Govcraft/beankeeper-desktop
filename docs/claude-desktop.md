@@ -37,14 +37,16 @@ to install or upgrade the Claude Desktop extension. The `agents_extension`
 tool is available in Claude's Beankeeper extension and on the local lifecycle
 connection. The command-line equivalent is `bk agents extension`.
 
-Before setup, the extension lists `setup`, `setup_status`, `doctor`, and
-`agents_extension`. You can prepare the verified installer before creating
+Before setup, the extension lists `setup`, `setup_status`, `doctor`,
+`update_check`, and `agents_extension`, alongside the license tools. You can prepare the verified installer before creating
 books or starting the local service.
 
-Beankeeper uses `cosign` to verify the newest published release for your computer.
+Beankeeper verifies the newest published release for your computer in-process,
+without requiring a separate `cosign` installation.
 It verifies the Sigstore signatures on the checksums and extension, then requires
 the extension's SHA-256 to match the signed checksum. After your operating
-system opens the verified file, select **Install** in Claude Desktop.
+system opens the verified file, select **Install** in Claude Desktop, then restart
+Claude Desktop or toggle the extension off and on to load the new version.
 
 When opening the extension, Beankeeper removes its managed stdio entries from
 `claude_desktop_config.json` if they are present. It keeps other client settings
@@ -56,6 +58,16 @@ Use `bk agents extension --path-only` for the local file path, or add `--json`
 for a structured result. The MCP equivalent is `{"path_only":true}`. Path-only
 mode leaves Claude's settings alone, so you can open the file later or select it
 from Claude's extension settings if your system has no file association.
+
+Desktop updates do not replace Claude's self-contained extension. Ask your agent
+to check the extension after an update. `bk doctor` and `bk update-check` return
+`extension.state` as `behind`, `current`, or `not_installed` (or `unavailable`
+with a diagnostic code when the registry cannot be read). The MCP tools `doctor`
+and `update_check` return the same extension data and explain the next step.
+An extension newer than Desktop counts as current. Diagnostics compare against
+the authenticated running service version when available, otherwise this `bk`
+version. A stale extension never blocks the books. Ask your agent to upgrade it;
+the agent opens the verified installer through `agents_extension`.
 
 ## First-open messages
 

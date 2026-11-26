@@ -300,11 +300,19 @@ that list it in `bk agents connect --help`.
 
 For Grok Build, run `bk agents connect grok-build --json` and restart the client.
 
+Use `doctor` or `update_check` on the local MCP connection (`bk doctor --json`
+or `bk update-check --json`) to check `extension.state`. If it is `behind`, explain
+that Claude keeps its own copy and offer to upgrade it through `agents_extension`.
+A stale or unreadable extension never blocks the books. Do not ask the owner to
+open a terminal, find tokens, or download a release from GitHub.
+
 When the owner asks to install or upgrade the Claude Desktop extension, call
 `agents_extension` on the local lifecycle or native extension connection, or
-run `bk agents extension --json`. Verification requires `cosign`. Report
+run `bk agents extension --json`. Verification runs in-process without requiring
+`cosign`. Report
 whether the verified installer opened and tell the owner to select **Install**
-in Claude Desktop when it does. Use `path_only: true` in MCP or `--path-only`
+in Claude Desktop, then restart Claude Desktop or toggle the extension when it does.
+Use `path_only: true` in MCP or `--path-only`
 on the CLI to get the verified file without opening it or changing Claude's
 settings. If verification fails, explain the named error in plain words.
 

@@ -55,7 +55,7 @@ impl fmt::Display for UpdateError {
                 "This update requires a Desktop license that covers {major}.x releases. Ask your agent to activate a license you already have."
             ),
             Self::Signature => f.write_str(
-                "Sigstore verification failed; install cosign and require a valid release bundle",
+                "Sigstore verification failed; a valid signed release bundle is required",
             ),
             Self::Json(_) => f.write_str("invalid release metadata or update cache"),
         }
@@ -279,50 +279,176 @@ trait BundleVerifier {
     ) -> Result<(), UpdateError>;
 }
 
-/// Uses cosign from PATH with fixed trust identity and no shell interpolation.
-struct Cosign;
-impl BundleVerifier for Cosign {
+/// Verifies the same release identity, certificate chain and transparency log in-process.
+struct Sigstore;
+
+fn release_policy(version: &ReleaseVersion) -> sigstore_verify::VerificationPolicy {
+    sigstore_verify::VerificationPolicy::new(
+        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}"),
+        "https://token.actions.githubusercontent.com",
+    )
+}
+
+impl BundleVerifier for Sigstore {
     fn verify(
         &self,
         artifact: &Path,
         bundle: &Path,
         version: &ReleaseVersion,
     ) -> Result<(), UpdateError> {
-        if !bundle.is_file() || fs::metadata(bundle)?.len() == 0 {
-            return Err(UpdateError::Signature);
-        }
-        let status = cosign_command(artifact, bundle, version)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        use sigstore_verify::{trust_root, types::Bundle};
+        let evidence =
+            Bundle::from_json(&fs::read_to_string(bundle).map_err(|_| UpdateError::Signature)?)
+                .map_err(|_| UpdateError::Signature)?;
+        let root = trust_root::TrustedRoot::from_json(trust_root::SIGSTORE_PRODUCTION_TRUSTED_ROOT)
             .map_err(|_| UpdateError::Signature)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(UpdateError::Signature)
+        let verifier = sigstore_verify::Verifier::new(&root).map_err(|_| UpdateError::Signature)?;
+        match verifier.verify_reader(
+            fs::File::open(artifact)?,
+            &evidence,
+            &release_policy(version),
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) => fallback_for_rotation(error, artifact, &evidence, version, |candidate| {
+                let status = candidate
+                    .cosign_command(bundle)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map_err(|_| UpdateError::Signature)?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(UpdateError::Signature)
+                }
+            }),
         }
     }
 }
 
-fn cosign_command(artifact: &Path, bundle: &Path, version: &ReleaseVersion) -> Command {
-    let identity =
-        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}");
-    let mut command = Command::new("cosign");
-    command
-        .args([
-            "verify-blob",
-            "--timeout",
-            "30s",
-            "--certificate-identity",
-            &identity,
-            "--certificate-oidc-issuer",
-            "https://token.actions.githubusercontent.com",
-            "--bundle",
-        ])
-        .arg(bundle)
-        .arg(artifact);
-    command
+mod rotation {
+    use super::{
+        Command, Path, REPOSITORY, ReleaseVersion, TAG_PREFIX, UpdateError, fs, release_policy,
+    };
+
+    // The verifier reports trust coverage before checking artifact cryptography.
+    // Only this private validating constructor can admit an artifact to fallback.
+    // It confers no installation authority: cosign must still verify the complete
+    // chain, transparency evidence, exact identity and issuer against its trust root.
+    pub(super) struct RotationCandidate<'a> {
+        artifact: &'a Path,
+        version: &'a ReleaseVersion,
+    }
+
+    impl<'a>
+        TryFrom<(
+            &'a Path,
+            &sigstore_verify::types::Bundle,
+            &'a ReleaseVersion,
+        )> for RotationCandidate<'a>
+    {
+        type Error = UpdateError;
+
+        fn try_from(
+            (artifact, bundle, version): (
+                &'a Path,
+                &sigstore_verify::types::Bundle,
+                &'a ReleaseVersion,
+            ),
+        ) -> Result<Self, Self::Error> {
+            use sigstore_verify::{
+                crypto,
+                types::{HashAlgorithm, SignatureContent},
+            };
+            let certificate = bundle.signing_certificate().ok_or(UpdateError::Signature)?;
+            let certificate =
+                crypto::parse_certificate_info(certificate).map_err(|_| UpdateError::Signature)?;
+            let policy = release_policy(version);
+            if !certificate.identity.as_ref().is_some_and(|identity| {
+                policy
+                    .identity()
+                    .is_some_and(|expected| expected.matches(identity))
+            }) || certificate.issuer.as_deref() != policy.issuer()
+            {
+                return Err(UpdateError::Signature);
+            }
+            // Release artifacts use detached SHA-256 message signatures. Other
+            // formats fail closed here instead of expanding the recovery surface.
+            let SignatureContent::MessageSignature(signature) = &bundle.content else {
+                return Err(UpdateError::Signature);
+            };
+            let digest = signature
+                .message_digest
+                .as_ref()
+                .ok_or(UpdateError::Signature)?;
+            let actual = crypto::sha256_reader(fs::File::open(artifact)?)?;
+            if digest.algorithm != HashAlgorithm::Sha2256
+                || digest.digest.as_bytes() != actual.as_bytes()
+            {
+                return Err(UpdateError::Signature);
+            }
+            crypto::verify_signature_prehashed(
+                &certificate.public_key,
+                actual.as_bytes(),
+                &signature.signature,
+                certificate.key_algorithm.default_signing_scheme(),
+            )
+            .map_err(|_| UpdateError::Signature)?;
+            Ok(Self { artifact, version })
+        }
+    }
+
+    impl RotationCandidate<'_> {
+        pub(super) fn cosign_command(self, bundle: &Path) -> Command {
+            let Self { artifact, version } = self;
+            let identity = format!(
+                "{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}"
+            );
+            let mut command = Command::new("cosign");
+            command
+                .args([
+                    "verify-blob",
+                    "--timeout",
+                    "30s",
+                    "--certificate-identity",
+                    &identity,
+                    "--certificate-oidc-issuer",
+                    "https://token.actions.githubusercontent.com",
+                    "--bundle",
+                ])
+                .arg(bundle)
+                .arg(artifact);
+            command
+        }
+    }
+}
+
+use rotation::RotationCandidate;
+
+fn fallback_for_rotation(
+    error: sigstore_verify::Error,
+    artifact: &Path,
+    bundle: &sigstore_verify::types::Bundle,
+    version: &ReleaseVersion,
+    fallback: impl FnOnce(RotationCandidate<'_>) -> Result<(), UpdateError>,
+) -> Result<(), UpdateError> {
+    use sigstore_verify::{CertificateError, Error, TransparencyLogError};
+    let uncovered = match error {
+        Error::TransparencyLog(TransparencyLogError::UnknownLog { .. })
+        | Error::Certificate(CertificateError::NoValidAuthority { .. }) => true,
+        // sigstore-verify currently erases webpki's structured UnknownIssuer
+        // reason. Match only that exact reason, never arbitrary chain errors.
+        Error::Certificate(CertificateError::ChainInvalid(reason)) => {
+            reason == "certificate chain validation failed: UnknownIssuer"
+        }
+        _ => false,
+    };
+    if !uncovered {
+        return Err(UpdateError::Signature);
+    }
+    let candidate = RotationCandidate::try_from((artifact, bundle, version))?;
+    fallback(candidate)
 }
 
 fn verify_bytes(
@@ -474,13 +600,164 @@ fn asset_url(version: &ReleaseVersion, name: &str) -> String {
 }
 
 #[derive(Default, Deserialize, Serialize)]
+#[serde(from = "CacheRecord")]
 struct Cache {
-    #[serde(default)]
     desktop_version: String,
     last_attempt: u64,
-    manifest: Option<Manifest>,
-    message: String,
+    attempt: AttemptResult,
 }
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum AttemptResult {
+    #[default]
+    Incomplete,
+    Complete {
+        manifest: Manifest,
+    },
+    Failed {
+        failure: CheckFailure,
+    },
+}
+
+// Only this wire boundary recognizes old prose. New caches contain an enum,
+// and completed attempts carry the manifest required to report success.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CacheRecord {
+    Typed {
+        #[serde(default)]
+        desktop_version: String,
+        last_attempt: u64,
+        attempt: AttemptResult,
+    },
+    Legacy {
+        #[serde(default)]
+        desktop_version: String,
+        last_attempt: u64,
+        manifest: Option<Manifest>,
+        message: String,
+    },
+}
+
+impl From<CacheRecord> for Cache {
+    fn from(record: CacheRecord) -> Self {
+        match record {
+            CacheRecord::Typed {
+                desktop_version,
+                last_attempt,
+                attempt,
+            } => Self {
+                desktop_version,
+                last_attempt,
+                attempt,
+            },
+            CacheRecord::Legacy {
+                desktop_version,
+                last_attempt,
+                manifest,
+                message,
+            } => {
+                let attempt = if message.is_empty() || message == "Update check did not complete." {
+                    AttemptResult::Incomplete
+                } else if let Some(manifest) = manifest {
+                    AttemptResult::Complete { manifest }
+                } else {
+                    AttemptResult::Failed {
+                        failure: CheckFailure::from(message),
+                    }
+                };
+                Self {
+                    desktop_version,
+                    last_attempt,
+                    attempt,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CheckFailure {
+    Io { message: String },
+    Network,
+    Http { status: HttpStatus },
+    Invalid { reason: String },
+    LicenseRequired { major: MajorVersion },
+    Signature,
+    Json,
+    LegacyDownload,
+    Legacy { message: String },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(try_from = "u16", into = "u16")]
+struct HttpStatus(reqwest::StatusCode);
+
+impl TryFrom<u16> for HttpStatus {
+    type Error = <reqwest::StatusCode as TryFrom<u16>>::Error;
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        reqwest::StatusCode::from_u16(value).map(Self)
+    }
+}
+
+impl From<HttpStatus> for u16 {
+    fn from(value: HttpStatus) -> Self {
+        value.0.as_u16()
+    }
+}
+
+impl From<UpdateError> for CheckFailure {
+    fn from(error: UpdateError) -> Self {
+        match error {
+            UpdateError::Io(error) => Self::Io {
+                message: error.to_string(),
+            },
+            UpdateError::Network => Self::Network,
+            UpdateError::Http(status) => Self::Http {
+                status: HttpStatus(status),
+            },
+            UpdateError::Invalid(reason) => Self::Invalid {
+                reason: reason.into(),
+            },
+            UpdateError::LicenseRequired(major) => Self::LicenseRequired { major },
+            UpdateError::Signature => Self::Signature,
+            UpdateError::Json(_) => Self::Json,
+        }
+    }
+}
+
+impl From<String> for CheckFailure {
+    fn from(message: String) -> Self {
+        if message
+            == "update download failed; check connectivity and retry after the daily interval"
+        {
+            Self::LegacyDownload
+        } else {
+            Self::Legacy { message }
+        }
+    }
+}
+
+impl fmt::Display for CheckFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { message } => write!(f, "update file operation failed: {message}"),
+            Self::Network => UpdateError::Network.fmt(f),
+            Self::Http { status } => UpdateError::Http(status.0).fmt(f),
+            Self::Invalid { reason } => write!(f, "update refused: {reason}"),
+            Self::LicenseRequired { major } => UpdateError::LicenseRequired(*major).fmt(f),
+            Self::Signature => UpdateError::Signature.fmt(f),
+            Self::Json => f.write_str("invalid release metadata or update cache"),
+            Self::LegacyDownload => f.write_str(
+                "the release server could not be reached or returned an unsuccessful response",
+            ),
+            Self::Legacy { message } => f.write_str(message),
+        }
+    }
+}
+
 fn read_cache(path: &Path, current: &str) -> Result<Cache, UpdateError> {
     match fs::read(path) {
         Ok(bytes) => {
@@ -509,32 +786,102 @@ fn write_cache(path: &Path, cache: &Cache) -> Result<(), UpdateError> {
     Ok(())
 }
 
-fn cached_status(cache: &Cache) -> String {
-    let message = match cache.message.as_str() {
-        "" | "Update check did not complete." => {
-            "The last update check has not completed. It may still be running or may have been interrupted."
-                .into()
+/// Machine-readable update outcome, rendered as prose only for text callers.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct UpdateStatus(UpdateState);
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum UpdateState {
+    Disabled,
+    Unchecked,
+    InProgress,
+    Checked {
+        last_attempt: u64,
+        outcome: CheckOutcome,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum CheckOutcome {
+    UpToDate { version: semver::Version },
+    Available { version: semver::Version },
+    Incomplete,
+    Failed { failure: CheckFailure },
+}
+
+impl From<(ReleaseVersion, &semver::Version)> for CheckOutcome {
+    fn from((release, installed): (ReleaseVersion, &semver::Version)) -> Self {
+        if &release.0 > installed {
+            Self::Available { version: release.0 }
+        } else {
+            Self::UpToDate { version: release.0 }
         }
-        // Older caches lost the HTTP status. Do not imply a connectivity problem
-        // when the response could have been a missing release feed instead.
-        "update download failed; check connectivity and retry after the daily interval" => {
-            "Could not check for updates: the release server could not be reached or returned an unsuccessful response. Checks run at most once per day."
-                .into()
+    }
+}
+
+impl TryFrom<&Cache> for UpdateStatus {
+    type Error = UpdateError;
+
+    fn try_from(cache: &Cache) -> Result<Self, Self::Error> {
+        if cache.last_attempt == 0 {
+            return Ok(Self(UpdateState::Unchecked));
         }
-        message if cache.manifest.is_some() => message.to_owned(),
-        message => format!(
-            "Could not check for updates: {}. Checks run at most once per day.",
-            message.trim_end_matches('.')
-        ),
-    };
-    let attempted_at = i64::try_from(cache.last_attempt)
-        .ok()
-        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
-        .map_or_else(
-            || "unavailable (invalid cached time)".into(),
-            |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        );
-    format!("{message}\nLast attempt: {attempted_at}.")
+        let outcome = match &cache.attempt {
+            AttemptResult::Incomplete => CheckOutcome::Incomplete,
+            AttemptResult::Complete { manifest } => CheckOutcome::from((
+                manifest.version.parse::<ReleaseVersion>()?,
+                &installed_version(&cache.desktop_version)?,
+            )),
+            AttemptResult::Failed { failure } => CheckOutcome::Failed {
+                failure: failure.clone(),
+            },
+        };
+        Ok(Self(UpdateState::Checked {
+            last_attempt: cache.last_attempt,
+            outcome,
+        }))
+    }
+}
+
+impl fmt::Display for UpdateStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (last_attempt, outcome) = match &self.0 {
+            UpdateState::Disabled => return f.write_str("Automatic update checks are disabled."),
+            UpdateState::Unchecked => {
+                return f.write_str("Updates have not been checked. Run `bk update-check`.");
+            }
+            UpdateState::InProgress => {
+                return f.write_str("An update check is already in progress; retry later.");
+            }
+            UpdateState::Checked {
+                last_attempt,
+                outcome,
+            } => (last_attempt, outcome),
+        };
+        match outcome {
+            CheckOutcome::UpToDate { .. } => f.write_str("Desktop is up to date.")?,
+            CheckOutcome::Available { version } => {
+                if let Ok(major) = MajorVersion::try_from(version.major) {
+                    write!(f, "Desktop {version} is available. Run `bk self-update` with a license that covers {major}.x releases.")?;
+                } else {
+                    write!(f, "Desktop {version} is available. Use the signed installer.")?;
+                }
+            }
+            CheckOutcome::Incomplete => f.write_str("The last update check has not completed. It may still be running or may have been interrupted.")?,
+            CheckOutcome::Failed { failure } => write!(f, "Could not check for updates: {}. Checks run at most once per day.", failure.to_string().trim_end_matches('.'))?,
+        }
+        let attempted_at = i64::try_from(*last_attempt)
+            .ok()
+            .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
+            .map_or_else(
+                || "unavailable (invalid cached time)".into(),
+                |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            );
+        write!(f, "\nLast attempt: {attempted_at}.")
+    }
 }
 
 /// Whether background and manual update checks may use disk or network.
@@ -552,14 +899,17 @@ pub fn status(path: &Path, checks: UpdateChecks) -> Result<String, UpdateError> 
     status_with(path, checks, env!("CARGO_PKG_VERSION"))
 }
 fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<String, UpdateError> {
+    Ok(typed_status_with(path, checks, current)?.to_string())
+}
+fn typed_status_with(
+    path: &Path,
+    checks: UpdateChecks,
+    current: &str,
+) -> Result<UpdateStatus, UpdateError> {
     if checks == UpdateChecks::Disabled {
-        return Ok("Automatic update checks are disabled.".into());
+        return Ok(UpdateStatus(UpdateState::Disabled));
     }
-    let cache = read_cache(path, current)?;
-    if cache.last_attempt == 0 {
-        return Ok("Updates have not been checked. Run `bk update-check`.".into());
-    }
-    Ok(cached_status(&cache))
+    UpdateStatus::try_from(&read_cache(path, current)?)
 }
 /// At most one network attempt per day per Desktop version, including failures
 /// and process restarts. Legacy caches are refreshed on the next check.
@@ -567,24 +917,24 @@ fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<Strin
 ///
 /// # Errors
 /// Returns errors when cached update state cannot be read or written.
-pub fn check(path: &Path, checks: UpdateChecks, now: u64) -> Result<String, UpdateError> {
-    check_with(path, checks, now, env!("CARGO_PKG_VERSION"), |current| {
-        fetch_manifest(current, download, &Cosign)
+pub fn check(path: &Path, checks: UpdateChecks, now: u64) -> Result<UpdateStatus, UpdateError> {
+    check_status_with(path, checks, now, env!("CARGO_PKG_VERSION"), |current| {
+        fetch_manifest(current, download, &Sigstore)
     })
 }
-fn check_with(
+fn check_status_with(
     path: &Path,
     checks: UpdateChecks,
     now: u64,
     current: &str,
     fetch: impl FnOnce(&semver::Version) -> Result<VerifiedManifest, UpdateError>,
-) -> Result<String, UpdateError> {
+) -> Result<UpdateStatus, UpdateError> {
     if checks == UpdateChecks::Disabled {
-        return status_with(path, UpdateChecks::Disabled, current);
+        return typed_status_with(path, UpdateChecks::Disabled, current);
     }
     let mut cache = read_cache(path, current)?;
     if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-        return status_with(path, UpdateChecks::Enabled, current);
+        return typed_status_with(path, UpdateChecks::Enabled, current);
     }
     let parent = path
         .parent()
@@ -607,7 +957,7 @@ fn check_with(
             if age >= Duration::from_secs(DAY) {
                 fs::remove_file(&lock)?;
             }
-            return Ok("An update check is already in progress; retry later.".into());
+            return Ok(UpdateStatus(UpdateState::InProgress));
         }
         Err(e) => return Err(e.into()),
     }
@@ -615,40 +965,48 @@ fn check_with(
         // Re-read under lock to handle a concurrent completed checker.
         cache = read_cache(path, current)?;
         if cache.last_attempt != 0 && now.saturating_sub(cache.last_attempt) < DAY {
-            return status_with(path, UpdateChecks::Enabled, current);
+            return typed_status_with(path, UpdateChecks::Enabled, current);
         }
         current.clone_into(&mut cache.desktop_version);
         cache.last_attempt = now.max(1);
-        cache.message = "Update check did not complete.".into();
+        cache.attempt = AttemptResult::Incomplete;
         write_cache(path, &cache)?;
         let installed = installed_version(current)?;
-        match fetch(&installed) {
+        let outcome = match fetch(&installed) {
             Ok(manifest) => {
-                cache.message = if !manifest.is_newer_than(&installed) {
-                    "Desktop is up to date.".into()
-                } else if let Some(major) = manifest.version.license_major() {
-                    format!(
-                        "Desktop {} is available. Run `bk self-update` with a license that covers {major}.x releases.",
-                        manifest.version
-                    )
-                } else {
-                    format!(
-                        "Desktop {} is available. Use the signed installer.",
-                        manifest.version
-                    )
+                let outcome = CheckOutcome::from((manifest.version, &installed));
+                cache.attempt = AttemptResult::Complete {
+                    manifest: manifest.cache_record,
                 };
-                cache.manifest = Some(manifest.cache_record);
+                outcome
             }
             Err(error) => {
-                cache.message = error.to_string();
-                cache.manifest = None;
+                let failure = CheckFailure::from(error);
+                cache.attempt = AttemptResult::Failed {
+                    failure: failure.clone(),
+                };
+                CheckOutcome::Failed { failure }
             }
-        }
+        };
         write_cache(path, &cache)?;
-        status_with(path, UpdateChecks::Enabled, current)
+        Ok(UpdateStatus(UpdateState::Checked {
+            last_attempt: cache.last_attempt,
+            outcome,
+        }))
     })();
     let _ = fs::remove_file(lock);
     result
+}
+
+#[cfg(test)]
+fn check_with(
+    path: &Path,
+    checks: UpdateChecks,
+    now: u64,
+    current: &str,
+    fetch: impl FnOnce(&semver::Version) -> Result<VerifiedManifest, UpdateError>,
+) -> Result<String, UpdateError> {
+    Ok(check_status_with(path, checks, now, current, fetch)?.to_string())
 }
 
 /// Download only the matching archive and mandatory D13 checksum/bundle files.
@@ -656,12 +1014,14 @@ fn check_with(
 ///
 /// # Errors
 /// Returns errors for unsupported targets, unavailable releases, ineligible licenses, or invalid artifacts.
-pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> {
-    let cached = read_cache(cache, env!("CARGO_PKG_VERSION"))?
-        .manifest
-        .ok_or(UpdateError::Invalid(
+pub fn self_update(cache: &Path, destination: &Path) -> Result<semver::Version, UpdateError> {
+    let AttemptResult::Complete { manifest: cached } =
+        read_cache(cache, env!("CARGO_PKG_VERSION"))?.attempt
+    else {
+        return Err(UpdateError::Invalid(
             "run bk update-check successfully first",
-        ))?;
+        ));
+    };
     let version = cached.version.parse()?;
     let bytes = download(&asset_url(&version, "update-manifest.json"), MAX_METADATA)?;
     let bundle = download(
@@ -670,7 +1030,7 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
     )?;
     let current = installed_version(env!("CARGO_PKG_VERSION"))?;
     let release =
-        verify_manifest(&bytes, &bundle, Some(version), &Cosign)?.require_newer(&current)?;
+        verify_manifest(&bytes, &bundle, Some(version), &Sigstore)?.require_newer(&current)?;
     let licenses = crate::product::load_update_licenses().map_err(|_| {
         UpdateError::Invalid("could not verify the Desktop license. Run `bk license` for details")
     })?;
@@ -698,8 +1058,9 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
             checksums_bundle: &checksums_bundle,
         },
         destination,
-        &Cosign,
-    )
+        &Sigstore,
+    )?;
+    Ok(version.0.clone())
 }
 
 struct ReleaseFiles<'a> {
@@ -867,7 +1228,7 @@ mod tests {
     use ed25519_dalek::{Signature, Signer, SigningKey};
     type TestResult = Result<(), Box<dyn Error>>;
     // Cryptographic offline substitute only at the verifier boundary. Production
-    // always invokes cosign to validate Fulcio identity and transparency evidence.
+    // uses in-process Sigstore verification to validate Fulcio identity and transparency evidence.
     struct OfflineVerifier;
     impl BundleVerifier for OfflineVerifier {
         fn verify(
@@ -955,31 +1316,139 @@ mod tests {
             .expect("gzip finished")
     }
     #[test]
+    fn in_process_verifier_authenticates_a_real_release_and_rejects_tampering() -> TestResult {
+        let bytes = include_bytes!("../tests/fixtures/sigstore/checksums-sha256.txt");
+        let bundle = include_bytes!("../tests/fixtures/sigstore/checksums-sha256.txt.sigstore");
+        let version = "0.1.0-rc.33".parse()?;
+        verify_bytes(bytes, bundle, &version, &Sigstore)?;
+        assert!(verify_bytes(b"changed", bundle, &version, &Sigstore).is_err());
+        assert!(verify_bytes(bytes, bundle, &"0.1.0-rc.32".parse()?, &Sigstore).is_err());
+        assert!(verify_bytes(bytes, b"{}", &version, &Sigstore).is_err());
+        let mut evidence: serde_json::Value = serde_json::from_slice(bundle)?;
+        evidence["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
+        assert!(verify_bytes(bytes, &serde_json::to_vec(&evidence)?, &version, &Sigstore).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn trust_rotation_fallback_requires_an_intact_authorized_artifact() -> TestResult {
+        use sigstore_verify::{CertificateError, Error, TransparencyLogError, types::Bundle};
+        let bytes = include_bytes!("../tests/fixtures/sigstore/checksums-sha256.txt");
+        let bundle = Bundle::from_json(include_str!(
+            "../tests/fixtures/sigstore/checksums-sha256.txt.sigstore"
+        ))?;
+        let version = "0.1.0-rc.33".parse()?;
+        let mut artifact = NamedTempFile::new()?;
+        artifact.write_all(bytes)?;
+        let calls = std::cell::Cell::new(0);
+        let fallback = |candidate: RotationCandidate<'_>| {
+            let command = candidate.cosign_command(Path::new("bundle.sigstore"));
+            assert_eq!(command.get_program(), "cosign");
+            assert_eq!(command.get_args().last(), Some(artifact.path().as_os_str()));
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let unknown_log = || {
+            Error::TransparencyLog(TransparencyLogError::UnknownLog {
+                log_id: "rotated-key".into(),
+            })
+        };
+        fallback_for_rotation(unknown_log(), artifact.path(), &bundle, &version, fallback)?;
+        assert_eq!(calls.get(), 1);
+        assert!(
+            fallback_for_rotation(
+                Error::SignatureInvalid("invalid signature".into()),
+                artifact.path(),
+                &bundle,
+                &version,
+                fallback
+            )
+            .is_err()
+        );
+        assert!(
+            fallback_for_rotation(
+                Error::Certificate(CertificateError::ChainInvalid(
+                    "invalid certificate signature".into()
+                )),
+                artifact.path(),
+                &bundle,
+                &version,
+                fallback
+            )
+            .is_err()
+        );
+        assert!(
+            fallback_for_rotation(
+                unknown_log(),
+                artifact.path(),
+                &bundle,
+                &"0.1.0-rc.32".parse()?,
+                fallback
+            )
+            .is_err()
+        );
+        let mut invalid_signature = bundle.clone();
+        if let sigstore_verify::types::SignatureContent::MessageSignature(signature) =
+            &mut invalid_signature.content
+        {
+            signature.signature = sigstore_verify::types::SignatureBytes::from_bytes(b"invalid");
+        }
+        assert!(
+            fallback_for_rotation(
+                unknown_log(),
+                artifact.path(),
+                &invalid_signature,
+                &version,
+                fallback
+            )
+            .is_err()
+        );
+        // Even if root coverage fails first, a changed artifact must never
+        // execute cosign. No PATH mutation or external executable is needed.
+        fs::write(artifact.path(), b"tampered artifact")?;
+        assert!(
+            fallback_for_rotation(unknown_log(), artifact.path(), &bundle, &version, fallback)
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_candidate_is_required_to_construct_the_authenticated_release_command() -> TestResult
+    {
+        let mut artifact = NamedTempFile::new()?;
+        artifact.write_all(include_bytes!(
+            "../tests/fixtures/sigstore/checksums-sha256.txt"
+        ))?;
+        let bundle = sigstore_verify::types::Bundle::from_json(include_str!(
+            "../tests/fixtures/sigstore/checksums-sha256.txt.sigstore"
+        ))?;
+        let version = "0.1.0-rc.33".parse()?;
+        let candidate = RotationCandidate::try_from((artifact.path(), &bundle, &version))?;
+        let command = candidate.cosign_command(Path::new("release.sigstore"));
+        assert_eq!(command.get_program(), "cosign");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), [
+            "verify-blob".as_ref(), "--timeout".as_ref(), "30s".as_ref(),
+            "--certificate-identity".as_ref(),
+            "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.33".as_ref(),
+            "--certificate-oidc-issuer".as_ref(), "https://token.actions.githubusercontent.com".as_ref(),
+            "--bundle".as_ref(), "release.sigstore".as_ref(), artifact.path().as_os_str(),
+        ]);
+        Ok(())
+    }
+
+    #[test]
     fn official_verifier_pins_exact_identity_and_issuer_without_bypass_flags() -> TestResult {
-        let command = cosign_command(
-            Path::new("archive"),
-            Path::new("bundle"),
-            &ReleaseVersion::from_str("1.10.0")?,
-        );
-        let arguments: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+        let policy = release_policy(&ReleaseVersion::from_str("1.10.0")?);
         assert_eq!(
-            arguments,
-            [
-                "verify-blob",
-                "--timeout",
-                "30s",
-                "--certificate-identity",
-                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v1.10.0",
-                "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                "--bundle",
-                "bundle",
-                "archive"
-            ]
+            policy.issuer(),
+            Some("https://token.actions.githubusercontent.com")
         );
+        assert!(policy.verifies_tlog());
+        assert!(policy.identity().is_some_and(|identity| identity.matches(
+            &sigstore_verify::SubjectAltName::Uri("https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v1.10.0".into())
+        )));
         assert!(ReleaseVersion::from_str("../../tag").is_err());
         Ok(())
     }
@@ -1136,13 +1605,12 @@ mod tests {
                 env!("CARGO_PKG_VERSION"),
                 |_| Ok(fetched),
             )?;
-            assert_eq!(
-                read_cache(&path, env!("CARGO_PKG_VERSION"))?
-                    .manifest
-                    .ok_or("missing cached manifest")?
-                    .version,
-                version
-            );
+            let AttemptResult::Complete { manifest } =
+                read_cache(&path, env!("CARGO_PKG_VERSION"))?.attempt
+            else {
+                return Err("missing cached manifest".into());
+            };
+            assert_eq!(manifest.version, version);
             assert_eq!(
                 check_with(
                     &path,
@@ -1193,14 +1661,138 @@ mod tests {
             );
             assert!(result.is_err_and(|error| error.to_string().contains(expected)));
         }
-        let command = cosign_command(
-            Path::new("archive"),
-            Path::new("bundle"),
-            &ReleaseVersion::from_str("0.1.0-rc.2")?,
-        );
-        assert!(command.get_args().any(|arg| arg == format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.2").as_str()));
+        assert!(release_policy(&ReleaseVersion::from_str("0.1.0-rc.2")?).verifies_tlog());
         Ok(())
     }
+    #[test]
+    fn legacy_cache_messages_map_once_into_typed_attempts() -> TestResult {
+        let manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
+        for (message, previous_manifest, state, kind, expected) in [
+            (
+                "",
+                None,
+                "incomplete",
+                None,
+                "The last update check has not completed.",
+            ),
+            (
+                "Update check did not complete.",
+                Some(&manifest),
+                "incomplete",
+                None,
+                "The last update check has not completed.",
+            ),
+            (
+                "complete",
+                Some(&manifest),
+                "complete",
+                None,
+                "Desktop 1.10.0 is available.",
+            ),
+            (
+                "Desktop 1.10.0 is available. Use the signed installer.",
+                Some(&manifest),
+                "complete",
+                None,
+                "Desktop 1.10.0 is available.",
+            ),
+            (
+                "Desktop is up to date.",
+                Some(&manifest),
+                "complete",
+                None,
+                "Desktop 1.10.0 is available.",
+            ),
+            (
+                "update download failed; check connectivity and retry after the daily interval",
+                None,
+                "failed",
+                Some("legacy_download"),
+                "Could not check for updates: the release server could not be reached or returned an unsuccessful response. Checks run at most once per day.",
+            ),
+            (
+                "the release server could not be reached",
+                None,
+                "failed",
+                Some("legacy"),
+                "Could not check for updates: the release server could not be reached. Checks run at most once per day.",
+            ),
+            (
+                "complete",
+                None,
+                "failed",
+                Some("legacy"),
+                "Could not check for updates: complete. Checks run at most once per day.",
+            ),
+        ] {
+            let cache: Cache = serde_json::from_value(serde_json::json!({
+                "desktop_version": "1.0.0",
+                "last_attempt": DAY,
+                "manifest": previous_manifest,
+                "message": message,
+            }))?;
+            let status = UpdateStatus::try_from(&cache)?.to_string();
+            assert!(status.starts_with(expected), "{status}");
+            let typed = serde_json::to_value(&cache)?;
+            assert_eq!(typed["attempt"]["state"], state);
+            if let Some(kind) = kind {
+                assert_eq!(typed["attempt"]["failure"]["kind"], kind);
+            }
+            assert!(typed.get("message").is_none());
+            assert!(typed.get("manifest").is_none());
+            let restored: Cache = serde_json::from_value(typed)?;
+            assert_eq!(UpdateStatus::try_from(&restored)?.to_string(), status);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn update_failures_keep_their_kind_and_wording_through_cache_serialization() -> TestResult {
+        let errors = [
+            UpdateError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "fixture")),
+            UpdateError::Network,
+            UpdateError::Http(reqwest::StatusCode::NOT_FOUND),
+            UpdateError::Invalid("fixture reason"),
+            UpdateError::LicenseRequired(MajorVersion::try_from(1)?),
+            UpdateError::Signature,
+            UpdateError::Json(
+                serde_json::from_str::<Manifest>("invalid")
+                    .err()
+                    .ok_or("fixture JSON error")?,
+            ),
+        ];
+        for error in errors {
+            let expected = error.to_string();
+            let failure = CheckFailure::from(error);
+            let cache = Cache {
+                desktop_version: "1.0.0".into(),
+                last_attempt: DAY,
+                attempt: AttemptResult::Failed { failure },
+            };
+            let typed = serde_json::to_value(&cache)?;
+            assert_ne!(typed["attempt"]["failure"]["kind"], "legacy");
+            let restored: Cache = serde_json::from_value(typed)?;
+            let AttemptResult::Failed { failure } = restored.attempt else {
+                return Err("failure changed state".into());
+            };
+            assert_eq!(failure.to_string(), expected);
+        }
+        assert!(
+            serde_json::from_value::<Cache>(serde_json::json!({
+                "desktop_version": "1.0.0", "last_attempt": DAY,
+                "attempt": { "state": "complete" }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CheckFailure>(serde_json::json!({
+                "kind": "http", "status": 0
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
     #[test]
     fn legacy_status_is_unchecked_without_changing_cache() -> TestResult {
         let directory = tempfile::tempdir()?;
@@ -1255,7 +1847,7 @@ mod tests {
                     |_| {
                         let pending = read_cache(&path, current)?;
                         assert_eq!(pending.desktop_version, current);
-                        assert_eq!(pending.message, "Update check did not complete.");
+                        assert!(matches!(pending.attempt, AttemptResult::Incomplete));
                         verified(&cached_manifest)
                     },
                 )?;
@@ -1288,7 +1880,10 @@ mod tests {
             })?;
             assert!(result.starts_with("Could not check for updates:"));
             assert_eq!(read_cache(&path, current)?.desktop_version, current);
-            assert!(read_cache(&path, current)?.manifest.is_none());
+            assert!(matches!(
+                read_cache(&path, current)?.attempt,
+                AttemptResult::Failed { .. }
+            ));
             assert_eq!(
                 check_with(
                     &path,
@@ -1332,24 +1927,44 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_attempt_and_invalid_timestamp_do_not_claim_success() {
+    fn update_result_serializes_outcome_and_version_without_rendered_prose() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("updates.json");
+        let result = check_status_with(&path, UpdateChecks::Enabled, DAY, "0.1.0-rc.33", |_| {
+            verified(&manifest(b"fixture", "x86_64-unknown-linux-gnu"))
+        })?;
+        let data = serde_json::to_value(&result)?;
+        assert_eq!(data["state"], "checked");
+        assert_eq!(data["last_attempt"], DAY);
+        assert_eq!(data["outcome"]["state"], "available");
+        assert_eq!(data["outcome"]["version"], "1.10.0");
+        assert!(data["outcome"].get("message").is_none());
+        assert!(
+            result
+                .to_string()
+                .starts_with("Desktop 1.10.0 is available.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_attempt_and_invalid_timestamp_do_not_claim_success() -> TestResult {
         let mut cache = Cache {
             desktop_version: env!("CARGO_PKG_VERSION").into(),
             last_attempt: 1_795_226_804,
-            // A previous successful manifest may remain during a new attempt.
-            manifest: Some(manifest(b"fixture", "x86_64-unknown-linux-gnu")),
-            message: "Update check did not complete.".into(),
+            attempt: AttemptResult::Incomplete,
         };
         assert_eq!(
-            cached_status(&cache),
+            UpdateStatus::try_from(&cache)?.to_string(),
             "The last update check has not completed. It may still be running or may have been interrupted.\nLast attempt: 2026-11-21 02:06:44 UTC."
         );
         for seconds in [i64::MAX.unsigned_abs(), u64::MAX] {
             cache.last_attempt = seconds;
-            let status = cached_status(&cache);
+            let status = UpdateStatus::try_from(&cache)?.to_string();
             assert!(status.ends_with("Last attempt: unavailable (invalid cached time)."));
             assert!(!status.contains(&seconds.to_string()));
         }
+        Ok(())
     }
 
     #[test]
@@ -1379,7 +1994,7 @@ mod tests {
             ),
             (
                 Err(UpdateError::Signature),
-                "Could not check for updates: Sigstore verification failed; install cosign and require a valid release bundle. Checks run at most once per day.",
+                "Could not check for updates: Sigstore verification failed; a valid signed release bundle is required. Checks run at most once per day.",
             ),
         ];
         for (day, (result, expected)) in cases.into_iter().enumerate() {
@@ -1460,11 +2075,10 @@ mod tests {
             )?
             .contains("Could not check for updates: the release server could not be reached")
         );
-        assert!(
-            read_cache(&path, env!("CARGO_PKG_VERSION"))?
-                .manifest
-                .is_none()
-        );
+        assert!(matches!(
+            read_cache(&path, env!("CARGO_PKG_VERSION"))?.attempt,
+            AttemptResult::Failed { .. }
+        ));
         check_with(
             &path,
             UpdateChecks::Enabled,

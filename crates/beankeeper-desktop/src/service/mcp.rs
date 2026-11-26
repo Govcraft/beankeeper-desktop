@@ -41,6 +41,7 @@ impl ServerHandler for Lifecycle {
                 .into_iter()
                 .filter_map(ServiceOperation::tool)
                 .chain(extension::mcp_tool())
+                .chain(crate::diagnostics::tools())
                 .chain(LicenseTool::tools())
                 .collect(),
         )))
@@ -52,6 +53,14 @@ impl ServerHandler for Lifecycle {
     ) -> Result<CallToolResponse, ErrorData> {
         if let Some(tool) = LicenseTool::from_name(&request.name) {
             return Ok(tool.call_with_context(request, context).await.into());
+        }
+        if let Ok(operation) = request.name.parse::<crate::diagnostics::Diagnostic>() {
+            let result =
+                tokio::task::spawn_blocking(move || crate::diagnostics::call(operation, request))
+                    .await;
+            return Ok(result
+                .unwrap_or_else(|_| failure(&ServiceError::Worker))
+                .into());
         }
         if request.name == extension::TOOL {
             let result = tokio::task::spawn_blocking(move || extension::mcp_call(request)).await;
