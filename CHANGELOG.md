@@ -2,12 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.32] - 2026-11-25
+
+- Check and activate Desktop licenses in chat using a signed license, saved file, or claim code.
+
 ## [0.1.0-rc.31] - 2026-11-25
 
 - Verify Beankeeper in the current local Codex chat before asking for a restart, and report when a Codex connection is turned off.
 - Activate Desktop offline by pasting a PASETO license token or supplying the downloaded license file.
 - Require an active license for ordinary writes per ledger in official stable Desktop releases from 1.0, with reads, exports, and audited undo available through the CLI and MCP.
-- Check and activate Desktop licenses in chat using a signed license, saved file, or claim code.
 - Verify schema 2 Desktop licenses offline and authorize signed self-updates by the major version covered by any active license.
 - Use verified local backups to open older books for CLI and MCP, and report schema mismatches with a named error and version details.
 - Publish the approved Beankeeper Desktop 1.0 license and align the licensing documentation.
