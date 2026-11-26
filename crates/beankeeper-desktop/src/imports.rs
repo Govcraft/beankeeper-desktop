@@ -25,7 +25,7 @@ use beankeeper_cli::{
     db::Db,
     error::CliError,
     identity,
-    mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY},
+    mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY, LedgerTarget},
     operation::Operation,
 };
 use rmcp::{
@@ -189,7 +189,7 @@ impl ImportAccess {
     fn authorize(self, ledger: &LedgerAccess) -> Result<(), CliError> {
         match self {
             Self::Tool => Ok(()),
-            Self::Transfer => ledger.ordinary_write(),
+            Self::Transfer => ledger.ordinary_write(LedgerTarget::default()),
         }
     }
 }

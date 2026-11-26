@@ -121,8 +121,7 @@ impl LedgerAccess {
         db.with_write_authorizer(target, self)
     }
 
-    pub(crate) fn ordinary_write(&self) -> Result<(), CliError> {
-        let ledger = LedgerTarget::default();
+    pub(crate) fn ordinary_write(&self, ledger: LedgerTarget) -> Result<(), CliError> {
         self.authorize_write(&ledger, LedgerWriteKind::Ordinary)
             .map_err(|reason| CliError::WriteDenied { ledger, reason })
     }

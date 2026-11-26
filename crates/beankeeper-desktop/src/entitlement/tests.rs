@@ -7,6 +7,7 @@ use beankeeper_cli::{
     request::{LedgerRequest, LedgerResponse},
 };
 use clap::Parser;
+use std::cell::Cell;
 
 const KEYS: &[u8] = include_bytes!("../../tests/fixtures/license-public-keys.json");
 const LICENSE: &[u8] = include_bytes!("../../tests/fixtures/license-v4.public.txt");
@@ -235,6 +236,7 @@ struct McpClient {
     url: String,
     client: reqwest::Client,
     session: reqwest::header::HeaderValue,
+    next_id: Cell<u64>,
 }
 
 impl McpClient {
@@ -260,6 +262,7 @@ impl McpClient {
             .get("mcp-session-id")
             .ok_or("session id")?
             .clone();
+        response.text().await?;
         client
             .post(&url)
             .header("accept", "application/json, text/event-stream")
@@ -274,6 +277,7 @@ impl McpClient {
             url,
             client,
             session,
+            next_id: Cell::new(2),
         })
     }
 
@@ -284,19 +288,25 @@ impl McpClient {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
         let text = self.client.post(&self.url)
             .header("accept", "application/json, text/event-stream")
             .header("mcp-protocol-version", "2025-11-25")
             .header("mcp-session-id", &self.session)
             .header(beankeeper_cli::mcp::LEDGER_TARGET_HEADER, target)
             .bearer_auth(token.expose_secret())
-            .json(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+            .json(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
             .send().await?.error_for_status()?.text().await?;
-        let json = text
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .unwrap_or(&text);
-        let result: serde_json::Value = serde_json::from_str(json)?;
+        let result: serde_json::Value = serde_json::from_str(&text)
+            .ok()
+            .or_else(|| {
+                text.lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .filter_map(|data| serde_json::from_str::<serde_json::Value>(data.trim()).ok())
+                    .find(|value| value["id"] == id)
+            })
+            .ok_or_else(|| format!("missing MCP response for {name} on {target}: {text}"))?;
         if result["result"].is_null() {
             return Err(format!("no tool response: {result}").into());
         }

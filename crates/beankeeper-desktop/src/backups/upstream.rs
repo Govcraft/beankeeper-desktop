@@ -37,7 +37,11 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
             cli.company.as_ref().map(CompanySlug::as_str),
         )
     });
-    match dispatch(&mut cli, meta.clone()) {
+    let target = matches
+        .get_one::<LedgerTarget>("ledger_target")
+        .cloned()
+        .unwrap_or_default();
+    match dispatch(&mut cli, meta.clone(), target) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let meta = meta.map(|meta| cli.meta(meta.command, meta.company.as_deref()));
@@ -47,11 +51,11 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-fn dispatch(cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+fn dispatch(cli: &mut Cli, meta: Option<Meta>, target: LedgerTarget) -> Result<(), CliError> {
     let ledgers = DispatchBooks::try_from(&*cli)?;
     let _stored = setup::stored_passphrase_for(&mut cli.passphrase, &ledgers.primary)
         .map_err(|error| CliError::General(error.to_string()))?;
-    ledgers.run(cli, meta)
+    ledgers.run(cli, meta, target)
 }
 
 struct DispatchBooks {
@@ -124,7 +128,7 @@ impl TryFrom<&Cli> for DispatchBooks {
 }
 
 impl DispatchBooks {
-    fn run(self, cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+    fn run(self, cli: &mut Cli, meta: Option<Meta>, target: LedgerTarget) -> Result<(), CliError> {
         match self.open {
             DispatchOpen::CoreOnly => commands::dispatch(cli, meta),
             // Core handles commands without books, such as loan schedules.
@@ -142,14 +146,14 @@ impl DispatchBooks {
                     // parsed command can use the audited undo entry point exclusively.
                     books.open()?
                 } else {
-                    books.open_protected(LedgerTarget::default())?
+                    books.open_protected(target)?
                 };
                 commands::dispatch_with_db(cli, db, meta)
             }
             DispatchOpen::Stdio { read_only } => {
                 let db = DispatchKey::try_from((&cli.passphrase, false))?
                     .books(&self.primary)?
-                    .open_protected(LedgerTarget::default())?;
+                    .open_protected(target)?;
                 mcp::serve_with_db(cli, db, read_only)
             }
             DispatchOpen::Http { bind, read_only } => {
@@ -158,7 +162,7 @@ impl DispatchBooks {
             }
             DispatchOpen::Replace { encrypt } => {
                 LedgerAccess::from(BooksPath::try_from(self.primary.as_path())?)
-                    .ordinary_write()?;
+                    .ordinary_write(target)?;
                 let key = DispatchKey::try_from((&cli.passphrase, encrypt))?;
                 key.books(&self.primary)?.before_replacement()?;
                 // Core init replaces the file and resolves the destination key itself.
