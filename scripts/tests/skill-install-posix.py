@@ -180,7 +180,7 @@ def exercise(target, artifacts, published):
         sandbox = Path(temporary).resolve()
         home = sandbox / "profile"
         codex = home / ".codex"
-        (home / ".claude").mkdir()
+        (home / ".claude").mkdir(parents=True)
         env = dict(os.environ)
         config = native_config(env, sandbox)
         for name in ("BEANKEEPER_DB", "BEANKEEPER_PASSPHRASE_CMD", "BK_AGENT_TOKEN", "BK_VERSION", "BK_DOWNLOAD_BASE"):
