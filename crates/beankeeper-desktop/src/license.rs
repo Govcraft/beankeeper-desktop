@@ -8,9 +8,9 @@ use std::{
     error::Error,
     fmt, fs,
     io::{self, Write},
-    num::NonZeroU32,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -68,26 +68,11 @@ impl<'de> Deserialize<'de> for LicenseId {
     }
 }
 
-/// The positive major version covered by a Desktop license.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "u64")]
-pub struct MajorVersion(NonZeroU32);
+pub use crate::release_policy::MajorVersion;
 
-impl TryFrom<u64> for MajorVersion {
-    type Error = LicenseError;
-
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
-        u32::try_from(value)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .map(Self)
-            .ok_or(LicenseError::InvalidClaims)
-    }
-}
-
-impl fmt::Display for MajorVersion {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+impl<'de> Deserialize<'de> for MajorVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -199,8 +184,19 @@ impl LicenseClaims {
 }
 
 /// A perpetual Desktop license authenticated by a configured issuer.
-#[derive(Clone, PartialEq, Eq)]
-pub struct VerifiedLicense(LicenseClaims);
+#[derive(Clone)]
+pub struct VerifiedLicense {
+    claims: LicenseClaims,
+    token: Arc<[u8]>,
+}
+
+impl PartialEq for VerifiedLicense {
+    fn eq(&self, other: &Self) -> bool {
+        self.claims == other.claims
+    }
+}
+
+impl Eq for VerifiedLicense {}
 
 impl fmt::Debug for VerifiedLicense {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -216,19 +212,19 @@ impl VerifiedLicense {
     /// Canonical service-issued identifier.
     #[must_use]
     pub fn id(&self) -> &LicenseId {
-        &self.0.license_id
+        &self.claims.license_id
     }
 
     /// The major version covered for perpetual use and updates.
     #[must_use]
     pub fn eligible_major(&self) -> MajorVersion {
-        self.0.eligible_major
+        self.claims.eligible_major
     }
 
     /// Signed source of the purchase or grant.
     #[must_use]
     pub fn storefront(&self) -> Storefront {
-        self.0.storefront
+        self.claims.storefront
     }
 }
 
@@ -296,6 +292,7 @@ impl TryFrom<&str> for TokenFooter {
 }
 
 struct UnverifiedToken<'a> {
+    bytes: &'a [u8],
     text: &'a str,
     footer: TokenFooter,
 }
@@ -320,6 +317,7 @@ impl<'a> TryFrom<&'a [u8]> for UnverifiedToken<'a> {
             .ok_or(LicenseError::InvalidToken)?;
         let (_, footer) = parts.split_once('.').ok_or(LicenseError::InvalidFooter)?;
         Ok(Self {
+            bytes: value,
             text,
             footer: footer.try_into()?,
         })
@@ -356,7 +354,10 @@ impl UnverifiedToken<'_> {
         let claims: LicenseClaims =
             serde_json::from_str(&payload).map_err(|_| LicenseError::InvalidClaims)?;
         claims.check_clock(now)?;
-        Ok(VerifiedLicense(claims))
+        Ok(VerifiedLicense {
+            claims,
+            token: self.bytes.into(),
+        })
     }
 }
 
@@ -398,12 +399,6 @@ impl TrustedKeys {
         }
         Ok(Self(keys))
     }
-}
-
-/// Whether a verified license covers the given release major.
-#[must_use]
-pub fn entitlement(license: &VerifiedLicense, release_major: MajorVersion) -> bool {
-    license.eligible_major() == release_major
 }
 
 /// Verify a PASETO v4.public license offline and return its authenticated claims.
@@ -457,7 +452,10 @@ impl VerifiedRevocations {
     pub(crate) fn verify(bytes: &[u8], keys: &TrustedKeys) -> Result<Self, LicenseError> {
         let envelope: RevocationEnvelope =
             serde_json::from_slice(bytes).map_err(|_| LicenseError::InvalidRevocations)?;
-        let key = keys.0.get(&envelope.key_id).ok_or(LicenseError::UnknownKey)?;
+        let key = keys
+            .0
+            .get(&envelope.key_id)
+            .ok_or(LicenseError::UnknownKey)?;
         if envelope.signature.len() != 86 || envelope.payload.len() > 4 * 1024 * 1024 {
             return Err(LicenseError::InvalidRevocations);
         }
@@ -471,7 +469,8 @@ impl VerifiedRevocations {
             envelope.key_id.0,
             envelope.payload
         );
-        key.0.verify_strict(message.as_bytes(), &signature)
+        key.0
+            .verify_strict(message.as_bytes(), &signature)
             .map_err(|_| LicenseError::Signature)?;
         let payload = URL_SAFE_NO_PAD
             .decode(envelope.payload)
@@ -481,8 +480,61 @@ impl VerifiedRevocations {
         Ok(Self(claims.revoked_license_ids))
     }
 
-    pub(crate) fn contains(&self, id: &LicenseId) -> bool {
-        self.0.contains(id)
+    pub(crate) fn admit(&self, license: VerifiedLicense) -> Result<UnrevokedLicense, LicenseError> {
+        if self.0.contains(license.id()) {
+            return Err(LicenseError::Revoked(license.claims.license_id));
+        }
+        Ok(UnrevokedLicense(license))
+    }
+}
+
+/// A verified license admitted by the signed revocation snapshot.
+#[derive(Debug, Clone)]
+pub(crate) struct UnrevokedLicense(VerifiedLicense);
+
+impl UnrevokedLicense {
+    pub(crate) fn id(&self) -> &LicenseId {
+        self.0.id()
+    }
+
+    pub(crate) fn eligible_major(&self) -> MajorVersion {
+        self.0.eligible_major()
+    }
+}
+
+/// An unrevoked license that covers the selected major.
+#[derive(Debug)]
+pub(crate) struct ActiveLicense(UnrevokedLicense);
+
+impl TryFrom<(UnrevokedLicense, MajorVersion)> for ActiveLicense {
+    type Error = LicenseError;
+
+    fn try_from((license, major): (UnrevokedLicense, MajorVersion)) -> Result<Self, Self::Error> {
+        if license.eligible_major() != major {
+            return Err(LicenseError::WrongMajor(license.eligible_major()));
+        }
+        Ok(Self(license))
+    }
+}
+
+impl AsRef<UnrevokedLicense> for ActiveLicense {
+    fn as_ref(&self) -> &UnrevokedLicense {
+        &self.0
+    }
+}
+
+impl ActiveLicense {
+    pub(crate) fn id(&self) -> &LicenseId {
+        self.0.id()
+    }
+
+    pub(crate) fn persist(&self, state: &Path) -> Result<(), LicenseError> {
+        let UnrevokedLicense(license) = &self.0;
+        write_private(
+            &license.token,
+            &activation_path(state, self.id()),
+            SaveMode::Replace,
+        )
     }
 }
 
@@ -493,21 +545,6 @@ pub(crate) fn release_revocations(keys: &TrustedKeys) -> Result<VerifiedRevocati
     } else {
         VerifiedRevocations::verify(bytes, keys)
     }
-}
-
-/// Verify before atomically replacing a private activated license file.
-///
-/// # Errors
-/// Returns verification or filesystem errors. Failed verification preserves the
-/// previous license. Existing symbolic links and public files are refused.
-pub fn activate(
-    bytes: &[u8],
-    keys: &TrustedKeys,
-    path: &Path,
-) -> Result<VerifiedLicense, LicenseError> {
-    let claims = verify_offline(bytes, keys)?;
-    write_private(bytes, path, SaveMode::Replace)?;
-    Ok(claims)
 }
 
 pub(crate) fn activation_path(state: &Path, id: &LicenseId) -> PathBuf {
@@ -624,6 +661,10 @@ pub enum LicenseError {
     InvalidClaims,
     /// Unsupported or malformed signed revocation snapshot.
     InvalidRevocations,
+    /// The signed revocation snapshot includes this license ID.
+    Revoked(LicenseId),
+    /// The license covers a different major.
+    WrongMajor(MajorVersion),
     /// Local activation storage failed.
     Io(io::Error),
 }
@@ -640,6 +681,8 @@ impl fmt::Display for LicenseError {
             Self::Signature => "invalid license signature",
             Self::InvalidClaims => "invalid license claims or wrong product",
             Self::InvalidRevocations => "invalid signed Desktop license revocation snapshot",
+            Self::Revoked(id) => return write!(formatter, "Desktop license {id} was revoked."),
+            Self::WrongMajor(major) => return write!(formatter, "This Desktop license covers {major}.x releases. Choose a license for this release."),
             Self::Io(_) => "cannot read or save the private activated license file",
         })
     }
@@ -727,18 +770,30 @@ mod tests {
         })
     }
 
+    fn activate_fixture(bytes: &[u8], state: &Path) -> Result<ActiveLicense, LicenseError> {
+        let keys = keys()?;
+        let revocations = VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations-empty.json"),
+            &keys,
+        )?;
+        let license = revocations.admit(verify_offline(bytes, &keys)?)?;
+        let active =
+            ActiveLicense::try_from((license, MajorVersion::new(std::num::NonZeroU32::MIN)))?;
+        active.persist(state)?;
+        Ok(active)
+    }
+
     #[test]
     fn published_fixture_activates_offline_with_perpetual_major_coverage() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("private/license.json");
-        assert!(load(&path, &keys()?)?.is_none());
-        let claims = activate(FIXTURE.as_bytes(), &keys()?, &path)?;
-        assert_eq!(load(&path, &keys()?)?, Some(claims.clone()));
+        let active = activate_fixture(FIXTURE.as_bytes(), directory.path())?;
+        let path = activation_path(directory.path(), active.id());
+        let claims = load(&path, &keys()?)?.ok_or("saved activation")?;
+        assert_eq!(&claims, &active.as_ref().0);
+        assert_eq!(fs::read(&path)?, FIXTURE.as_bytes());
         assert_eq!(claims.id().to_string(), "lic_01h455vb4pex5vsknk084sn02q");
         let windows_file = format!("{}\r\n", FIXTURE.trim_end());
         assert_eq!(verify_offline(windows_file, &keys()?)?, claims);
-        assert!(entitlement(&claims, MajorVersion::try_from(1)?));
-        assert!(!entitlement(&claims, MajorVersion::try_from(2)?));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -750,9 +805,9 @@ mod tests {
     #[test]
     fn invalid_tokens_do_not_replace_an_activation() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("saved.license");
-        let key = keys()?;
-        activate(FIXTURE.as_bytes(), &key, &path)?;
+        let state = directory.path();
+        let active = activate_fixture(FIXTURE.as_bytes(), state)?;
+        let path = activation_path(state, active.id());
         let wrong_keys = TestIssuer::new()?.keys()?;
         assert!(matches!(
             verify_offline(FIXTURE, &wrong_keys),
@@ -760,14 +815,39 @@ mod tests {
         ));
         let tampered = FIXTURE.replacen("v4.public.eyJ", "v4.public.fyJ", 1);
         assert!(matches!(
-            activate(tampered.as_bytes(), &key, &path),
+            activate_fixture(tampered.as_bytes(), state),
             Err(LicenseError::Signature)
         ));
         assert!(matches!(
-            activate(LEGACY_ENVELOPE.as_bytes(), &key, &path),
+            activate_fixture(LEGACY_ENVELOPE.as_bytes(), state),
             Err(LicenseError::InvalidToken)
         ));
         assert_eq!(fs::read_to_string(path)?, FIXTURE);
+        Ok(())
+    }
+
+    #[test]
+    fn revoked_or_wrong_major_licenses_cannot_become_active() -> TestResult {
+        let keys = keys()?;
+        let license = verify_offline(FIXTURE.as_bytes(), &keys)?;
+        let revoked = VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations.json"),
+            &keys,
+        )?;
+        let major_one = MajorVersion::try_from(1)?;
+        assert!(matches!(
+            revoked.admit(license.clone()).and_then(|license| (license, major_one).try_into()),
+            Err::<ActiveLicense, _>(LicenseError::Revoked(id)) if &id == license.id()
+        ));
+        let clear = VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations-empty.json"),
+            &keys,
+        )?;
+        let unrevoked = clear.admit(license)?;
+        assert!(matches!(
+            ActiveLicense::try_from((unrevoked, MajorVersion::try_from(2)?)),
+            Err(LicenseError::WrongMajor(major)) if major == major_one
+        ));
         Ok(())
     }
 
@@ -833,7 +913,7 @@ mod tests {
             let token = issuer.sign_claims(&claims.to_string())?;
             let verified = verify_offline(token, &keys)?;
             assert_eq!(verified.storefront(), storefront);
-            assert_eq!(verified.0.seats, SeatCount::OneComputer);
+            assert_eq!(verified.claims.seats, SeatCount::OneComputer);
             assert_eq!(
                 verified.eligible_major(),
                 MajorVersion::try_from(u64::from(u32::MAX))?
@@ -971,16 +1051,18 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let target = directory.path().join("target");
         fs::write(&target, "preserve")?;
-        let path = directory.path().join("license.json");
+        let fixture = verify_offline(FIXTURE, &keys()?)?;
+        let path = activation_path(directory.path(), fixture.id());
+        fs::create_dir_all(directory.path().join(ACTIVATIONS_DIR))?;
         symlink(&target, &path)?;
-        assert!(activate(FIXTURE.as_bytes(), &keys()?, &path).is_err());
+        assert!(activate_fixture(FIXTURE.as_bytes(), directory.path()).is_err());
         assert!(load(&path, &keys()?).is_err());
         assert_eq!(fs::read_to_string(target)?, "preserve");
         fs::remove_file(&path)?;
         fs::write(&path, FIXTURE)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
         assert!(load(&path, &keys()?).is_err());
-        assert!(activate(FIXTURE.as_bytes(), &keys()?, &path).is_err());
+        assert!(activate_fixture(FIXTURE.as_bytes(), directory.path()).is_err());
         Ok(())
     }
 }

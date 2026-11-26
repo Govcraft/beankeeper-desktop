@@ -1,6 +1,6 @@
 //! Signed release discovery and fail-closed installation. No ledger access.
 
-use crate::license::{self, MajorVersion, VerifiedLicense};
+use crate::license::{ActiveLicense, MajorVersion, UnrevokedLicense};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -196,13 +196,13 @@ impl VerifiedManifest {
 struct NewerRelease(VerifiedManifest);
 
 impl NewerRelease {
-    fn authorize(self, licenses: &[VerifiedLicense]) -> Result<AuthorizedRelease, UpdateError> {
+    fn authorize(self, licenses: &[UnrevokedLicense]) -> Result<AuthorizedRelease, UpdateError> {
         let major = self.0.version.license_major().ok_or(UpdateError::Invalid(
             "this version is outside Desktop license coverage. Use the signed installer",
         ))?;
         if !licenses
             .iter()
-            .any(|license| license::entitlement(license, major))
+            .any(|license| ActiveLicense::try_from((license.clone(), major)).is_ok())
         {
             return Err(UpdateError::LicenseRequired(major));
         }
@@ -902,11 +902,15 @@ mod tests {
         let bytes = serde_json::to_vec(manifest)?;
         verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier)
     }
-    fn fixture_license(bytes: &[u8]) -> Result<VerifiedLicense, crate::license::LicenseError> {
+    fn fixture_license(bytes: &[u8]) -> Result<UnrevokedLicense, crate::license::LicenseError> {
         let keys = crate::license::TrustedKeys::from_json(include_bytes!(
             "../tests/fixtures/license-public-keys.json"
         ))?;
-        crate::license::verify_offline(bytes, &keys)
+        let revocations = crate::license::VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations-empty.json"),
+            &keys,
+        )?;
+        revocations.admit(crate::license::verify_offline(bytes, &keys)?)
     }
     fn authorize(manifest: &Manifest, current: &str) -> Result<AuthorizedRelease, Box<dyn Error>> {
         let license = fixture_license(include_bytes!("../tests/fixtures/license-v4.public.txt"))?;

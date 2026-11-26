@@ -16,6 +16,10 @@ use std::{error::Error, io, path::Path};
 mod git_oid;
 use git_oid::GitOid;
 
+#[path = "src/release_policy.rs"]
+mod release_policy;
+use release_policy::{EnforcementPolicy, ReleaseMetadata};
+
 fn main() -> Result<(), Box<dyn Error>> {
     // The unoptimized upstream clap command tree exceeds Windows' 1 MiB
     // default main stack. Reserve the usual Unix main-stack budget; pages
@@ -37,13 +41,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     rustc_env("BK_CORE_REVISION", core_revision(&lock_path)?.as_ref());
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
-    let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
-    let official = release && std::env::var("BEANKEEPER_OFFICIAL_BUILD").as_deref() == Ok("1");
-    embed_revocations(Path::new(&manifest_dir), official)?;
-    rustc_env(
-        "BEANKEEPER_OFFICIAL_BUILD",
-        if official { "1" } else { "0" },
-    );
+    println!("cargo:rerun-if-env-changed=BEANKEEPER_OFFICIAL_BUILD");
+    let release = std::env::var("PROFILE")? == "release";
+    let official = release && official_build()?;
+    let policy = EnforcementPolicy::try_from(ReleaseMetadata {
+        official,
+        major: &std::env::var("CARGO_PKG_VERSION_MAJOR")?,
+        prerelease: &std::env::var("CARGO_PKG_VERSION_PRE")?,
+    })?;
+    let out = std::env::var_os("OUT_DIR").ok_or(std::env::VarError::NotPresent)?;
+    let out = Path::new(&out);
+    embed_revocations(Path::new(&manifest_dir), out, policy)?;
+    write_enforcement(out, official, policy)?;
     let file_defaults = if release {
         std::fs::read_to_string(&embed_path)
             .ok()
@@ -80,15 +89,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn embed_revocations(manifest: &Path, official: bool) -> io::Result<()> {
+fn official_build() -> io::Result<bool> {
+    match std::env::var("BEANKEEPER_OFFICIAL_BUILD").as_deref() {
+        Ok("1") => Ok(true),
+        Ok("0" | "") | Err(std::env::VarError::NotPresent) => Ok(false),
+        _ => Err(io::Error::other("BEANKEEPER_OFFICIAL_BUILD must be 0 or 1")),
+    }
+}
+
+fn write_enforcement(out: &Path, official: bool, policy: EnforcementPolicy) -> io::Result<()> {
+    let expression = match policy {
+        EnforcementPolicy::Free => "EnforcementPolicy::Free".to_owned(),
+        EnforcementPolicy::Enforced(major) => format!(
+            r#"match std::num::NonZeroU32::new({major}) {{
+                Some(major) => EnforcementPolicy::Enforced(MajorVersion::new(major)),
+                None => panic!("an enforced release needs a positive major version"),
+            }}"#,
+        ),
+    };
+    std::fs::write(
+        out.join("enforcement.rs"),
+        format!(
+            "pub(crate) const OFFICIAL_BUILD: bool = {official};\n\
+             pub(crate) const ENFORCEMENT: EnforcementPolicy = {expression};\n"
+        ),
+    )
+}
+
+fn embed_revocations(manifest: &Path, out: &Path, policy: EnforcementPolicy) -> io::Result<()> {
     let packaging = manifest.join("../../packaging");
     let path = packaging.join("revocations.json");
     let watched = if path.exists() { &path } else { &packaging };
     println!("cargo:rerun-if-changed={}", watched.display());
-    println!("cargo:rerun-if-env-changed=BEANKEEPER_OFFICIAL_BUILD");
-    let enforced = official
-        && std::env::var("CARGO_PKG_VERSION_MAJOR").as_deref() != Ok("0")
-        && std::env::var("CARGO_PKG_VERSION_PRE").as_deref() == Ok("");
+    let enforced = matches!(policy, EnforcementPolicy::Enforced(_));
     let bytes = match std::fs::read(path) {
         Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 && (!bytes.is_empty() || !enforced) => bytes,
         Ok(_) => {
@@ -106,8 +139,7 @@ fn embed_revocations(manifest: &Path, official: bool) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     };
-    let out = std::env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("OUT_DIR is unset"))?;
-    std::fs::write(Path::new(&out).join("revocations.json"), bytes)
+    std::fs::write(out.join("revocations.json"), bytes)
 }
 
 fn core_revision(lock_path: &Path) -> Result<GitOid, Box<dyn Error>> {

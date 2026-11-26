@@ -25,6 +25,7 @@ mod output;
 pub mod pairing;
 mod private_file;
 pub mod product;
+mod release_policy;
 pub mod reports;
 mod review;
 pub mod server;

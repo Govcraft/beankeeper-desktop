@@ -1,4 +1,5 @@
 use super::*;
+use crate::release_policy::ReleaseMetadata;
 use beankeeper_cli::{
     cli::Cli,
     commands,
@@ -34,32 +35,58 @@ fn enforced(
 
 #[test]
 fn policy_only_enforces_official_stable_releases_from_major_one() -> TestResult {
-    for (version, official) in [
-        ("0.1.0-rc.30", true),
-        ("0.9.0", true),
-        ("1.0.0-rc.1", true),
-        ("2.0.0-beta.1", true),
-        ("1.0.0", false),
+    for (major, prerelease, official) in [
+        ("0", "rc.30", true),
+        ("0", "", true),
+        ("1", "rc.1", true),
+        ("2", "beta.1", true),
+        ("1", "", false),
     ] {
         assert!(matches!(
-            EnforcementPolicy::from_release(&version.parse()?, official),
+            EnforcementPolicy::try_from(ReleaseMetadata {
+                official,
+                major,
+                prerelease
+            })?,
             EnforcementPolicy::Free
         ));
     }
-    for (version, expected) in [("1.0.0", 1), ("2.1.2", 2)] {
+    for (major, expected) in [("1", 1), ("2", 2)] {
         assert!(matches!(
-            EnforcementPolicy::from_release(&version.parse()?, true),
+            EnforcementPolicy::try_from(ReleaseMetadata { official: true, major, prerelease: "" })?,
             EnforcementPolicy::Enforced(major) if major == MajorVersion::try_from(expected)?
         ));
+    }
+    for major in ["invalid", "4294967296"] {
+        assert!(
+            EnforcementPolicy::try_from(ReleaseMetadata {
+                official: true,
+                major,
+                prerelease: ""
+            })
+            .is_err()
+        );
     }
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("books.db");
     let db = Db::open(&path, None)?;
     let mut access = enforced(&path, dir.path(), CLEAN)?;
-    access.policy = EnforcementPolicy::from_release(&"1.0.0-rc.1".parse()?, true);
+    access.policy = EnforcementPolicy::try_from(ReleaseMetadata {
+        official: true,
+        major: "1",
+        prerelease: "rc.1",
+    })?;
     let mut cli = Cli::try_parse_from(["bk", "company", "create", "preview", "Preview"])?;
     commands::dispatch_with_db(&mut cli, access.protect(db, LedgerTarget::default()), None)?;
     Ok(())
+}
+
+fn active_fixture(
+    keys: &license::TrustedKeys,
+) -> Result<ActiveLicense, Box<dyn std::error::Error>> {
+    let verified = license::verify_offline(LICENSE, keys)?;
+    let unrevoked = license::VerifiedRevocations::verify(CLEAN, keys)?.admit(verified)?;
+    Ok((unrevoked, MajorVersion::try_from(1)?).try_into()?)
 }
 
 #[test]
@@ -72,8 +99,8 @@ fn activation_is_per_ledger_and_signed_revocations_apply_offline() -> TestResult
     let first_access = enforced(&first, dir.path(), CLEAN)?;
     let second_access = enforced(&second, dir.path(), CLEAN)?;
     let keys = license::TrustedKeys::from_json(KEYS)?;
-    let license = license::verify_offline(LICENSE, &keys)?;
-    let id = license.id();
+    let active = active_fixture(&keys)?;
+    let id = active.id();
     let path = license::activation_path(dir.path(), id);
     let bindings = Bindings(dir.path());
     let major = MajorVersion::try_from(1)?;
@@ -82,14 +109,17 @@ fn activation_is_per_ledger_and_signed_revocations_apply_offline() -> TestResult
         first_access.current_entitlement(major),
         Entitlement::Missing
     ));
-    license::write_private(LICENSE, &path, license::SaveMode::Replace)?;
+    active.persist(dir.path())?;
     assert!(matches!(
         first_access.current_entitlement(major),
         Entitlement::Missing
     ));
-    bindings.bind(id, &first_access.books)?;
-    bindings.bind(id, &first_access.books)?;
-    assert!(bindings.bind(id, &second_access.books).is_err());
+    bindings.bind(&active, &first_access.books)?;
+    bindings.bind(&active, &first_access.books)?;
+    assert!(matches!(
+        bindings.bind(&active, &second_access.books),
+        Err(ProductError::LicenseBoundElsewhere)
+    ));
     assert!(matches!(
         first_access.current_entitlement(major),
         Entitlement::Active(_)
@@ -366,11 +396,11 @@ async fn authenticated_mcp_checks_the_selected_ledger_on_every_write() -> TestRe
     assert_ne!(read["isError"], true);
 
     let keys = license::TrustedKeys::from_json(KEYS)?;
-    let valid = license::verify_offline(LICENSE, &keys)?;
+    let valid = active_fixture(&keys)?;
     let path = license::activation_path(dir.path(), valid.id());
     let bindings = Bindings(dir.path());
-    license::write_private(LICENSE, &path, license::SaveMode::Replace)?;
-    bindings.bind(valid.id(), &first_access.books)?;
+    valid.persist(dir.path())?;
+    bindings.bind(&valid, &first_access.books)?;
     let allowed = client
         .call("startup", &first.token, "company_create", create("active"))
         .await?;
@@ -381,7 +411,7 @@ async fn authenticated_mcp_checks_the_selected_ledger_on_every_write() -> TestRe
     assert_eq!(denied["structuredContent"]["code"], "LEDGER_WRITE_DENIED");
 
     fs::remove_file(bindings.path(valid.id()))?;
-    bindings.bind(valid.id(), &second_access.books)?;
+    bindings.bind(&valid, &second_access.books)?;
     let denied = client
         .call("other", &second.token, "company_create", create("revoked"))
         .await?;

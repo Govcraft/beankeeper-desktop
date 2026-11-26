@@ -187,7 +187,7 @@ fn run_license(
     let path = ledger.db_path()?;
     let explicit = matches.value_source("db") != Some(ValueSource::DefaultValue)
         || matches.contains_id("ledger_target");
-    product::run_license(options, path, explicit).map_err(DesktopError::Product)
+    product::run_license(options, path, explicit.into()).map_err(DesktopError::Product)
 }
 
 fn run_backups(options: backups::BackupOptions, matches: &clap::ArgMatches) -> ExitCode {

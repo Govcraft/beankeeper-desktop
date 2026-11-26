@@ -11,49 +11,32 @@ use beankeeper_cli::{
     mcp::LedgerTarget,
 };
 use secrecy::ExposeSecret;
-use semver::Version;
 
 use crate::{
     instance::BooksPath,
-    license::{self, LicenseError, LicenseId, MajorVersion, VerifiedLicense},
+    license::{self, ActiveLicense, LicenseError, LicenseId, MajorVersion, UnrevokedLicense},
     private_file::PrivateFile,
     product::{self, ProductError},
+    release_policy::EnforcementPolicy,
 };
 
-#[derive(Clone, Copy)]
-pub(crate) enum EnforcementPolicy {
-    Free,
-    Enforced(MajorVersion),
-}
+include!(concat!(env!("OUT_DIR"), "/enforcement.rs"));
 
 impl EnforcementPolicy {
-    pub(crate) fn is_official() -> bool {
-        env!("BEANKEEPER_OFFICIAL_BUILD") == "1"
-    }
-
-    pub(crate) fn current() -> Self {
-        Version::parse(env!("CARGO_PKG_VERSION")).map_or(Self::Free, |version| {
-            Self::from_release(&version, Self::is_official())
-        })
-    }
-
-    fn from_release(version: &Version, official: bool) -> Self {
-        if official
-            && version.pre.is_empty()
-            && let Ok(major) = MajorVersion::try_from(version.major)
-        {
-            return Self::Enforced(major);
+    pub(crate) fn activation_major(self, license: &UnrevokedLicense) -> MajorVersion {
+        match self {
+            Self::Free => license.eligible_major(),
+            Self::Enforced(major) => major,
         }
-        Self::Free
     }
 }
 
 enum Entitlement {
-    Active(VerifiedLicense),
+    Active(ActiveLicense),
     Missing,
     Revoked(LicenseId),
     Invalid(ProductError),
-    WrongMajor(VerifiedLicense),
+    WrongMajor(MajorVersion),
 }
 
 impl fmt::Display for Entitlement {
@@ -77,13 +60,12 @@ impl fmt::Display for Entitlement {
                 f,
                 "These books are read-only because Desktop could not verify their license ({error})."
             )?,
-            Self::WrongMajor(license) => write!(
+            Self::WrongMajor(major) => write!(
                 f,
-                "These books are read-only because their Desktop license covers {}.x releases.",
-                license.eligible_major()
+                "These books are read-only because their Desktop license covers {major}.x releases."
             )?,
         }
-        f.write_str(" You can still read, export, back up, restore, and recover your books. Buy a license at https://beankeeper.app or use `bk --db BOOKS license activate FILE` to activate one for these books.")
+        f.write_str(" You can still read, export, back up, restore, recover your books, and undo eligible changes. Buy a license at https://beankeeper.app or use `bk --db BOOKS license activate FILE` to activate one for these books.")
     }
 }
 
@@ -109,7 +91,7 @@ impl From<BooksPath> for LedgerAccess {
     fn from(books: BooksPath) -> Self {
         Self {
             books,
-            policy: EnforcementPolicy::current(),
+            policy: ENFORCEMENT,
             #[cfg(test)]
             test_files: None,
         }
@@ -195,11 +177,17 @@ fn resolve(
             Ok(Some(license)) if license.id() != &id => {
                 refusal = Entitlement::Invalid(LicenseError::InvalidClaims.into());
             }
-            Ok(Some(_)) if revocations.contains(&id) => refusal = Entitlement::Revoked(id),
-            Ok(Some(license)) if license::entitlement(&license, major) => {
-                return Entitlement::Active(license);
+            Ok(Some(license)) => {
+                let active = revocations
+                    .admit(license)
+                    .and_then(|license| (license, major).try_into());
+                refusal = match active {
+                    Ok(active) => return Entitlement::Active(active),
+                    Err(LicenseError::Revoked(id)) => Entitlement::Revoked(id),
+                    Err(LicenseError::WrongMajor(major)) => Entitlement::WrongMajor(major),
+                    Err(error) => Entitlement::Invalid(error.into()),
+                };
             }
-            Ok(Some(license)) => refusal = Entitlement::WrongMajor(license),
             Ok(None) => {}
             Err(error) => refusal = Entitlement::Invalid(error.into()),
         }
@@ -237,8 +225,12 @@ impl Bindings<'_> {
         self.dir().join(id.to_string())
     }
 
-    pub(crate) fn bind(&self, id: &LicenseId, books: &BooksPath) -> Result<(), ProductError> {
-        let path = self.path(id);
+    pub(crate) fn bind(
+        &self,
+        license: &ActiveLicense,
+        books: &BooksPath,
+    ) -> Result<(), ProductError> {
+        let path = self.path(license.id());
         let binding = LedgerBinding::from(books);
         match license::write_private(&binding.0, &path, license::SaveMode::Create) {
             Ok(()) => Ok(()),
@@ -246,9 +238,7 @@ impl Bindings<'_> {
                 if Self::read(&path)? == Some(binding) {
                     Ok(())
                 } else {
-                    Err(ProductError::Configuration(
-                        "This license is already bound to another set of books.",
-                    ))
+                    Err(ProductError::LicenseBoundElsewhere)
                 }
             }
             Err(error) => Err(error.into()),
