@@ -34,7 +34,16 @@ pub enum ProductError {
     License(Arc<LicenseError>),
     Update(UpdateError),
     Io(io::Error),
-    Configuration(&'static str),
+    ServiceUrlMissing,
+    ServiceUrlInvalid,
+    ServiceUrlInsecure,
+    EmbeddedPublicKeysInvalid,
+    EmbeddedPublicKeysNotObject,
+    EmbeddedTrustEncoding,
+    StateDirectoryMissing,
+    TrustFileTooLarge,
+    UpdateChecksDisabled,
+    LicenseWorkerFailed,
     LicenseBoundElsewhere,
     LicenseRevoked(LicenseId),
     BooksRequired,
@@ -51,7 +60,24 @@ impl fmt::Display for ProductError {
             Self::License(e) => write!(f, "{e}"),
             Self::Update(e) => write!(f, "{e}"),
             Self::Io(_) => f.write_str("cannot access Desktop license configuration"),
-            Self::Configuration(reason) => f.write_str(reason),
+            Self::ServiceUrlMissing => f.write_str(
+                "BEANKEEPER_LICENSE_SERVICE_URL is not configured for this installation.",
+            ),
+            Self::ServiceUrlInvalid => f.write_str("The configured license service URL is invalid."),
+            Self::ServiceUrlInsecure => f.write_str(
+                "The license service must use HTTPS or be on this computer.",
+            ),
+            Self::EmbeddedPublicKeysInvalid => f.write_str("embedded public keys are not valid JSON"),
+            Self::EmbeddedPublicKeysNotObject => f.write_str("embedded public keys must be a JSON object"),
+            Self::EmbeddedTrustEncoding => f.write_str("cannot encode embedded license trust"),
+            Self::StateDirectoryMissing => f.write_str(
+                "set BEANKEEPER_DESKTOP_STATE_DIR or configure a home directory",
+            ),
+            Self::TrustFileTooLarge => f.write_str("license input exceeds size limit"),
+            Self::UpdateChecksDisabled => f.write_str(
+                "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
+            ),
+            Self::LicenseWorkerFailed => f.write_str("Desktop could not complete the license request."),
             Self::LicenseBoundElsewhere => f.write_str(
                 "This license is already bound to another set of books. Choose the original books or use a different license.",
             ),
@@ -129,7 +155,7 @@ pub enum LicenseCommand {
         /// Private text file containing a storefront key or single-use claim code.
         #[arg(long)]
         code_file: Option<PathBuf>,
-        /// D10 storefront adapter used only with --code-file.
+        /// Storefront for --code-file. Stripe checkout codes and Etsy claim codes are inferred.
         #[arg(long, ignore_case = true)]
         storefront: Option<Storefront>,
     },
@@ -161,12 +187,10 @@ pub fn embedded_license_trust() -> EmbeddedLicenseTrust {
 
 fn embedded_public_keys() -> Result<serde_json::Map<String, serde_json::Value>, ProductError> {
     let value = serde_json::from_str(embedded_license_trust().public_keys_json)
-        .map_err(|_| ProductError::Configuration("embedded public keys are not valid JSON"))?;
+        .map_err(|_| ProductError::EmbeddedPublicKeysInvalid)?;
     match value {
         serde_json::Value::Object(map) => Ok(map),
-        _ => Err(ProductError::Configuration(
-            "embedded public keys must be a JSON object",
-        )),
+        _ => Err(ProductError::EmbeddedPublicKeysNotObject),
     }
 }
 
@@ -180,9 +204,7 @@ fn write_embedded_trust(as_json: bool) -> Result<(), ProductError> {
         });
         println!(
             "{}",
-            serde_json::to_string(&body).map_err(|_| {
-                ProductError::Configuration("cannot encode embedded license trust")
-            })?
+            serde_json::to_string(&body).map_err(|_| ProductError::EmbeddedTrustEncoding)?
         );
         return Ok(());
     }
@@ -222,9 +244,7 @@ pub fn state_dir() -> Result<PathBuf, ProductError> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")));
     base.map(|path| path.join("beankeeper-desktop"))
-        .ok_or(ProductError::Configuration(
-            "set BEANKEEPER_DESKTOP_STATE_DIR or configure a home directory",
-        ))
+        .ok_or(ProductError::StateDirectoryMissing)
 }
 /// Issuer keys come from a provisioned build trust map or an explicit local trust file.
 ///
@@ -248,9 +268,7 @@ fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
         .take(limit + 1)
         .read_to_end(&mut bytes)?;
     if u64::try_from(bytes.len()).map_or(true, |len| len > limit) {
-        return Err(ProductError::Configuration(
-            "license input exceeds size limit",
-        ));
+        return Err(ProductError::TrustFileTooLarge);
     }
     Ok(bytes)
 }

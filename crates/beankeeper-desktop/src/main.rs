@@ -257,9 +257,7 @@ fn install_update() -> Result<(), DesktopError> {
     product::state_dir()
         .and_then(|dir| {
             if product::update_checks() == updates::UpdateChecks::Disabled {
-                return Err(product::ProductError::Configuration(
-                    "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
-                ));
+                return Err(product::ProductError::UpdateChecksDisabled);
             }
             updates::check(
                 &dir.join("updates.json"),

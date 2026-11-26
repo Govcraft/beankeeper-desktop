@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::{
     BooksSelection, LicenseRequest, ProductError,
     activation::{ActivationInputs, Storefront},
-    report::LicenseResponse,
+    report::{LicenseErrorCode, LicenseResponse},
 };
 #[derive(Clone, Copy)]
 pub(crate) enum LicenseTool {
@@ -145,18 +145,31 @@ fn reply(response: &LicenseResponse<'_>) -> CallToolResult {
 }
 
 pub(crate) fn worker_failure() -> CallToolResult {
-    error_result(
-        "LICENSE_WORKER_FAILED",
-        "Desktop could not complete the license request.",
-    )
+    let error = ProductError::LicenseWorkerFailed;
+    let code = LicenseErrorCode::from(&error);
+    let message = error.to_string();
+    let mut result = CallToolResult::structured_error(json!({"code": code, "message": message}));
+    result.content = vec![ContentBlock::text(message)];
+    result
 }
 
 fn failure(error: &ProductError) -> CallToolResult {
     reply(&LicenseResponse::from(error))
 }
 
-fn error_result(code: &str, message: &str) -> CallToolResult {
-    let mut result = CallToolResult::structured_error(json!({"code": code, "message": message}));
-    result.content = vec![ContentBlock::text(message)];
-    result
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_failure_is_a_named_mcp_error() {
+        let result = worker_failure();
+        let message = "Desktop could not complete the license request.";
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"code": "LICENSE_WORKER_FAILED", "message": message}))
+        );
+        assert_eq!(result.content, vec![ContentBlock::text(message)]);
+    }
 }

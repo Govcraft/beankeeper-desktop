@@ -7,7 +7,7 @@ use serde::Serialize;
 use super::{Activations, BooksSelection, ProductError};
 use crate::{
     entitlement::LedgerLicenseStatus,
-    license::{LicenseError, LicenseId, UnrevokedLicense},
+    license::{LicenseError, LicenseId, MajorVersion, UnrevokedLicense},
 };
 
 pub(super) struct LicenseReport {
@@ -79,7 +79,7 @@ enum Outcome<'a> {
         licenses: Vec<Coverage<'a>>,
     },
     Failure {
-        code: &'static str,
+        code: LicenseErrorCode,
     },
 }
 
@@ -93,14 +93,14 @@ enum Status {
 #[derive(Serialize)]
 struct Coverage<'a> {
     license_id: &'a LicenseId,
-    eligible_major: u32,
+    eligible_major: MajorVersion,
 }
 
 impl<'a> From<&'a UnrevokedLicense> for Coverage<'a> {
     fn from(license: &'a UnrevokedLicense) -> Self {
         Self {
             license_id: license.id(),
-            eligible_major: license.eligible_major().into(),
+            eligible_major: license.eligible_major(),
         }
     }
 }
@@ -146,7 +146,8 @@ impl<'a> From<&'a LicenseInventory> for LicenseResponse<'a> {
 
 impl From<&ProductError> for LicenseResponse<'_> {
     fn from(error: &ProductError) -> Self {
-        let (code, message) = error_details(error);
+        let code = LicenseErrorCode::from(error);
+        let message = code.message(error);
         Self::new(Outcome::Failure { code }, message)
     }
 }
@@ -206,56 +207,109 @@ impl fmt::Display for LicenseInventory {
     }
 }
 
-fn error_details(error: &ProductError) -> (&'static str, String) {
-    match error {
-        ProductError::ActivationInput => ("LICENSE_ARGUMENTS", error.to_string()),
-        ProductError::InvalidClaimCode => ("LICENSE_INVALID_CLAIM_CODE", error.to_string()),
-        ProductError::Redemption => ("LICENSE_REDEMPTION_FAILED", error.to_string()),
-        ProductError::Recovery => ("LICENSE_RECOVERY_FAILED", error.to_string()),
-        ProductError::BooksRequired => ("LICENSE_BOOKS_REQUIRED", error.to_string()),
-        ProductError::LicenseBoundElsewhere => ("LICENSE_BOUND_ELSEWHERE", error.to_string()),
-        ProductError::LicenseRevoked(_) => ("LICENSE_REVOKED", error.to_string()),
-        ProductError::InvalidLicenseInput => invalid_license(),
-        ProductError::License(error) => license_error_details(error),
-        ProductError::Configuration(_) | ProductError::BooksConfiguration => configuration_error(),
-        _ => unavailable(),
-    }
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(super) enum LicenseErrorCode {
+    LicenseArguments,
+    LicenseInvalidClaimCode,
+    LicenseRedemptionFailed,
+    LicenseRecoveryFailed,
+    LicenseBooksRequired,
+    LicenseBoundElsewhere,
+    LicenseRevoked,
+    LicenseInvalid,
+    LicenseUnverified,
+    LicenseConfiguration,
+    LicenseWrongMajor,
+    LicenseUnavailable,
+    #[serde(rename = "LICENSE_WORKER_FAILED")]
+    WorkerFailed,
 }
 
-fn license_error_details(error: &LicenseError) -> (&'static str, String) {
-    match error {
-        LicenseError::Signature | LicenseError::UnknownKey => (
-            "LICENSE_UNVERIFIED",
-            "Desktop could not verify that license. Use the original license from your purchase or grant.".into(),
-        ),
-        LicenseError::InvalidToken | LicenseError::InvalidFooter | LicenseError::InvalidClaims
-        | LicenseError::TooLarge => invalid_license(),
-        LicenseError::Unconfigured | LicenseError::TrustConfiguration | LicenseError::InvalidRevocations => {
-            configuration_error()
+impl From<&ProductError> for LicenseErrorCode {
+    fn from(error: &ProductError) -> Self {
+        match error {
+            ProductError::ActivationInput => Self::LicenseArguments,
+            ProductError::InvalidClaimCode => Self::LicenseInvalidClaimCode,
+            ProductError::Redemption => Self::LicenseRedemptionFailed,
+            ProductError::Recovery => Self::LicenseRecoveryFailed,
+            ProductError::BooksRequired => Self::LicenseBooksRequired,
+            ProductError::LicenseBoundElsewhere => Self::LicenseBoundElsewhere,
+            ProductError::LicenseRevoked(_) => Self::LicenseRevoked,
+            ProductError::InvalidLicenseInput => Self::LicenseInvalid,
+            ProductError::License(error) => Self::from(error.as_ref()),
+            ProductError::ServiceUrlMissing
+            | ProductError::ServiceUrlInvalid
+            | ProductError::ServiceUrlInsecure
+            | ProductError::EmbeddedPublicKeysInvalid
+            | ProductError::EmbeddedPublicKeysNotObject
+            | ProductError::EmbeddedTrustEncoding
+            | ProductError::StateDirectoryMissing
+            | ProductError::TrustFileTooLarge
+            | ProductError::UpdateChecksDisabled
+            | ProductError::BooksConfiguration => Self::LicenseConfiguration,
+            ProductError::Update(_) | ProductError::Io(_) => Self::LicenseUnavailable,
+            ProductError::LicenseWorkerFailed => Self::WorkerFailed,
         }
-        LicenseError::WrongMajor(_) => ("LICENSE_WRONG_MAJOR", error.to_string()),
-        LicenseError::Revoked(_) => ("LICENSE_REVOKED", error.to_string()),
-        LicenseError::Io(_) => unavailable(),
     }
 }
 
-fn invalid_license() -> (&'static str, String) {
-    (
-        "LICENSE_INVALID",
-        "Desktop could not read that license. Use the original license from your purchase or grant.".into(),
-    )
+impl From<&LicenseError> for LicenseErrorCode {
+    fn from(error: &LicenseError) -> Self {
+        match error {
+            LicenseError::Signature | LicenseError::UnknownKey => Self::LicenseUnverified,
+            LicenseError::InvalidToken
+            | LicenseError::InvalidFooter
+            | LicenseError::InvalidClaims
+            | LicenseError::TooLarge => Self::LicenseInvalid,
+            LicenseError::Unconfigured
+            | LicenseError::TrustConfiguration
+            | LicenseError::InvalidRevocations => Self::LicenseConfiguration,
+            LicenseError::WrongMajor(_) => Self::LicenseWrongMajor,
+            LicenseError::Revoked(_) => Self::LicenseRevoked,
+            LicenseError::Io(_) => Self::LicenseUnavailable,
+        }
+    }
 }
 
-fn configuration_error() -> (&'static str, String) {
-    (
-        "LICENSE_CONFIGURATION",
-        "This installation is missing a working license configuration.".into(),
-    )
+impl LicenseErrorCode {
+    fn message(self, error: &ProductError) -> String {
+        match self {
+            Self::LicenseUnverified => "Desktop could not verify that license. Use the original license from your purchase or grant.".into(),
+            Self::LicenseInvalid => "Desktop could not read that license. Use the original license from your purchase or grant.".into(),
+            Self::LicenseConfiguration => "This installation is missing a working license configuration.".into(),
+            Self::LicenseUnavailable => "Desktop could not read or save the license information on this computer.".into(),
+            _ => error.to_string(),
+        }
+    }
 }
 
-fn unavailable() -> (&'static str, String) {
-    (
-        "LICENSE_UNAVAILABLE",
-        "Desktop could not read or save the license information on this computer.".into(),
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_named_license_errors() {
+        for (error, expected) in [
+            (ProductError::ActivationInput, "LICENSE_ARGUMENTS"),
+            (ProductError::InvalidClaimCode, "LICENSE_INVALID_CLAIM_CODE"),
+            (ProductError::Redemption, "LICENSE_REDEMPTION_FAILED"),
+            (ProductError::Recovery, "LICENSE_RECOVERY_FAILED"),
+            (ProductError::BooksRequired, "LICENSE_BOOKS_REQUIRED"),
+            (
+                ProductError::LicenseBoundElsewhere,
+                "LICENSE_BOUND_ELSEWHERE",
+            ),
+            (ProductError::ServiceUrlMissing, "LICENSE_CONFIGURATION"),
+            (ProductError::ServiceUrlInvalid, "LICENSE_CONFIGURATION"),
+            (ProductError::ServiceUrlInsecure, "LICENSE_CONFIGURATION"),
+            (ProductError::InvalidLicenseInput, "LICENSE_INVALID"),
+            (LicenseError::Signature.into(), "LICENSE_UNVERIFIED"),
+            (ProductError::LicenseWorkerFailed, "LICENSE_WORKER_FAILED"),
+        ] {
+            let response = LicenseResponse::from(&error);
+            assert!(response.is_error());
+            assert_eq!(error.structured()["code"], expected);
+        }
+    }
 }

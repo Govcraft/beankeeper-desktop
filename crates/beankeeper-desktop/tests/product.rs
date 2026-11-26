@@ -246,8 +246,21 @@ fn redemption_requires_configured_service_and_trust_before_claim_consumption() -
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redemption_activates_the_issuers_plain_text_response() -> TestResult {
+    redeem_code_file("polar", "test-polar-code", Some("polar")).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_file_infers_etsy_without_a_storefront_flag() -> TestResult {
+    redeem_code_file("etsy", "0123456789abcdefghijklmnopqrstuv", None).await
+}
+
+async fn redeem_code_file(
+    expected_storefront: &'static str,
+    code: &'static str,
+    storefront_flag: Option<&str>,
+) -> TestResult {
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
-    use serde_json::{Value, json};
+    use serde_json::Value;
 
     let dir = tempfile::tempdir()?;
     let directory = dir.path();
@@ -257,14 +270,23 @@ async fn redemption_activates_the_issuers_plain_text_response() -> TestResult {
     )?;
     let code_file = tempfile::NamedTempFile::new_in(directory)?;
     beankeeper_desktop::setup::keychain::restrict_file(code_file.path())?;
-    fs::write(code_file.path(), "test-polar-code\n")?;
+    fs::write(code_file.path(), format!("{code}\n"))?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let router = Router::new().route(
         "/api/v1/licenses/redeem",
-        post(|Json(request): Json<Value>| async move {
-            if request
-                != json!({"storefront":"polar", "key":"test-polar-code", "recovery_token":null})
+        post(move |Json(request): Json<Value>| async move {
+            let recovery = &request["recovery_token"];
+            let valid_recovery = if expected_storefront == "etsy" {
+                recovery
+                    .as_str()
+                    .is_some_and(|token| token.len() >= 32 && token != code)
+            } else {
+                recovery.is_null()
+            };
+            if request["storefront"] != expected_storefront
+                || request["key"] != code
+                || !valid_recovery
             {
                 return StatusCode::BAD_REQUEST.into_response();
             }
@@ -272,11 +294,16 @@ async fn redemption_activates_the_issuers_plain_text_response() -> TestResult {
         }),
     );
     let server = tokio::spawn(async { axum::serve(listener, router).await });
-    let output = command(directory)
+    let mut command = command(directory);
+    command
         .env("BEANKEEPER_LICENSE_SERVICE_URL", origin)
+        .env_remove("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE")
         .args(["license", "activate", "--code-file"])
-        .arg(code_file.path())
-        .output();
+        .arg(code_file.path());
+    if let Some(storefront) = storefront_flag {
+        command.args(["--storefront", storefront]);
+    }
+    let output = command.output();
     server.abort();
     let output = output?;
     assert!(

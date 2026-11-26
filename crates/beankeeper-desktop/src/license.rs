@@ -70,6 +70,12 @@ impl<'de> Deserialize<'de> for LicenseId {
 
 pub use crate::release_policy::MajorVersion;
 
+impl Serialize for MajorVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32((*self).into())
+    }
+}
+
 impl<'de> Deserialize<'de> for MajorVersion {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::try_from(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)

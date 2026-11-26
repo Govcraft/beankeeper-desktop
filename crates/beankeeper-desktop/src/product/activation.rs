@@ -22,17 +22,17 @@ use crate::{
 
 use super::ProductError;
 
+mod service_url;
+use service_url::LicenseServiceUrl;
+
 const CODE_LIMIT: usize = 512;
 const RECOVERY_MIN: usize = 32;
 
 /// Storefront adapters supported for online license redemption.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize, JsonSchema, Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Storefront {
-    /// Polar license key (the CLI default).
-    #[default]
+    /// Polar license key.
     Polar,
     /// Gumroad license key.
     Gumroad,
@@ -157,15 +157,12 @@ enum Source {
 
 struct CodeFile {
     path: PathBuf,
-    storefront: Storefront,
+    storefront: Option<Storefront>,
 }
 
 impl From<(PathBuf, Option<Storefront>)> for CodeFile {
     fn from((path, storefront): (PathBuf, Option<Storefront>)) -> Self {
-        Self {
-            path,
-            storefront: storefront.unwrap_or_default(),
-        }
+        Self { path, storefront }
     }
 }
 
@@ -212,7 +209,7 @@ impl ActivationSource {
             Source::CodeFile(file) => {
                 let client = LicenseService::configured()?;
                 let secret = read_secret(&file.path)?;
-                let code = ClaimCode::try_from((secret.expose_secret(), Some(file.storefront)))?;
+                let code = ClaimCode::try_from((secret.expose_secret(), file.storefront))?;
                 client.redeem(&code, state, &RecoveryStorage::from_environment())?
             }
         };
@@ -333,13 +330,13 @@ struct RecoveryRequest<'a> {
 }
 
 struct LicenseService {
-    origin: reqwest::Url,
+    origin: LicenseServiceUrl,
     http: reqwest::blocking::Client,
 }
 
 impl LicenseService {
     fn configured() -> Result<Self, ProductError> {
-        let origin = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
+        let configured_url = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
             .ok()
             .filter(|url| !url.is_empty())
             .or_else(|| {
@@ -347,30 +344,13 @@ impl LicenseService {
                     .service_url
                     .map(str::to_owned)
             })
-            .ok_or(ProductError::Configuration(
-                "BEANKEEPER_LICENSE_SERVICE_URL is not configured for this installation.",
-            ))?;
-        let mut origin = reqwest::Url::parse(&origin).map_err(|_| {
-            ProductError::Configuration("The configured license service URL is invalid.")
-        })?;
-        let https = origin.scheme() == "https";
-        let loopback = origin.host_str().is_some_and(is_loopback_host);
-        if !(https || (origin.scheme() == "http" && loopback))
-            || !origin.username().is_empty()
-            || origin.password().is_some()
-            || origin.query().is_some()
-            || origin.fragment().is_some()
-        {
-            return Err(ProductError::Configuration(
-                "The license service must use HTTPS or be on this computer.",
-            ));
-        }
-        origin.set_path("/");
+            .ok_or(ProductError::ServiceUrlMissing)?;
+        let origin: LicenseServiceUrl = configured_url.parse()?;
         let mut builder = reqwest::blocking::Client::builder()
-            .https_only(https)
+            .https_only(origin.requires_https())
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15));
-        if loopback {
+        if origin.bypasses_proxy() {
             builder = builder.no_proxy();
         }
         let http = builder.build().map_err(|_| ProductError::Redemption)?;
@@ -406,11 +386,9 @@ impl LicenseService {
     }
 
     fn send(&self, path: &str, request: &impl Serialize) -> Result<LicenseInput, ProductError> {
-        let mut url = self.origin.clone();
-        url.set_path(path);
         let response = self
             .http
-            .post(url)
+            .post(self.origin.endpoint(path))
             .json(request)
             .send()
             .map_err(|_| ProductError::Redemption)?;
@@ -419,12 +397,4 @@ impl LicenseService {
         }
         read_license(response).map_err(|_| ProductError::Redemption)
     }
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    host == "localhost"
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
 }

@@ -93,12 +93,13 @@ process arguments or diagnostics.
 bk --db /path/to/books.db license activate --code-file /private/storefront-key.txt --storefront polar
 ```
 
-The CLI defaults to `polar`. In MCP, checkout codes beginning with `cs_live_`
-or `cs_test_` select `stripe`. Other claim codes default to `etsy`. Set
-`storefront` when redeeming a Polar or Gumroad key. Desktop keeps the Etsy recovery
-credential in a private file before redemption. If the service used the claim
-code but its first reply went missing, repeat the activation with the same
-claim code. Desktop uses its saved credential to recover the signed license.
+In the CLI and MCP, checkout codes beginning with `cs_live_` or `cs_test_`
+select `stripe`. Other claim codes default to `etsy`. Use `--storefront` in
+the CLI or `storefront` in MCP when redeeming a Polar or Gumroad key. Desktop
+keeps the Etsy recovery credential in a private file before redemption. If the
+service used the claim code but its first reply went missing, repeat activation
+with the same claim code. Desktop uses its saved credential to recover the signed
+license.
 An existing CLI installation can still supply its own private credential file
 with `BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE`.
 
