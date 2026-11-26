@@ -151,6 +151,11 @@ impl DiagnosticRequest {
     }
 }
 
+/// Inform the owner using the authenticated version just installed, even before restart.
+pub fn after_update(version: semver::Version) {
+    println!("{}", Observation::at_version(version));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,9 +165,4 @@ mod tests {
         let invalid = serde_json::Map::from_iter([("unexpected".into(), serde_json::json!(true))]);
         assert!(DiagnosticRequest::try_from((Diagnostic::UpdateCheck, Some(invalid))).is_err());
     }
-}
-
-/// Inform the owner using the authenticated version just installed, even before restart.
-pub fn after_update(version: semver::Version) {
-    println!("{}", Observation::at_version(version));
 }

@@ -13,8 +13,7 @@ enum DesktopCommand {
     Agents(agents::AgentOptions),
     Service(service::ServiceOptions),
     License(product::LicenseOptions),
-    CheckForUpdate,
-    Doctor,
+    Diagnostic(beankeeper_desktop::diagnostics::Diagnostic),
     InstallUpdate,
     Serve(ServeOptions),
     Open(OpenOptions),
@@ -62,8 +61,12 @@ impl DesktopCommand {
             Some(("license", options)) => {
                 product::LicenseOptions::from_arg_matches(options).map(Self::License)
             }
-            Some(("doctor", _)) => Ok(Self::Doctor),
-            Some(("update-check", _)) => Ok(Self::CheckForUpdate),
+            Some(("doctor", _)) => Ok(Self::Diagnostic(
+                beankeeper_desktop::diagnostics::Diagnostic::Doctor,
+            )),
+            Some(("update-check", _)) => Ok(Self::Diagnostic(
+                beankeeper_desktop::diagnostics::Diagnostic::UpdateCheck,
+            )),
             Some(("self-update", _)) => Ok(Self::InstallUpdate),
             Some(("serve", options)) => ServeOptions::from_arg_matches(options).map(Self::Serve),
             Some(("open", options)) => OpenOptions::from_arg_matches(options).map(Self::Open),
@@ -118,19 +121,7 @@ fn main() -> ExitCode {
             .map_err(|error| DesktopError::Service(Box::new(error)))
         }
         DesktopCommand::License(options) => return run_license(options, &matches),
-        DesktopCommand::CheckForUpdate | DesktopCommand::Doctor => {
-            let operation = if matches!(command, DesktopCommand::Doctor) {
-                beankeeper_desktop::diagnostics::Diagnostic::Doctor
-            } else {
-                beankeeper_desktop::diagnostics::Diagnostic::UpdateCheck
-            };
-            let json = matches.get_flag("json")
-                || matches!(
-                    matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
-                    Some(beankeeper_cli::cli::OutputFormat::Json)
-                );
-            return beankeeper_desktop::diagnostics::run(operation, json);
-        }
+        DesktopCommand::Diagnostic(operation) => return run_diagnostic(operation, &matches),
         DesktopCommand::InstallUpdate => install_update(),
         DesktopCommand::Serve(options) => {
             let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
@@ -250,6 +241,18 @@ fn selected_books<'a>(matches: &clap::ArgMatches, ledger: &'a Cli) -> service::L
     } else {
         service::LinkBooks::Explicit(&ledger.db)
     }
+}
+
+fn run_diagnostic(
+    operation: beankeeper_desktop::diagnostics::Diagnostic,
+    matches: &clap::ArgMatches,
+) -> ExitCode {
+    let json = matches.get_flag("json")
+        || matches!(
+            matches.get_one::<beankeeper_cli::cli::OutputFormat>("format"),
+            Some(beankeeper_cli::cli::OutputFormat::Json)
+        );
+    beankeeper_desktop::diagnostics::run(operation, json)
 }
 
 fn install_update() -> Result<(), DesktopError> {
