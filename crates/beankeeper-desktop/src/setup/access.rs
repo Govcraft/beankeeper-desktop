@@ -260,7 +260,11 @@ impl AgentAccess {
                  use the status and its error code to explain why access is unverified. Never ask \
                  for, read, or share owner and approval credentials, recovery material, or \
                  passphrases. {voice} Include chartable data when available. Offer \
-                 ui_get_link for optional Desktop detail.",
+                 ui_get_link for optional Desktop detail. Read update_status when listed to learn \
+                 about cached updates without network access. Mention an available release once \
+                 per conversation in plain words, offer help, and continue the owner's work. \
+                 Never block bookkeeping on an update. Use update_check only when the owner \
+                 asks for a fresh check.",
                 read_only = READ_ONLY_NOTE.as_str(),
                 demo = skill.demo(),
                 voice = skill.voice(),

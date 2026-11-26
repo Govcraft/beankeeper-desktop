@@ -806,18 +806,33 @@ enum UpdateState {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum CheckOutcome {
-    UpToDate { version: semver::Version },
-    Available { version: semver::Version },
+    UpToDate {
+        version: semver::Version,
+        release_notes_url: String,
+    },
+    Available {
+        version: semver::Version,
+        release_notes_url: String,
+    },
     Incomplete,
-    Failed { failure: CheckFailure },
+    Failed {
+        failure: CheckFailure,
+    },
 }
 
 impl From<(ReleaseVersion, &semver::Version)> for CheckOutcome {
     fn from((release, installed): (ReleaseVersion, &semver::Version)) -> Self {
+        let release_notes_url = format!("{REPOSITORY}/releases/tag/{TAG_PREFIX}{release}");
         if &release.0 > installed {
-            Self::Available { version: release.0 }
+            Self::Available {
+                version: release.0,
+                release_notes_url,
+            }
         } else {
-            Self::UpToDate { version: release.0 }
+            Self::UpToDate {
+                version: release.0,
+                release_notes_url,
+            }
         }
     }
 }
@@ -863,7 +878,7 @@ impl fmt::Display for UpdateStatus {
         };
         match outcome {
             CheckOutcome::UpToDate { .. } => f.write_str("Desktop is up to date.")?,
-            CheckOutcome::Available { version } => {
+            CheckOutcome::Available { version, .. } => {
                 if let Ok(major) = MajorVersion::try_from(version.major) {
                     write!(f, "Desktop {version} is available. Run `bk self-update` with a license that covers {major}.x releases.")?;
                 } else {
@@ -901,6 +916,14 @@ pub fn status(path: &Path, checks: UpdateChecks) -> Result<String, UpdateError> 
 fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<String, UpdateError> {
     Ok(typed_status_with(path, checks, current)?.to_string())
 }
+/// Read the typed cached outcome without starting a check or accessing the network.
+///
+/// # Errors
+/// Returns errors when the cached update status cannot be read or validated.
+pub fn cached_status(path: &Path, checks: UpdateChecks) -> Result<UpdateStatus, UpdateError> {
+    typed_status_with(path, checks, env!("CARGO_PKG_VERSION"))
+}
+
 fn typed_status_with(
     path: &Path,
     checks: UpdateChecks,

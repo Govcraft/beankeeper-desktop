@@ -83,6 +83,10 @@ pub fn command() -> Command {
             Command::new("doctor").about("Report the locally installed Claude extension status"),
         )
         .subcommand(
+            Command::new("update-status")
+                .about("Read cached Desktop update status without network access"),
+        )
+        .subcommand(
             Command::new("update-check")
                 .about("Check the signed Desktop release feed, at most daily"),
         )

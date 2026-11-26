@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Remove local licenses through CLI and MCP without a refund or changes to books, and show revoked licenses in status.
+- Expose cached Desktop update status through CLI and MCP with release notes and nonblocking agent guidance.
 
 ## [1.0.2] - 2026-11-26
 
