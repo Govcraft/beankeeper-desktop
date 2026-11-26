@@ -2,8 +2,9 @@ use super::*;
 use beankeeper_cli::{
     cli::Cli,
     commands,
-    db::Actor,
+    db::{Actor, audit::restore::RestoreRequest},
     identity::{self, Admin, Granted, IssueRequest},
+    request::{LedgerRequest, LedgerResponse},
 };
 use clap::Parser;
 
@@ -128,11 +129,6 @@ fn activation_is_per_ledger_and_signed_revocations_apply_offline() -> TestResult
 fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("books.db");
-    use beankeeper_cli::{
-        db::audit::restore::RestoreRequest,
-        request::{LedgerRequest, LedgerResponse},
-    };
-
     let McpBooks { db, token } = McpBooks::open(&path)?;
     let passphrase = secrecy::SecretString::from(PASSPHRASE);
     let passphrase_file = crate::setup::temporary_passphrase(&passphrase)?;
