@@ -473,8 +473,11 @@ kit. Your encrypted books stay on your computer.
 
 You can give your agent a pasted Desktop license token or the downloaded
 license file. An agent with CLI access can activate it offline with
-`bk license activate --token TOKEN` or `bk license activate /path/to/downloaded.license`,
-then check the activation with `bk license`.
+`bk --db BOOKS license activate --token TOKEN` or
+`bk --db BOOKS license activate /path/to/downloaded.license`.
+Run `bk --db BOOKS license` to see whether those books are writable, or ask your
+Desktop agent. A license is bound to the selected local books. If you activated
+a preview license without choosing books, run activation again with their path.
 
 Both `bk license` and **License and updates** (`/settings`) explicitly show
 `active and valid` after offline verification and list the major version each

@@ -936,8 +936,9 @@ cache without a version, hides stale results until the next check refreshes them
 The daily retry limit, including failures, applies within each version.
 When the owner wants to activate Desktop, explain that they can paste their
 license token or provide the downloaded license file. When you have CLI access,
-use `bk license activate --token TOKEN` for a paste or `bk license activate FILE`
-for a file, then explain the result in chat. Use `bk license` to inspect activated
+use `bk --db BOOKS license activate --token TOKEN` for a paste or
+`bk --db BOOKS license activate FILE` for a file, then explain the result in chat.
+Use `bk --db BOOKS license` to inspect the selected books and activated
 licenses, `bk update-check` to check the signed release feed, and `bk self-update`
 to install an eligible release. Status shows `active and valid` and the major version each
 verified license covers for perpetual use. Any active license covering the
@@ -952,7 +953,13 @@ Each client's books need their own license. An in-app return within 60 days of
 purchase triggers a full refund through the original seller. Read-only mode for
 books without an active license applies only to official non-RC releases from
 1.0.0 onward, after the terms are final. Current release candidates run without
-activation. [Beankeeper Desktop license agreement](https://github.com/Govcraft/beankeeper-desktop/blob/main/LICENSE.md)
+activation. When a tool returns `LEDGER_WRITE_DENIED`, tell the owner why these
+books are read-only and that reads, exports, backups, restore and recovery still
+work. For the running Desktop's books, `license_status` returns plain words and
+an optional settings link. Offer `https://beankeeper.app` to buy a license or
+explain how the owner can activate one for these books. For an audited undo,
+offer the existing owner undo link or use `bk audit undo` with the appropriate
+credential. [Beankeeper Desktop license agreement](https://github.com/Govcraft/beankeeper-desktop/blob/main/LICENSE.md)
 
 Stable builds check stable releases; RC builds check stable
 and `-rc.N` releases among the 100 most recent GitHub release records. All
