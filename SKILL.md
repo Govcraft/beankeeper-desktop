@@ -976,6 +976,17 @@ Keep signed text, claim codes, and private recovery information out of replies.
 Desktop handles recovery itself. Use the local lifecycle connection for
 activation if the ledger connection only lists `license_status`.
 
+Local license removal: ask your agent to remove a specific installed license.
+The `license_remove` MCP tool takes `license_id`; the CLI equivalent is
+`bk license remove <license-id>`. Removal acts directly, without confirmation,
+refund, or a server-side return. It removes only that local activation and binding,
+leaving books and recovery information intact. The result reports whether the
+selected books remain writable. In official stable builds, books without another
+active license become read-only. Undo by asking the agent to activate the same
+license again, provided it has not been revoked. License status includes each
+license's typed `standing` (`valid` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
+Revocation status reflects the signed list bundled with the installed release.
+
 When the owner requests a return, explain before the single confirmation:
 "Returns within 60 days of purchase are refunded automatically. If the 60-day
 window has closed, the return is not accepted, your license stays active and
@@ -993,7 +1004,7 @@ several licenses are installed. The CLI equivalent is `bk license return`, with
 `--yes` for an agent acting on that confirmation. Report the structured outcome
 and receipt in plain words. A pending refund is recorded and is being submitted
 automatically. Failures preserve the local license; a closed window leaves it
-active. Complimentary licenses require support@beankeeper.app.
+active. For a complimentary license, use `license_remove` to remove it locally without a refund.
 
 Offer **License and updates** using the report's `settings_url` if the owner
 wants the details in their paired browser. Cached update results show readable

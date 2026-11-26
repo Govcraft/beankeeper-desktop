@@ -107,6 +107,19 @@ Desktop verifies the redeemed license with the configured issuer keys before
 saving it. Status and offline activation work without contacting the license
 service.
 
+## Remove a license from this computer
+
+Local license removal: ask your agent to remove a specific installed license.
+The `license_remove` MCP tool takes `license_id`; the CLI equivalent is
+`bk license remove <license-id>`. Removal acts directly, without confirmation,
+refund, or a server-side return. It removes only that local activation and binding,
+leaving books and recovery information intact. The result reports whether the
+selected books remain writable. In official stable builds, books without another
+active license become read-only. Undo by asking the agent to activate the same
+license again, provided it has not been revoked. License status includes each
+license's typed `standing` (`valid` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
+Revocation status reflects the signed list bundled with the installed release.
+
 ## Return a license and request a refund
 
 Ask your agent to return your license, or run `bk license return`. Before the

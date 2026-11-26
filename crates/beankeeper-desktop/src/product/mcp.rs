@@ -19,10 +19,12 @@ pub(crate) enum LicenseTool {
     Status,
     Activate,
     Return,
+    Remove,
 }
 
 impl LicenseTool {
     pub(crate) const STATUS: &str = "license_status";
+    const REMOVE: &str = "license_remove";
     const RETURN: &str = "license_return";
     const ACTIVATE: &str = "license_activate";
 
@@ -31,12 +33,13 @@ impl LicenseTool {
             Self::STATUS => Some(Self::Status),
             Self::ACTIVATE => Some(Self::Activate),
             Self::RETURN => Some(Self::Return),
+            Self::REMOVE => Some(Self::Remove),
             _ => None,
         }
     }
 
     pub(crate) fn tools() -> impl Iterator<Item = Tool> {
-        [Self::Status, Self::Activate, Self::Return]
+        [Self::Status, Self::Activate, Self::Return, Self::Remove]
             .into_iter()
             .filter_map(Self::tool)
     }
@@ -53,6 +56,11 @@ impl LicenseTool {
                 "Activate the license the owner provided for these books. Use exactly one signed license, local license file, or claim code. Activate directly and tell the owner what happened. Keep license text, codes and private recovery information out of replies.",
                 schemars::schema_for!(ActivateArguments),
             ),
+            Self::Remove => (
+                Self::REMOVE,
+                "Remove a license from this computer without a refund or server-side return. Act directly, then tell the owner that books without another active license become read-only. Books and recovery material are never changed. Undo by activating the same license again.",
+                schemars::schema_for!(RemoveArguments),
+            ),
             Self::Return => (
                 Self::RETURN,
                 returns::POLICY,
@@ -61,8 +69,8 @@ impl LicenseTool {
         };
         let annotations = ToolAnnotations::new()
             .read_only(matches!(self, Self::Status))
-            .destructive(matches!(self, Self::Return))
-            .open_world(!matches!(self, Self::Status));
+            .destructive(matches!(self, Self::Return | Self::Remove))
+            .open_world(matches!(self, Self::Activate | Self::Return));
         Some(
             Tool::new(name, description, schema.to_value().as_object()?.clone())
                 .with_annotations(annotations),
@@ -137,6 +145,14 @@ impl LicenseTool {
     ) -> Result<CallToolResult, ProductError> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let request = match self {
+            Self::Remove => {
+                let arguments = decode::<RemoveArguments>(arguments)?;
+                let target = BooksSelection::try_from((books, books.is_some().into()))?;
+                let response = super::removal::remove(arguments.license_id, &target)?;
+                let mut result = CallToolResult::structured(json!(response));
+                result.content = vec![ContentBlock::text(response.message())];
+                return Ok(result);
+            }
             Self::Return => {
                 return Ok(return_reply(
                     &decode::<ReturnArguments>(arguments)?
@@ -157,6 +173,14 @@ impl LicenseTool {
         let settings_url = target.settings_url();
         Ok(reply(&report.response(settings_url.as_deref())))
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RemoveArguments {
+    /// Installed license to remove locally.
+    #[schemars(with = "String")]
+    license_id: crate::license::LicenseId,
 }
 
 #[derive(Deserialize)]

@@ -273,6 +273,10 @@ impl TryFrom<&[u8]> for LedgerBinding {
 pub(crate) struct Bindings<'a>(pub(crate) &'a Path);
 
 impl Bindings<'_> {
+    pub(crate) fn remove(&self, id: &LicenseId) -> io::Result<bool> {
+        crate::private_file::remove_file(&self.path(id))
+    }
+
     fn dir(&self) -> PathBuf {
         self.0.join("license-bindings")
     }

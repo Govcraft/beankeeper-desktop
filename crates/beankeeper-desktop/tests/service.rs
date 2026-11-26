@@ -709,6 +709,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
             "license_status",
             "license_activate",
             "license_return",
+            "license_remove",
         ]
     );
     for tool in tools {
@@ -2846,4 +2847,85 @@ impl Drop for McpPipe {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn license_remove_cli_and_mcp_preserve_other_activation_and_books() -> TestResult {
+    use std::fs;
+    let service = std::net::TcpListener::bind("127.0.0.1:0")?;
+    service.set_nonblocking(true)?;
+    let service_url = format!("http://{}", service.local_addr()?);
+    let root = tempfile::tempdir()?;
+    let keys = root.path().join("issuer.json");
+    fs::write(&keys, include_bytes!("fixtures/license-public-keys.json"))?;
+    let books = root.path().join("beankeeper.db");
+    fs::write(&books, "untouched books")?;
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .current_dir(root.path())
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys)
+            .env("BEANKEEPER_LICENSE_SERVICE_URL", &service_url);
+        command
+    };
+    let mut pipe = McpPipe::start(command().args(["service", "mcp"]))?;
+    let mut ids = Vec::new();
+    for token in [
+        include_str!("fixtures/license-v4.public.txt"),
+        include_str!("fixtures/license-major-2-v4.public.txt"),
+    ] {
+        let activated = pipe.tool("license_activate", &json!({"license": token.trim_end()}))?;
+        ids.push(
+            activated["structuredContent"]["licenses"][0]["license_id"]
+                .as_str()
+                .ok_or("license ID")?
+                .to_owned(),
+        );
+    }
+    let result = pipe.tool("license_remove", &json!({"license_id": ids[0]}))?;
+    assert_eq!(result["structuredContent"]["code"], "removed");
+    assert_eq!(result["structuredContent"]["books_access"], "writable");
+    assert!(
+        !root
+            .path()
+            .join("state/license-bindings")
+            .join(&ids[0])
+            .exists()
+    );
+    let status = pipe.tool("license_status", &json!({}))?;
+    assert_eq!(
+        status["structuredContent"]["licenses"]
+            .as_array()
+            .ok_or("licenses")?
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["structuredContent"]["licenses"][0]["license_id"],
+        ids[1]
+    );
+    assert_eq!(status["structuredContent"]["writable"], true);
+    let repeated = command()
+        .args(["--json", "license", "remove", &ids[0]])
+        .output()?;
+    assert!(repeated.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repeated.stdout)?["code"],
+        "not_installed"
+    );
+    let last = command()
+        .args(["--json", "license", "remove", &ids[1]])
+        .output()?;
+    assert!(last.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&last.stdout)?["code"],
+        "removed"
+    );
+    assert_eq!(fs::read_to_string(books)?, "untouched books");
+    let status = pipe.tool("license_status", &json!({}))?;
+    assert_eq!(status["structuredContent"]["status"], "not_activated");
+    assert!(
+        matches!(service.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    Ok(())
 }

@@ -88,12 +88,33 @@ enum Outcome<'a> {
 enum Status {
     NotActivated,
     Active,
+    Revoked,
 }
 
 #[derive(Serialize)]
 struct Coverage<'a> {
     license_id: &'a LicenseId,
     eligible_major: MajorVersion,
+    storefront: crate::license::Storefront,
+    standing: Standing,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Standing {
+    Valid,
+    Revoked,
+}
+
+impl<'a> Coverage<'a> {
+    fn revoked(license: &'a crate::license::VerifiedLicense) -> Self {
+        Self {
+            license_id: license.id(),
+            eligible_major: license.eligible_major(),
+            storefront: license.storefront(),
+            standing: Standing::Revoked,
+        }
+    }
 }
 
 impl<'a> From<&'a UnrevokedLicense> for Coverage<'a> {
@@ -101,6 +122,8 @@ impl<'a> From<&'a UnrevokedLicense> for Coverage<'a> {
         Self {
             license_id: license.id(),
             eligible_major: license.eligible_major(),
+            storefront: license.storefront(),
+            standing: Standing::Valid,
         }
     }
 }
@@ -130,13 +153,21 @@ impl<'a> From<&'a LicenseInventory> for LicenseResponse<'a> {
     fn from(inventory: &'a LicenseInventory) -> Self {
         let (status, licenses) = match inventory {
             LicenseInventory::NotActivated => (Status::NotActivated, Vec::new()),
+            LicenseInventory::Revoked(licenses) => (
+                Status::Revoked,
+                licenses.iter().map(Coverage::revoked).collect(),
+            ),
             LicenseInventory::Active {
-                first, additional, ..
+                first,
+                additional,
+                revoked,
+                ..
             } => (
                 Status::Active,
                 std::iter::once(first.as_ref())
                     .chain(additional)
                     .map(Coverage::from)
+                    .chain(revoked.iter().map(Coverage::revoked))
                     .collect(),
             ),
         };
@@ -154,10 +185,12 @@ impl From<&ProductError> for LicenseResponse<'_> {
 
 pub(super) enum LicenseInventory {
     NotActivated,
+    Revoked(Vec<crate::license::VerifiedLicense>),
     Active {
         first: Box<UnrevokedLicense>,
         additional: Vec<UnrevokedLicense>,
         warning: Option<Arc<LicenseError>>,
+        revoked: Vec<crate::license::VerifiedLicense>,
     },
 }
 
@@ -169,8 +202,10 @@ impl From<Activations> for LicenseInventory {
                 first: Box::new(first),
                 additional: licenses.collect(),
                 warning: activations.first_failure,
+                revoked: activations.revoked,
             },
-            None => Self::NotActivated,
+            None if activations.revoked.is_empty() => Self::NotActivated,
+            None => Self::Revoked(activations.revoked),
         }
     }
 }
@@ -181,10 +216,15 @@ impl fmt::Display for LicenseInventory {
             Self::NotActivated => {
                 f.write_str("License status: not activated. No Desktop license is active.")
             }
+            Self::Revoked(licenses) => {
+                f.write_str("License status: revoked. No Desktop license is active.")?;
+                write_revoked(f, licenses)
+            }
             Self::Active {
                 first,
                 additional,
                 warning,
+                revoked,
             } => {
                 f.write_str("License status: active and valid.")?;
                 for license in std::iter::once(first.as_ref()).chain(additional) {
@@ -201,10 +241,24 @@ impl fmt::Display for LicenseInventory {
                         "\nOne or more license files could not be verified ({error})."
                     )?;
                 }
-                Ok(())
+                write_revoked(f, revoked)
             }
         }
     }
+}
+
+fn write_revoked(
+    f: &mut fmt::Formatter<'_>,
+    licenses: &[crate::license::VerifiedLicense],
+) -> fmt::Result {
+    for license in licenses {
+        write!(
+            f,
+            "\nLicense {} was revoked and does not allow writes.",
+            license.id()
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Serialize)]

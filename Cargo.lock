@@ -515,7 +515,7 @@ dependencies = [
 [[package]]
 name = "beankeeper"
 version = "0.8.0"
-source = "git+https://github.com/Govcraft/beankeeper?branch=main#550e58af98e220dc3cda9d057c9b9aeedbf63aa7"
+source = "git+https://github.com/Govcraft/beankeeper?branch=main#e7590aaec9ecdf51883018e90d909fc06b561314"
 dependencies = [
  "chrono",
  "data-encoding",
@@ -528,7 +528,7 @@ dependencies = [
 [[package]]
 name = "beankeeper-cli"
 version = "0.39.0"
-source = "git+https://github.com/Govcraft/beankeeper?branch=main#550e58af98e220dc3cda9d057c9b9aeedbf63aa7"
+source = "git+https://github.com/Govcraft/beankeeper?branch=main#e7590aaec9ecdf51883018e90d909fc06b561314"
 dependencies = [
  "agent-uri",
  "agent-uri-attestation",

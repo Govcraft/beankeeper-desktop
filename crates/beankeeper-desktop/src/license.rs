@@ -115,7 +115,7 @@ impl AsRef<str> for Product {
 }
 
 /// The signed provenance of a purchase or grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Storefront {
     /// Polar purchase.
@@ -486,11 +486,34 @@ impl VerifiedRevocations {
         Ok(Self(claims.revoked_license_ids))
     }
 
-    pub(crate) fn admit(&self, license: VerifiedLicense) -> Result<UnrevokedLicense, LicenseError> {
+    pub(crate) fn standing(&self, license: VerifiedLicense) -> LicenseStanding {
         if self.0.contains(license.id()) {
-            return Err(LicenseError::Revoked(license.claims.license_id));
+            LicenseStanding::Revoked(license)
+        } else {
+            LicenseStanding::Valid(UnrevokedLicense(license))
         }
-        Ok(UnrevokedLicense(license))
+    }
+
+    pub(crate) fn admit(&self, license: VerifiedLicense) -> Result<UnrevokedLicense, LicenseError> {
+        self.standing(license).try_into()
+    }
+}
+
+/// Authenticated standing from a verified signed revocation snapshot.
+#[derive(Debug, Clone)]
+pub(crate) enum LicenseStanding {
+    Valid(UnrevokedLicense),
+    Revoked(VerifiedLicense),
+}
+
+impl TryFrom<LicenseStanding> for UnrevokedLicense {
+    type Error = LicenseError;
+
+    fn try_from(standing: LicenseStanding) -> Result<Self, Self::Error> {
+        match standing {
+            LicenseStanding::Valid(license) => Ok(license),
+            LicenseStanding::Revoked(license) => Err(LicenseError::Revoked(license.id().clone())),
+        }
     }
 }
 
@@ -499,6 +522,10 @@ impl VerifiedRevocations {
 pub(crate) struct UnrevokedLicense(VerifiedLicense);
 
 impl UnrevokedLicense {
+    pub(crate) fn storefront(&self) -> Storefront {
+        self.0.storefront()
+    }
+
     pub(crate) fn id(&self) -> &LicenseId {
         self.0.id()
     }

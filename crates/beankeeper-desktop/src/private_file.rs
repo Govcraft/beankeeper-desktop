@@ -163,6 +163,15 @@ fn validate_permissions(_file: &File, _metadata: &Metadata) -> io::Result<()> {
     ))
 }
 
+/// Remove a local file, reporting whether it existed.
+pub(crate) fn remove_file(path: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

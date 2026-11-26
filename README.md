@@ -485,6 +485,17 @@ The CLI equivalents are `bk license activate FILE` and `bk license`. Use
 `--db BOOKS` to select other books. The agent can also offer **License and
 updates** in your paired browser.
 
+Local license removal: ask your agent to remove a specific installed license.
+The `license_remove` MCP tool takes `license_id`; the CLI equivalent is
+`bk license remove <license-id>`. Removal acts directly, without confirmation,
+refund, or a server-side return. It removes only that local activation and binding,
+leaving books and recovery information intact. The result reports whether the
+selected books remain writable. In official stable builds, books without another
+active license become read-only. Undo by asking the agent to activate the same
+license again, provided it has not been revoked. License status includes each
+license's typed `standing` (`valid` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
+Revocation status reflects the signed list bundled with the installed release.
+
 To request a return and refund, ask your agent or run `bk license return`.
 With no installed license, CLI and MCP report that there is nothing to return;
 a saved return reports its latest receipt ID. With several installed licenses,

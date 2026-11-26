@@ -76,7 +76,8 @@ pub fn command() -> Command {
             Command::new("open").about("Open the running Desktop UI in your default browser"),
         ))
         .subcommand(crate::product::LicenseOptions::augment_args(
-            Command::new("license").about("Show, activate, or print compiled-in license trust"),
+            Command::new("license")
+                .about("Show, activate, remove, return, or print compiled-in license trust"),
         ))
         .subcommand(
             Command::new("doctor").about("Report the locally installed Claude extension status"),
