@@ -185,7 +185,9 @@ fn application_with_id(
         &cli.db.with_extension("owner-token"),
     )?;
     let changes = changes::router(
-        backups.open()?,
+        access
+            .clone()
+            .protect(backups.open()?, LedgerTarget::default()),
         books,
         cli.company.clone(),
         cli.db.with_extension("owner-token"),

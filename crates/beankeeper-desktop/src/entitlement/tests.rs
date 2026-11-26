@@ -346,11 +346,7 @@ impl McpClient {
 
 #[tokio::test]
 async fn authenticated_mcp_checks_the_selected_ledger_on_every_write() -> TestResult {
-    use crate::backups::NoHostTools;
-    use beankeeper_cli::mcp::{
-        HttpLedgerTargets, LedgerTargets, StreamableHttpServerConfig,
-        http_router_with_ledger_targets,
-    };
+    use beankeeper_cli::mcp::LedgerTargets;
     use serde_json::json;
 
     let dir = tempfile::tempdir()?;
@@ -370,20 +366,7 @@ async fn authenticated_mcp_checks_the_selected_ledger_on_every_write() -> TestRe
         other_target.clone(),
         second_access.clone().protect(second.db, other_target),
     )?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}/mcp", listener.local_addr()?);
-    let cli = Cli::try_parse_from(["bk", "mcp", "serve", "--http"])?;
-    let config = StreamableHttpServerConfig::default();
-    let cancel = config.cancellation_token.clone();
-    let router = http_router_with_ledger_targets(
-        &cli,
-        HttpLedgerTargets::from(targets),
-        false,
-        config,
-        NoHostTools,
-    )?;
-    let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let client = McpClient::initialize(url, &first.token).await?;
+    let (client, cancel, server) = mcp_client(targets, &first.token).await?;
     let create = |slug| json!({ "slug": slug, "name": "Fixture" });
     let denied = client
         .call("startup", &first.token, "company_create", create("missing"))
@@ -429,6 +412,134 @@ async fn authenticated_mcp_checks_the_selected_ledger_on_every_write() -> TestRe
         .await?;
     assert_eq!(denied["structuredContent"]["code"], "LEDGER_WRITE_DENIED");
     assert!(denied.to_string().contains("no active Desktop license"));
+    cancel.cancel();
+    server.abort();
+    Ok(())
+}
+
+async fn mcp_client(
+    targets: beankeeper_cli::mcp::LedgerTargets,
+    token: &secrecy::SecretString,
+) -> Result<
+    (
+        McpClient,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    use crate::backups::NoHostTools;
+    use beankeeper_cli::mcp::{
+        HttpLedgerTargets, StreamableHttpServerConfig, http_router_with_ledger_targets,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/mcp", listener.local_addr()?);
+    let cli = Cli::try_parse_from(["bk", "mcp", "serve", "--http"])?;
+    let config = StreamableHttpServerConfig::default();
+    let cancel = config.cancellation_token.clone();
+    let router = http_router_with_ledger_targets(
+        &cli,
+        HttpLedgerTargets::from(targets),
+        false,
+        config,
+        NoHostTools,
+    )?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let client = McpClient::initialize(url, token).await?;
+    Ok((client, cancel, server))
+}
+
+#[tokio::test]
+async fn cli_and_mcp_undo_receipts_on_the_same_read_only_ledger() -> TestResult {
+    use beankeeper_cli::mcp::LedgerTargets;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    let McpBooks { db, token } = McpBooks::open(&path)?;
+    let passphrase = secrecy::SecretString::from(PASSPHRASE);
+    let mut company = Cli::try_parse_from(["bk", "company", "create", "acme", "Acme"])?;
+    company.db.clone_from(&path);
+    commands::dispatch_with_db(&mut company, db, None)?;
+    for code in ["1000", "1100"] {
+        let mut account = Cli::try_parse_from([
+            "bk",
+            "--company",
+            "acme",
+            "account",
+            "create",
+            code,
+            "Cash",
+            "--type",
+            "asset",
+        ])?;
+        account.db.clone_from(&path);
+        commands::dispatch_with_db(
+            &mut account,
+            Db::open_existing(&path, Some(&passphrase))?,
+            None,
+        )?;
+    }
+
+    let access = enforced(&path, dir.path(), CLEAN)?;
+    let open = || {
+        Db::open_existing(&path, Some(&passphrase))
+            .map(|db| access.clone().protect(db, LedgerTarget::default()))
+    };
+    let (client, cancel, server) = mcp_client(LedgerTargets::new(open()?), &token).await?;
+    let page = client
+        .call(
+            "startup",
+            &token,
+            "audit_receipts",
+            json!({"company":"acme"}),
+        )
+        .await?;
+    let receipts = page["structuredContent"]["receipts"]
+        .as_array()
+        .ok_or_else(|| format!("missing audit receipts: {page}"))?;
+    let receipt = |code| {
+        receipts
+            .iter()
+            .find(|row| row["change"]["target"]["id"] == code)
+            .and_then(|row| row["id"].as_i64())
+            .ok_or("missing account receipt")
+    };
+    let cli_receipt = receipt("1000")?;
+    let mcp_receipt = receipt("1100")?;
+    let mut undo = Cli::try_parse_from([
+        "bk",
+        "--company",
+        "acme",
+        "audit",
+        "undo",
+        &cli_receipt.to_string(),
+    ])?;
+    undo.db.clone_from(&path);
+    undo.agent_token = Some(token.clone());
+    commands::dispatch_with_db(&mut undo, open()?, None)?;
+
+    for (original, code) in [(cli_receipt, "1000"), (mcp_receipt, "1100")] {
+        let args = json!({"company":"acme", "receipt": original});
+        let undone = client
+            .call("startup", &token, "audit_undo", args.clone())
+            .await?;
+        let result = &undone["structuredContent"];
+        assert_eq!(result["kind"], "archived", "{undone}");
+        assert_eq!(result["account"], code);
+        assert_eq!(result["undo_of"], original);
+        let retried = client.call("startup", &token, "audit_undo", args).await?;
+        assert_eq!(&retried["structuredContent"], result);
+    }
+    let denied = client
+        .call(
+            "startup",
+            &token,
+            "company_create",
+            json!({"slug":"blocked", "name":"Blocked"}),
+        )
+        .await?;
+    assert_eq!(denied["structuredContent"]["code"], "LEDGER_WRITE_DENIED");
     cancel.cancel();
     server.abort();
     Ok(())

@@ -10,7 +10,7 @@ use std::{
 };
 
 use beankeeper_cli::{
-    cli::{AuditCommand, Cli, Command, McpCommand, PassphraseOptions},
+    cli::{Cli, Command, McpCommand, PassphraseOptions},
     commands::{self, setup::SetupCommand},
     db::companies::CompanySlug,
     error::CliError,
@@ -140,14 +140,7 @@ impl DispatchBooks {
             DispatchOpen::Existing => {
                 let books =
                     DispatchKey::try_from((&cli.passphrase, false))?.books(&self.primary)?;
-                let db = if matches!(&cli.command, Command::Audit(args) if matches!(args.command, AuditCommand::Undo(_)))
-                {
-                    // Upstream exposes receipt undo as an ordinary write. This already
-                    // parsed command can use the audited undo entry point exclusively.
-                    books.open()?
-                } else {
-                    books.open_protected(target)?
-                };
+                let db = books.open_protected(target)?;
                 commands::dispatch_with_db(cli, db, meta)
             }
             DispatchOpen::Stdio { read_only } => {

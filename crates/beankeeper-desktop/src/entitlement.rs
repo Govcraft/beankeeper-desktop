@@ -158,7 +158,8 @@ impl LedgerAccess {
 impl LedgerWriteAuthorizer for LedgerAccess {
     fn authorize_write(&self, _: &LedgerTarget, kind: LedgerWriteKind) -> Result<(), WriteDenied> {
         match (self.policy, kind) {
-            (EnforcementPolicy::Free, _) | (_, LedgerWriteKind::Restore) => Ok(()),
+            (EnforcementPolicy::Free, _)
+            | (_, LedgerWriteKind::Restore | LedgerWriteKind::Reversal) => Ok(()),
             (EnforcementPolicy::Enforced(major), _) => self.current_entitlement(major).authorize(),
         }
     }
