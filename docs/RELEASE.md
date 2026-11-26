@@ -167,7 +167,17 @@ No Node toolchain is used.
    notes into a dated `## [VERSION] - YYYY-MM-DD` section directly below a fresh
    `## [Unreleased]` section. PR CI checks that the first release section matches
    the workspace version.
-3. After the release PR merges, publish from its merge commit by pushing
+3. For every stable release PR, export a fresh signed snapshot from the license
+   host as described in [the license contract](license-format.md#signed-revocations-in-releases),
+   commit `packaging/revocations.json`, and check the release PR checklist. Run
+   `python3 scripts/release.py revocations` locally to verify the export. Stable
+   tag preflight requires the file before any packaging or publication, checks
+   its envelope and claims, and authenticates its Ed25519 signature against the
+   same public keys used by packaging (including the repository variable override).
+   Missing, malformed, unknown-key or invalidly signed snapshots fail closed.
+   OpenSSL 3 is required for this check and is present on the Ubuntu release runner.
+   RC tags and unsigned qualification runs keep their existing behavior.
+4. After the release PR merges, publish from its merge commit by pushing
    `beankeeper-desktop-vVERSION`. Tag preflight checks that the tag, workspace
    version, and first release section agree before any package builds or
    publication. The release job uses GitHub OIDC for Sigstore and provenance.

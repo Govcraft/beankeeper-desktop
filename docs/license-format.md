@@ -68,6 +68,14 @@ list is empty. Tagged builds embed that file into the binary. Packaging checks
 the issuer signature against the embedded public keys. The private signing
 keys stay on the license host.
 
+Stable tag preflight fails before building or publishing if this file is absent,
+malformed, has invalid claims, names an unknown issuer key, or fails signature
+verification. Run `python3 scripts/release.py revocations` in the release PR
+to check the export with OpenSSL 3. The check accepts signed empty lists; it
+does not impose an age limit. The release checklist requires a fresh export,
+because a signature alone cannot prove the issuer has no newer revocations.
+RC tags retain their existing behavior.
+
 Desktop verifies the exact `beankeeper-revocations-v1\n<key_id>\n<payload>`
 message before reading the UTC generation time and the revoked license IDs.
 Desktop checks the snapshot locally for ledger access and update eligibility.
