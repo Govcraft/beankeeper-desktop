@@ -17,10 +17,8 @@ Production signing keys are not available in this repository. Provision issuer
 - At build time, set `BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` to a JSON object mapping
   key identifiers to unpadded base64url public keys. The compiler embeds this
   public trust map. No signing key belongs in a build.
-- The same public-key JSON may be baked in at compile time with
-`BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON`. `BEANKEEPER_LICENSE_SERVICE_URL` may also
-be set at build time (see `build.rs`); a runtime value wins. HTTP is allowed
-only when the host is loopback.
+- For online redemption, set `BEANKEEPER_LICENSE_SERVICE_URL` at build time or
+  at runtime. The runtime value takes precedence. HTTP is allowed only on loopback.
 
 For a custom installation, set `BEANKEEPER_LICENSE_KEYS_FILE` to a JSON file with
   the same map. This explicit local trust override replaces the embedded map.
@@ -32,14 +30,17 @@ license exist under `crates/beankeeper-desktop/tests/fixtures/` for offline test
 
 ## Activate and inspect
 
+An agent with CLI access can activate a token the owner pastes in chat. If the
+issuer sent a plain-text license file, the agent can pass its path instead.
+
 ```sh
-bk license activate /path/to/downloaded-license.json
+bk license activate --token 'PASTE_YOUR_LICENSE_TOKEN_HERE'
+bk license activate /path/to/downloaded.license
 bk license
 ```
 
-Activate each schema 2 file with its own command. Desktop verifies the file
-offline before saving it by license ID and preserves existing activations if
-verification fails. Reactivating the same license replaces only that license's
+Desktop verifies each PASETO v4.public token offline before saving it by license
+ID and preserves existing activations if verification fails. Reactivating the same license replaces only that license's
 file. Each license covers one major version for perpetual use.
 
 Successful activation and status checks begin with `License status: active and
@@ -47,9 +48,9 @@ valid.` The `bk license` command and the paired browser's `/settings` page
 re-verify the local files and list each valid license ID and its major version.
 They also explain when there are no activations or when a file fails verification.
 
-Desktop stores each private activation at `licenses/<license-id>.json` inside
-the per-user state directory. Status still checks the earlier `license.json`
-location so it can report an unsupported schema 1 file.
+Desktop stores each private activation at `licenses/<license-id>.license`
+inside the per-user state directory. If status finds an older JSON envelope, it
+asks you to get a current license from the issuer.
 
 | Platform | Default directory |
 | --- | --- |
@@ -77,10 +78,10 @@ contract and depend on service configuration. Etsy additionally requires
 `BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE`, a private file containing a retained
 32 to 512 byte recovery token different from the claim code. Generate the token
 from at least 32 random bytes and keep it before redemption. If the connection
-fails after a single-use code is consumed, recover the original file via D10's
+fails after a single-use code is consumed, recover the original token via D10's
 `POST /api/v1/licenses/recover` using that retained token. Desktop never prints
 or stores this recovery token. Public keys are checked for configuration before
-redemption; the returned file must verify before activation.
+redemption. Desktop verifies the returned token before activation.
 
 ## Check and install updates
 

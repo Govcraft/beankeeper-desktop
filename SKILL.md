@@ -934,10 +934,12 @@ explain failed or incomplete checks; reading Settings does not contact the feed.
 Results are tied to the running Desktop version. A version change, or a legacy
 cache without a version, hides stale results until the next check refreshes them.
 The daily retry limit, including failures, applies within each version.
-The human can activate each downloaded schema 2 file with
-`bk license activate FILE`, inspect the activated licenses with `bk license`,
-check the signed release feed with `bk update-check`, and install an eligible release with
-`bk self-update`. Status shows `active and valid` and the major version each
+When the owner wants to activate Desktop, explain that they can paste their
+license token or provide the downloaded license file. When you have CLI access,
+use `bk license activate --token TOKEN` for a paste or `bk license activate FILE`
+for a file, then explain the result in chat. Use `bk license` to inspect activated
+licenses, `bk update-check` to check the signed release feed, and `bk self-update`
+to install an eligible release. Status shows `active and valid` and the major version each
 verified license covers for perpetual use. Any active license covering the
 signed release's major version authorizes self-update for the installation.
 Use the signed installer to update to a 0.x preview. Status explains missing

@@ -52,7 +52,7 @@ impl fmt::Display for UpdateError {
             Self::Invalid(reason) => write!(f, "update refused: {reason}"),
             Self::LicenseRequired(major) => write!(
                 f,
-                "This update requires a Desktop license that covers {major}.x releases. Use `bk license activate FILE`."
+                "This update requires a Desktop license that covers {major}.x releases. Paste your license with `bk license activate --token TOKEN` or supply a license file."
             ),
             Self::Signature => f.write_str(
                 "Sigstore verification failed; install cosign and require a valid release bundle",
@@ -909,7 +909,7 @@ mod tests {
         crate::license::verify_offline(bytes, &keys)
     }
     fn authorize(manifest: &Manifest, current: &str) -> Result<AuthorizedRelease, Box<dyn Error>> {
-        let license = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
+        let license = fixture_license(include_bytes!("../tests/fixtures/license-v4.public.txt"))?;
         Ok(verified(manifest)?
             .require_newer(&installed_version(current)?)?
             .authorize(&[license])?)
@@ -1618,7 +1618,7 @@ mod tests {
     #[test]
     fn signed_release_requires_a_newer_version_and_exact_major_regardless_of_dates() -> TestResult {
         let mut wire = manifest(b"fixture", Target::LinuxX64.triple());
-        let license = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
+        let license = fixture_license(include_bytes!("../tests/fixtures/license-v4.public.txt"))?;
         let current = installed_version("0.1.0-rc.2")?;
         for date in ["1990-01-01T00:00:00Z", "2090-01-01T00:00:00Z"] {
             wire.released_at = date.parse()?;
@@ -1657,8 +1657,10 @@ mod tests {
 
     #[test]
     fn any_active_license_can_authorize_an_installation_update() -> TestResult {
-        let major_one = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
-        let major_two = fixture_license(include_bytes!("../tests/fixtures/license-major-2.json"))?;
+        let major_one = fixture_license(include_bytes!("../tests/fixtures/license-v4.public.txt"))?;
+        let major_two = fixture_license(include_bytes!(
+            "../tests/fixtures/license-major-2-v4.public.txt"
+        ))?;
         let mut wire = manifest(b"fixture", Target::LinuxX64.triple());
         let current = installed_version("1.0.0")?;
         assert!(matches!(
