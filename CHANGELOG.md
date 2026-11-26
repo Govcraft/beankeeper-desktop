@@ -6,6 +6,7 @@
 
 - Guide conversation charts to distinguish debt from cash and use neutral or warning colors for negative net worth.
 - Request a license return and automatic refund through CLI or MCP with one confirmation, a receipt, and untouched books.
+- Count cash by each account's saved cash class instead of its name, and name which account needs which month's statement checked (Beankeeper core update).
 
 ## [0.1.0-rc.32] - 2026-11-25
 
