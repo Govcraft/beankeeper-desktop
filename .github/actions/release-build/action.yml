@@ -6,6 +6,9 @@ inputs:
   target:
     description: Rust target triple
     required: true
+  official:
+    description: Build for the official tagged release
+    default: '0'
   license-public-keys-json:
     description: Optional override for packaging/license-embed.json public keys
     default: ''
@@ -26,6 +29,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        BEANKEEPER_OFFICIAL_BUILD: ${{ inputs.official }}
       run: |
         toolchain=$(rustc --print sysroot)
         cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
@@ -37,6 +41,7 @@ runs:
           --env CARGO_HOME=/cargo \
           --env BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON \
           --env BEANKEEPER_LICENSE_SERVICE_URL \
+          --env BEANKEEPER_OFFICIAL_BUILD \
           beankeeper-linux-builder \
           cargo build --release --locked --target "$TARGET" -p beankeeper-desktop
     - name: Build Desktop binary and embedded UI
@@ -44,4 +49,5 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        BEANKEEPER_OFFICIAL_BUILD: ${{ inputs.official }}
       run: cargo build --release --locked --target "$TARGET" -p beankeeper-desktop

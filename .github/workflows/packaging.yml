@@ -61,6 +61,7 @@ jobs:
       - uses: ./.github/actions/release-build
         with:
           target: ${{ matrix.target }}
+          official: ${{ inputs.sign && '1' || '0' }}
           license-public-keys-json: ${{ vars.BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON }}
           license-service-url: ${{ vars.BEANKEEPER_LICENSE_SERVICE_URL }}
       - name: Check the Linux binary's glibc requirements

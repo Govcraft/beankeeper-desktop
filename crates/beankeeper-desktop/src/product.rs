@@ -1,5 +1,7 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
+    entitlement::{Bindings, EnforcementPolicy, LedgerAccess},
+    instance::BooksPath,
     license::{self, LicenseError, MAX_LICENSE_INPUT, TrustedKeys, VerifiedLicense},
     private_file::PrivateFile,
     updates::{self, UpdateError},
@@ -343,7 +345,9 @@ pub fn state_dir() -> Result<PathBuf, ProductError> {
 /// # Errors
 /// Returns errors for unreadable, incomplete, or invalid trust maps.
 pub fn trusted_keys() -> Result<TrustedKeys, ProductError> {
-    let bytes = if let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE") {
+    let bytes = if option_env!("BEANKEEPER_OFFICIAL_BUILD").is_none()
+        && let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE")
+    {
         bounded_file(&PathBuf::from(path), 32_768)?
     } else {
         option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON")
@@ -413,13 +417,15 @@ fn load_activations() -> Result<Activations, ProductError> {
         return Ok(activations);
     }
     let keys = trusted_keys()?;
+    let revocations = license::release_revocations(&keys)?;
     for path in paths {
         match license::load(&path, &keys) {
             Ok(Some(license))
-                if !activations
-                    .licenses
-                    .iter()
-                    .any(|item| item.id() == license.id()) =>
+                if !revocations.contains(license.id())
+                    && !activations
+                        .licenses
+                        .iter()
+                        .any(|item| item.id() == license.id()) =>
             {
                 activations.licenses.push(license);
             }
@@ -513,26 +519,70 @@ fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> 
 ///
 /// # Errors
 /// Returns input, trust, redemption, or activation errors.
-pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
+pub fn run_license(
+    options: LicenseOptions,
+    books_path: &Path,
+    explicit: bool,
+) -> Result<(), ProductError> {
     match options.command {
-        None => println!("{}", license_status()?),
-        Some(LicenseCommand::Trust { json }) => write_embedded_trust(json)?,
+        None => {
+            if let Some(books) = selected_books(books_path, explicit)? {
+                println!("{}", LedgerAccess::from(books).status());
+            }
+            println!("{}", license_status()?);
+        }
+        Some(LicenseCommand::Trust { json }) => {
+            if option_env!("BEANKEEPER_OFFICIAL_BUILD").is_some() {
+                license::release_revocations(&trusted_keys()?)?;
+            }
+            write_embedded_trust(json)?;
+        }
         Some(LicenseCommand::Activate {
             file,
             token,
             code_file,
             storefront,
         }) => {
+            let books = selected_books(
+                books_path,
+                explicit || matches!(EnforcementPolicy::current(), EnforcementPolicy::Enforced(_)),
+            )?;
             let source = LicenseSource::try_from((file, token, code_file, storefront))?;
             // Resolve trust before redeeming a potentially single-use claim.
             let keys = trusted_keys()?;
+            let revocations = license::release_revocations(&keys)?;
             let bytes = source.read()?;
-            let claims = license::activate_in(&bytes, &keys, &state_dir()?)?;
+            let claims = license::verify_offline(&bytes, &keys)?;
+            if revocations.contains(claims.id()) {
+                return Err(ProductError::Configuration(
+                    "This Desktop license was revoked.",
+                ));
+            }
+            let state = state_dir()?;
+            if let Some(books) = books {
+                Bindings(&state).bind(claims.id(), &books)?;
+            }
+            license::write_private(
+                &bytes,
+                &license::activation_path(&state, claims.id()),
+                license::SaveMode::Replace,
+            )?;
             println!("{}", describe(std::slice::from_ref(&claims)));
         }
     }
     Ok(())
 }
+fn selected_books(path: &Path, required: bool) -> Result<Option<BooksPath>, ProductError> {
+    match BooksPath::try_from(path) {
+        Ok(books) => Ok(Some(books)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ProductError::Configuration(
+            "Choose an existing set of books with `bk --db BOOKS license activate FILE`.",
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Opt-out applies before update disk/network activity. Set to `1` or `true`.
 #[must_use]
 pub fn update_checks() -> updates::UpdateChecks {

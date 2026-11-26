@@ -1,5 +1,8 @@
 mod http;
 
+#[cfg(test)]
+pub(crate) use http::NoHostTools;
+
 use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
@@ -7,11 +10,11 @@ use std::{
 };
 
 use beankeeper_cli::{
-    cli::{Cli, Command, McpCommand, PassphraseOptions},
+    cli::{AuditCommand, Cli, Command, McpCommand, PassphraseOptions},
     commands::{self, setup::SetupCommand},
-    db::{Db, companies::CompanySlug},
+    db::companies::CompanySlug,
     error::CliError,
-    mcp::{self, HttpLedgerTargets, LedgerTargets},
+    mcp::{self, HttpLedgerTargets, LedgerTarget, LedgerTargets},
     output::json::Meta,
     passphrase,
 };
@@ -19,7 +22,7 @@ use clap::{ArgMatches, FromArgMatches};
 use secrecy::SecretString;
 use tempfile::NamedTempFile;
 
-use crate::setup;
+use crate::{entitlement::LedgerAccess, instance::BooksPath, setup};
 
 use super::LocalBackups;
 use http::HttpBind;
@@ -131,17 +134,31 @@ impl DispatchBooks {
                 commands::dispatch(cli, meta)
             }
             DispatchOpen::Existing => {
-                let db = self.open(cli)?;
+                let books =
+                    DispatchKey::try_from((&cli.passphrase, false))?.books(&self.primary)?;
+                let db = if matches!(&cli.command, Command::Audit(args) if matches!(args.command, AuditCommand::Undo(_)))
+                {
+                    // Upstream exposes receipt undo as an ordinary write. This already
+                    // parsed command can use the audited undo entry point exclusively.
+                    books.open()?
+                } else {
+                    books.open_protected(LedgerTarget::default())?
+                };
                 commands::dispatch_with_db(cli, db, meta)
             }
             DispatchOpen::Stdio { read_only } => {
-                mcp::serve_with_db(cli, self.open(cli)?, read_only)
+                let db = DispatchKey::try_from((&cli.passphrase, false))?
+                    .books(&self.primary)?
+                    .open_protected(LedgerTarget::default())?;
+                mcp::serve_with_db(cli, db, read_only)
             }
             DispatchOpen::Http { bind, read_only } => {
                 let targets = self.http_targets(cli)?;
                 bind.serve(cli, targets, read_only)
             }
             DispatchOpen::Replace { encrypt } => {
+                LedgerAccess::from(BooksPath::try_from(self.primary.as_path())?)
+                    .ordinary_write()?;
                 let key = DispatchKey::try_from((&cli.passphrase, encrypt))?;
                 key.books(&self.primary)?.before_replacement()?;
                 // Core init replaces the file and resolves the destination key itself.
@@ -151,22 +168,20 @@ impl DispatchBooks {
         }
     }
 
-    fn open(&self, cli: &Cli) -> Result<Db, CliError> {
-        DispatchKey::try_from((&cli.passphrase, false))?
-            .books(&self.primary)?
-            .open()
-    }
-
     fn http_targets(&self, cli: &Cli) -> Result<HttpLedgerTargets, CliError> {
         let named = cli.ledger_bindings()?;
         let key = DispatchKey::try_from((&cli.passphrase, false))?;
-        let startup = key.books(&self.primary)?.open()?;
+        let startup = key
+            .books(&self.primary)?
+            .open_protected(LedgerTarget::default())?;
         if named.len() == 0 {
             return Ok(startup.into());
         }
         let targets = LedgerTargets::new(startup);
         for (name, path) in named {
-            targets.register(name.clone().into(), key.books(path.as_ref())?.open()?)?;
+            let target: LedgerTarget = name.clone().into();
+            let db = key.books(path.as_ref())?.open_protected(target.clone())?;
+            targets.register(target, db)?;
         }
         Ok(targets.into())
     }

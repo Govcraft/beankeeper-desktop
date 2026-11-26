@@ -115,9 +115,7 @@ fn main() -> ExitCode {
             )
             .map_err(|error| DesktopError::Service(Box::new(error)))
         }
-        DesktopCommand::License(options) => {
-            product::run_license(options).map_err(DesktopError::Product)
-        }
+        DesktopCommand::License(options) => run_license(options, &matches),
         DesktopCommand::CheckForUpdate => check_updates(),
         DesktopCommand::InstallUpdate => install_update(),
         DesktopCommand::Serve(options) => {
@@ -181,20 +179,34 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_license(
+    options: product::LicenseOptions,
+    matches: &clap::ArgMatches,
+) -> Result<(), DesktopError> {
+    let ledger = with_ledger_bindings(desktop_ledger_options(matches), matches);
+    let path = ledger.db_path()?;
+    let explicit = matches.value_source("db") != Some(ValueSource::DefaultValue)
+        || matches.contains_id("ledger_target");
+    product::run_license(options, path, explicit).map_err(DesktopError::Product)
+}
+
 fn run_backups(options: backups::BackupOptions, matches: &clap::ArgMatches) -> ExitCode {
-    let mut ledger = desktop_ledger_options(matches);
-    // Preserve upstream's typed ledger bindings when dispatching a Desktop subcommand.
-    let mut globals = matches.clone();
-    globals.remove_subcommand();
-    ledger
-        .update_from_arg_matches(&globals)
-        .unwrap_or_else(|error| error.exit());
+    let ledger = with_ledger_bindings(desktop_ledger_options(matches), matches);
     backups::run(
         options,
         ledger,
         matches.value_source("db") == Some(ValueSource::DefaultValue)
             && !matches.contains_id("ledger_target"),
     )
+}
+
+fn with_ledger_bindings(mut ledger: Cli, matches: &clap::ArgMatches) -> Cli {
+    let mut globals = matches.clone();
+    globals.remove_subcommand();
+    ledger
+        .update_from_arg_matches(&globals)
+        .unwrap_or_else(|error| error.exit());
+    ledger
 }
 
 fn desktop_ledger_options(matches: &clap::ArgMatches) -> Cli {

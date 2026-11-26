@@ -32,12 +32,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or(std::env::VarError::NotPresent)?;
     let embed_path =
         std::path::PathBuf::from(&manifest_dir).join("../../packaging/license-embed.json");
-    let lock_path = std::path::PathBuf::from(manifest_dir).join("../../Cargo.lock");
+    let lock_path = std::path::PathBuf::from(&manifest_dir).join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock_path.display());
     rustc_env("BK_CORE_REVISION", core_revision(&lock_path)?.as_ref());
     println!("cargo:rerun-if-changed={}", embed_path.display());
 
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
+    let official = release && std::env::var("BEANKEEPER_OFFICIAL_BUILD").as_deref() == Ok("1");
+    embed_revocations(Path::new(&manifest_dir), official)?;
+    if official {
+        rustc_env("BEANKEEPER_OFFICIAL_BUILD", "1");
+    }
     let file_defaults = if release {
         std::fs::read_to_string(&embed_path)
             .ok()
@@ -72,6 +77,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn embed_revocations(manifest: &Path, official: bool) -> io::Result<()> {
+    let packaging = manifest.join("../../packaging");
+    let path = packaging.join("revocations.json");
+    let watched = if path.exists() { &path } else { &packaging };
+    println!("cargo:rerun-if-changed={}", watched.display());
+    println!("cargo:rerun-if-env-changed=BEANKEEPER_OFFICIAL_BUILD");
+    let enforced = official
+        && std::env::var("CARGO_PKG_VERSION_MAJOR").as_deref() != Ok("0")
+        && std::env::var("CARGO_PKG_VERSION_PRE").as_deref() == Ok("");
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 && (!bytes.is_empty() || !enforced) => bytes,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid size for packaging/revocations.json",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !enforced => Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                error.kind(),
+                "official stable builds require packaging/revocations.json signed by the license issuer",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let out = std::env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("OUT_DIR is unset"))?;
+    std::fs::write(Path::new(&out).join("revocations.json"), bytes)
 }
 
 fn core_revision(lock_path: &Path) -> Result<GitOid, Box<dyn Error>> {

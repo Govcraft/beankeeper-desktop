@@ -76,7 +76,7 @@ impl HttpBind {
     }
 }
 
-struct NoHostTools;
+pub(crate) struct NoHostTools;
 
 impl HostToolHandler for NoHostTools {
     fn tools(&self) -> Vec<HostTool> {

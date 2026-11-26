@@ -4,7 +4,7 @@
 //! Verification uses a local token and an independently provisioned public key.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     error::Error,
     fmt, fs,
     io::{self, Write},
@@ -15,7 +15,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Datelike, TimeDelta, Utc};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, VerifyingKey};
 use mti::prelude::MagicTypeId;
 use rusty_paseto::{
     Error as PasetoError,
@@ -33,7 +33,7 @@ pub(crate) const MAX_LICENSE_INPUT: usize = MAX_TOKEN_LEN + 2;
 const ACTIVATIONS_DIR: &str = "licenses";
 
 /// A validated service-issued license `TypeID`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LicenseId(MagicTypeId);
 
 impl fmt::Display for LicenseId {
@@ -419,6 +419,82 @@ pub fn verify_offline(
     UnverifiedToken::try_from(token.as_ref())?.verify(keys, Utc::now())
 }
 
+#[derive(Deserialize)]
+enum RevocationFormat {
+    #[serde(rename = "beankeeper-revocations-v1")]
+    V1,
+}
+
+impl AsRef<str> for RevocationFormat {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::V1 => "beankeeper-revocations-v1",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationEnvelope {
+    format: RevocationFormat,
+    key_id: KeyId,
+    payload: String,
+    signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationClaims {
+    #[serde(rename = "generated_at")]
+    _generated_at: DateTime<Utc>,
+    revoked_license_ids: HashSet<LicenseId>,
+}
+
+/// A release snapshot checked against the separately provisioned issuer keys.
+pub(crate) struct VerifiedRevocations(HashSet<LicenseId>);
+
+impl VerifiedRevocations {
+    pub(crate) fn verify(bytes: &[u8], keys: &TrustedKeys) -> Result<Self, LicenseError> {
+        let envelope: RevocationEnvelope =
+            serde_json::from_slice(bytes).map_err(|_| LicenseError::InvalidRevocations)?;
+        let key = keys.0.get(&envelope.key_id).ok_or(LicenseError::UnknownKey)?;
+        if envelope.signature.len() != 86 || envelope.payload.len() > 4 * 1024 * 1024 {
+            return Err(LicenseError::InvalidRevocations);
+        }
+        let signature = URL_SAFE_NO_PAD
+            .decode(envelope.signature)
+            .map_err(|_| LicenseError::InvalidRevocations)?;
+        let signature = Signature::from_slice(&signature).map_err(|_| LicenseError::Signature)?;
+        let message = format!(
+            "{}\n{}\n{}",
+            envelope.format.as_ref(),
+            envelope.key_id.0,
+            envelope.payload
+        );
+        key.0.verify_strict(message.as_bytes(), &signature)
+            .map_err(|_| LicenseError::Signature)?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(envelope.payload)
+            .map_err(|_| LicenseError::InvalidRevocations)?;
+        let claims: RevocationClaims =
+            serde_json::from_slice(&payload).map_err(|_| LicenseError::InvalidClaims)?;
+        Ok(Self(claims.revoked_license_ids))
+    }
+
+    pub(crate) fn contains(&self, id: &LicenseId) -> bool {
+        self.0.contains(id)
+    }
+}
+
+pub(crate) fn release_revocations(keys: &TrustedKeys) -> Result<VerifiedRevocations, LicenseError> {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/revocations.json"));
+    if bytes.is_empty() {
+        Ok(VerifiedRevocations(HashSet::new()))
+    } else {
+        VerifiedRevocations::verify(bytes, keys)
+    }
+}
+
 /// Verify before atomically replacing a private activated license file.
 ///
 /// # Errors
@@ -430,22 +506,12 @@ pub fn activate(
     path: &Path,
 ) -> Result<VerifiedLicense, LicenseError> {
     let claims = verify_offline(bytes, keys)?;
-    store_activation(bytes, path)?;
+    write_private(bytes, path, SaveMode::Replace)?;
     Ok(claims)
 }
 
-/// Verify and store this activation alongside any other activated licenses.
-pub(crate) fn activate_in(
-    bytes: &[u8],
-    keys: &TrustedKeys,
-    state: &Path,
-) -> Result<VerifiedLicense, LicenseError> {
-    let claims = verify_offline(bytes, keys)?;
-    let path = state
-        .join(ACTIVATIONS_DIR)
-        .join(format!("{}.license", claims.id()));
-    store_activation(bytes, &path)?;
-    Ok(claims)
+pub(crate) fn activation_path(state: &Path, id: &LicenseId) -> PathBuf {
+    state.join(ACTIVATIONS_DIR).join(format!("{id}.license"))
 }
 
 /// Discover activations, including the legacy single-file location.
@@ -476,7 +542,13 @@ pub(crate) fn activation_paths(state: &Path) -> Result<Vec<PathBuf>, LicenseErro
     Ok(paths)
 }
 
-fn store_activation(bytes: &[u8], path: &Path) -> Result<(), LicenseError> {
+#[derive(Clone, Copy)]
+pub(crate) enum SaveMode {
+    Create,
+    Replace,
+}
+
+pub(crate) fn write_private(bytes: &[u8], path: &Path, mode: SaveMode) -> Result<(), LicenseError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -503,7 +575,11 @@ fn store_activation(bytes: &[u8], path: &Path) -> Result<(), LicenseError> {
     crate::setup::keychain::restrict_file(pending.path())?;
     pending.write_all(bytes)?;
     pending.as_file().sync_all()?;
-    pending.persist(path).map_err(|error| error.error)?;
+    match mode {
+        SaveMode::Create => pending.persist_noclobber(path),
+        SaveMode::Replace => pending.persist(path),
+    }
+    .map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -546,6 +622,8 @@ pub enum LicenseError {
     Signature,
     /// Authenticated claims violate the D10 contract or target another product.
     InvalidClaims,
+    /// Unsupported or malformed signed revocation snapshot.
+    InvalidRevocations,
     /// Local activation storage failed.
     Io(io::Error),
 }
@@ -561,6 +639,7 @@ impl fmt::Display for LicenseError {
             Self::UnknownKey => "license issuer is not in the trusted public-key store",
             Self::Signature => "invalid license signature",
             Self::InvalidClaims => "invalid license claims or wrong product",
+            Self::InvalidRevocations => "invalid signed Desktop license revocation snapshot",
             Self::Io(_) => "cannot read or save the private activated license file",
         })
     }

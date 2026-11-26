@@ -18,7 +18,7 @@ use beankeeper_cli::{
     cli::Cli,
     db::Db,
     mcp::{
-        HttpLedgerTargets, LedgerTargets, StreamableHttpServerConfig,
+        HttpLedgerTargets, LedgerTarget, LedgerTargets, StreamableHttpServerConfig,
         http_router_with_ledger_targets,
     },
     passphrase::resolve_passphrase,
@@ -30,6 +30,7 @@ use crate::{
     boundary::{self, LocalBoundary},
     changes,
     demo::DemoBooks,
+    entitlement::LedgerAccess,
     imports,
     instance::{self, BooksPath, InstanceId, ListenerAddress, Registration},
     navigation::{self, Navigation},
@@ -141,12 +142,16 @@ fn application_with_id(
     )?;
     let books = BooksPath::try_from(cli.db.as_path())?;
     let backups = LocalBackups::new(books.clone(), passphrase);
-    let review_db = backups.open()?;
+    let access = LedgerAccess::from(books.clone());
+    let review_db = access
+        .clone()
+        .protect(backups.open()?, LedgerTarget::default());
     let key = backups.key();
     let navigation = Navigation::new(pairing.clone(), config.cancellation_token.clone());
     let association_db = Arc::new(Mutex::new(Db::open_snapshot(&cli.db, key)?));
     let mut tools = DesktopTools {
         backups: backups.clone(),
+        access: access.clone(),
         bound,
         navigation: navigation.clone(),
         status_db: Arc::clone(&association_db),
@@ -156,7 +161,9 @@ fn application_with_id(
         company: cli.company.clone(),
     };
     let request_limit = config.max_request_body_bytes;
-    let startup = backups.open()?;
+    let startup = access
+        .clone()
+        .protect(backups.open()?, LedgerTarget::default());
     let (targets, demo) = if let Some(managed_books) = &tools.managed_books {
         let targets = LedgerTargets::new(startup);
         let demo = DemoBooks::new(
@@ -176,7 +183,7 @@ fn application_with_id(
         cli.company.clone(),
         pairing.clone(),
         &cli.db.with_extension("owner-token"),
-    )?;
+    );
     let changes = changes::router(
         backups.open()?,
         books,
@@ -191,6 +198,7 @@ fn application_with_id(
         imports::layer(
             mcp,
             Arc::clone(&association_db),
+            access.clone(),
             fallback.clone(),
             request_limit,
         )
@@ -200,7 +208,7 @@ fn application_with_id(
         pairing::mcp_guard,
     ));
     let owner_routes = owner_key.map(|key| owner::router(pairing.clone(), key, id.clone()));
-    let router = ui::router(db, cli.company.clone(), pairing.clone())
+    let router = ui::router(db, cli.company.clone(), pairing.clone(), access)
         .merge(review)
         .merge(changes)
         .merge(navigation::router(navigation, pairing.clone()))
