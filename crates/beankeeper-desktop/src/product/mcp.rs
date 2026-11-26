@@ -1,0 +1,175 @@
+//! Installation-wide license tools on the local OS-authority MCP channels.
+
+use std::path::{Path, PathBuf};
+
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool, ToolAnnotations};
+use schemars::JsonSchema;
+use secrecy::SecretString;
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+
+use super::{
+    BooksSelection, LicenseRequest, ProductError,
+    activation::{ActivationInputs, Storefront},
+    report::{LicenseErrorCode, LicenseResponse},
+};
+#[derive(Clone, Copy)]
+pub(crate) enum LicenseTool {
+    Status,
+    Activate,
+}
+
+impl LicenseTool {
+    pub(crate) const STATUS: &str = "license_status";
+    const ACTIVATE: &str = "license_activate";
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            Self::STATUS => Some(Self::Status),
+            Self::ACTIVATE => Some(Self::Activate),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tools() -> impl Iterator<Item = Tool> {
+        [Self::Status, Self::Activate]
+            .into_iter()
+            .filter_map(Self::tool)
+    }
+
+    fn tool(self) -> Option<Tool> {
+        let (name, description, schema) = match self {
+            Self::Status => (
+                Self::STATUS,
+                "Check the Desktop license and whether the selected books are writable. Tell the owner in plain words. Offer to activate a license they already have and continue any work Desktop permits.",
+                schemars::schema_for!(NoArguments),
+            ),
+            Self::Activate => (
+                Self::ACTIVATE,
+                "Activate the license the owner provided for these books. Use exactly one signed license, local license file, or claim code. Activate directly and tell the owner what happened. Keep license text, codes and private recovery information out of replies.",
+                schemars::schema_for!(ActivateArguments),
+            ),
+        };
+        let annotations = ToolAnnotations::new()
+            .read_only(matches!(self, Self::Status))
+            .destructive(false)
+            .open_world(matches!(self, Self::Activate));
+        Some(
+            Tool::new(name, description, schema.to_value().as_object()?.clone())
+                .with_annotations(annotations),
+        )
+    }
+
+    pub(crate) fn call(self, params: &Value, books: Option<&Path>) -> CallToolResult {
+        CallToolRequestParams::deserialize(params).map_or_else(
+            |_| failure(&ProductError::ActivationInput),
+            |request| self.call_request(request, books),
+        )
+    }
+
+    pub(crate) fn call_request(
+        self,
+        request: CallToolRequestParams,
+        books: Option<&Path>,
+    ) -> CallToolResult {
+        self.execute(request, books)
+            .unwrap_or_else(|error| failure(&error))
+    }
+
+    fn execute(
+        self,
+        request: CallToolRequestParams,
+        books: Option<&Path>,
+    ) -> Result<CallToolResult, ProductError> {
+        let arguments = Value::Object(request.arguments.unwrap_or_default());
+        let request = match self {
+            Self::Status => {
+                decode::<NoArguments>(arguments)?;
+                LicenseRequest::Status
+            }
+            Self::Activate => LicenseRequest::Activate(
+                ActivationInputs::from(decode::<ActivateArguments>(arguments)?).try_into()?,
+            ),
+        };
+        let target = BooksSelection::try_from((books, books.is_some().into()))?;
+        let report = request.run(&target)?;
+        let settings_url = target.settings_url();
+        Ok(reply(&report.response(settings_url.as_deref())))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NoArguments {}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ActivateArguments {
+    /// The signed license beginning with v4.public, as provided by the owner.
+    #[schemars(with = "Option<String>")]
+    license: Option<SecretString>,
+    /// Local path to the saved license file, including an email attachment.
+    file_path: Option<PathBuf>,
+    /// The single-use claim or checkout code provided by the owner.
+    #[schemars(with = "Option<String>")]
+    claim_code: Option<SecretString>,
+    /// Storefront when known. Stripe checkout codes and Etsy claim codes work without this field.
+    storefront: Option<Storefront>,
+}
+
+impl From<ActivateArguments> for ActivationInputs {
+    fn from(args: ActivateArguments) -> Self {
+        Self {
+            pasted: args.license,
+            file: args.file_path,
+            claim: args.claim_code,
+            storefront: args.storefront,
+            ..Self::default()
+        }
+    }
+}
+
+fn decode<T: DeserializeOwned>(arguments: Value) -> Result<T, ProductError> {
+    serde_json::from_value(arguments).map_err(|_| ProductError::ActivationInput)
+}
+
+fn reply(response: &LicenseResponse<'_>) -> CallToolResult {
+    let payload = json!(response);
+    let mut result = if response.is_error() {
+        CallToolResult::structured_error(payload)
+    } else {
+        CallToolResult::structured(payload)
+    };
+    result.content = vec![ContentBlock::text(response.message())];
+    result
+}
+
+pub(crate) fn worker_failure() -> CallToolResult {
+    let error = ProductError::LicenseWorkerFailed;
+    let code = LicenseErrorCode::from(&error);
+    let message = error.to_string();
+    let mut result = CallToolResult::structured_error(json!({"code": code, "message": message}));
+    result.content = vec![ContentBlock::text(message)];
+    result
+}
+
+fn failure(error: &ProductError) -> CallToolResult {
+    reply(&LicenseResponse::from(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_failure_is_a_named_mcp_error() {
+        let result = worker_failure();
+        let message = "Desktop could not complete the license request.";
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"code": "LICENSE_WORKER_FAILED", "message": message}))
+        );
+        assert_eq!(result.content, vec![ContentBlock::text(message)]);
+    }
+}

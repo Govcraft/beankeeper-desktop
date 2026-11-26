@@ -33,11 +33,11 @@ use crate::{
     links::mcp as link_tool,
     navigation::Navigation,
     output::{Envelope, Metadata},
+    product::mcp::LicenseTool,
     setup,
 };
 
 pub(crate) const STATUS_TOOL: &str = "setup_status";
-const LICENSE_STATUS_TOOL: &str = "license_status";
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -257,7 +257,7 @@ impl HostToolHandler for DesktopTools {
         tools.extend(changes::definitions());
         tools.push(HostTool {
             tool: Tool::new(
-                LICENSE_STATUS_TOOL,
+                LicenseTool::STATUS,
                 "Read whether these books allow Desktop writes and what to do if they are read-only.",
                 JsonObject::from_iter([("type".into(), "object".into())]),
             ),
@@ -285,13 +285,15 @@ impl HostToolHandler for DesktopTools {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
-        if request.name == LICENSE_STATUS_TOOL {
+        if request.name == LicenseTool::STATUS {
             let access = self.access.clone();
             let settings_url = format!("{}settings", crate::server::local_url(self.bound));
             let result = tokio::task::spawn_blocking(move || {
-                let summary = access.status();
+                let status = access.status();
+                let summary = status.to_string();
                 let mut result = CallToolResult::structured(serde_json::json!({
                     "summary": summary,
+                    "writable": status.writable(),
                     "settings_url": settings_url,
                 }));
                 result.content = vec![ContentBlock::text(summary)];

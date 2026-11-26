@@ -115,7 +115,7 @@ fn main() -> ExitCode {
             )
             .map_err(|error| DesktopError::Service(Box::new(error)))
         }
-        DesktopCommand::License(options) => run_license(options, &matches),
+        DesktopCommand::License(options) => return run_license(options, &matches),
         DesktopCommand::CheckForUpdate => check_updates(),
         DesktopCommand::InstallUpdate => install_update(),
         DesktopCommand::Serve(options) => {
@@ -179,15 +179,29 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_license(
-    options: product::LicenseOptions,
-    matches: &clap::ArgMatches,
-) -> Result<(), DesktopError> {
+fn run_license(options: product::LicenseOptions, matches: &clap::ArgMatches) -> ExitCode {
     let ledger = with_ledger_bindings(desktop_ledger_options(matches), matches);
-    let path = ledger.db_path()?;
+    let json = ledger.is_json();
+    let path = match ledger.db_path() {
+        Ok(path) => path,
+        Err(error) => {
+            error.report(json, None);
+            return ExitCode::from(error.exit_code());
+        }
+    };
     let explicit = matches.value_source("db") != Some(ValueSource::DefaultValue)
         || matches.contains_id("ledger_target");
-    product::run_license(options, path, explicit.into()).map_err(DesktopError::Product)
+    match product::run_license(options, path, explicit.into(), json) {
+        Ok(status) => status,
+        Err(error) => {
+            if json {
+                eprintln!("{}", error.structured());
+            } else {
+                eprintln!("{error}");
+            }
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_backups(options: backups::BackupOptions, matches: &clap::ArgMatches) -> ExitCode {
@@ -243,9 +257,7 @@ fn install_update() -> Result<(), DesktopError> {
     product::state_dir()
         .and_then(|dir| {
             if product::update_checks() == updates::UpdateChecks::Disabled {
-                return Err(product::ProductError::Configuration(
-                    "update checks are disabled; unset BEANKEEPER_NO_UPDATE_CHECK first",
-                ));
+                return Err(product::ProductError::UpdateChecksDisabled);
             }
             updates::check(
                 &dir.join("updates.json"),

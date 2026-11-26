@@ -471,18 +471,17 @@ Release candidates are free to use without a license. You can still open, query,
 export, back up, and restore your books in read-only mode, and use your recovery
 kit. Your encrypted books stay on your computer.
 
-You can give your agent a pasted Desktop license token or the downloaded
-license file. An agent with CLI access can activate it offline with
-`bk --db BOOKS license activate --token TOKEN` or
-`bk --db BOOKS license activate /path/to/downloaded.license`.
-Run `bk --db BOOKS license` to see whether those books are writable, or ask your
-Desktop agent. A license is bound to the selected local books. If you activated
-a preview license without choosing books, run activation again with their path.
+Ask your agent to check or activate your Desktop license. Give it the saved
+license file or the claim code you received. It also accepts signed license text
+if you have it in chat. The agent can tell you whether these books are writable
+and which major versions your installed licenses cover. Activation binds the
+license to the selected local books.
 
-Both `bk license` and **License and updates** (`/settings`) explicitly show
-`active and valid` after offline verification and list the major version each
-license covers for perpetual use. They explain missing activations and
-verification failures. [License file format](docs/license-format.md)
+The CLI equivalents are `bk license activate FILE` and `bk license`. Use
+`--db BOOKS` to select other books. The agent can also offer **License and
+updates** in your paired browser.
+
+[License commands and recovery](docs/license-updates.md)
 
 `bk update-check` checks the signed GitHub release manifest at most once daily,
 including failed attempts, for each running Desktop version. After a version

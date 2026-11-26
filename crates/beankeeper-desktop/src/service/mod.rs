@@ -327,6 +327,10 @@ pub fn managed_books() -> Result<Option<PathBuf>, ServiceError> {
         .map(|config| config.books))
 }
 
+pub(crate) fn default_books() -> Result<PathBuf, ServiceError> {
+    Ok(service_ledger_options()?.db)
+}
+
 pub(crate) fn managed_executable() -> Result<Option<PathBuf>, ServiceError> {
     let paths = Paths::discover()?;
     Ok(Config::load(&paths)?.map(|config| config.executable))

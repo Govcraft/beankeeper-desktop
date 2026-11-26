@@ -38,6 +38,7 @@ use crate::{
     demo::{DemoError, DemoOperation, DemoReport, target_meta},
     onboarding::STATUS_TOOL,
     private_file::{BEARER_FILE_LIMIT, PrivateFile},
+    product::mcp::LicenseTool,
     service::{self, Endpoint, ServiceError},
     setup::AgentAccess,
 };
@@ -463,9 +464,22 @@ impl Transport {
                 rpc_reply(output, id, result)
             });
         }
-        self.refresh_access(output)?;
         let tool_request = request.kind() == MethodKind::ToolsCall;
         let tool_list = request.kind() == MethodKind::ToolsList;
+        if let Some(managed) = &self.managed
+            && tool_request
+            && (self.protocol.is_some() || inline.is_some())
+            && let Some(tool) = message["params"]["name"]
+                .as_str()
+                .and_then(LicenseTool::from_name)
+            && let Some(id) = message.get("id")
+        {
+            return write_message(
+                output,
+                &json!({"jsonrpc": "2.0", "id": id, "result": tool.call(&message["params"], Some(&managed.books))}),
+            );
+        }
+        self.refresh_access(output)?;
         let operation = if self.managed.is_some() && tool_request {
             message["params"]["name"]
                 .as_str()
@@ -574,6 +588,8 @@ impl Transport {
                 let mut tools = demo_tools();
                 if self.extension_tools {
                     tools.extend(extension::tools(false));
+                } else {
+                    tools.extend(LicenseTool::tools());
                 }
                 let mut result = ListToolsResult::with_all_items(tools)
                     .with_ttl_ms(0)
@@ -694,6 +710,7 @@ impl Transport {
                 _ => SupplementalTools::None,
             },
             extension_tools: tool_list && self.extension_tools,
+            license_tools: tool_list && self.managed.is_some() && !self.extension_tools,
         };
         let replies = relay_response(response, relay, output)?;
         if initial {
@@ -815,6 +832,7 @@ struct ReplyContext<'a> {
     managed_initialize: bool,
     supplemental_tools: SupplementalTools,
     extension_tools: bool,
+    license_tools: bool,
 }
 
 fn relay_response(
@@ -922,13 +940,26 @@ fn emit(
                     .collect(),
                 SupplementalTools::None => Vec::new(),
             };
-            for tool in supplemental.into_iter().chain(
-                context
-                    .extension_tools
-                    .then(|| extension::tools(false))
-                    .into_iter()
-                    .flatten(),
-            ) {
+            if context.license_tools || context.extension_tools {
+                tools.retain(|tool| tool["name"] != LicenseTool::STATUS);
+            }
+            for tool in supplemental
+                .into_iter()
+                .chain(
+                    context
+                        .extension_tools
+                        .then(|| extension::tools(false))
+                        .into_iter()
+                        .flatten(),
+                )
+                .chain(
+                    context
+                        .license_tools
+                        .then(LicenseTool::tools)
+                        .into_iter()
+                        .flatten(),
+                )
+            {
                 tools.push(serde_json::to_value(tool).map_err(|_| BridgeError::Protocol)?);
             }
         }

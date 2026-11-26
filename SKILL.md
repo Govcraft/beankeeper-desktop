@@ -928,23 +928,28 @@ See [docs/setup.md](https://github.com/Govcraft/beankeeper-desktop/blob/main/doc
 credential paths, headless test options, lifecycle and recovery instructions.
 Ledger, library and schema work belongs in Govcraft/beankeeper.
 
-Desktop license and update state is available to the human at `/settings` in a
-paired browser. Cached update results show readable UTC attempt times and
-explain failed or incomplete checks; reading Settings does not contact the feed.
-Results are tied to the running Desktop version. A version change, or a legacy
-cache without a version, hides stale results until the next check refreshes them.
-The daily retry limit, including failures, applies within each version.
-When the owner wants to activate Desktop, explain that they can paste their
-license token or provide the downloaded license file. When you have CLI access,
-use `bk --db BOOKS license activate --token TOKEN` for a paste or
-`bk --db BOOKS license activate FILE` for a file, then explain the result in chat.
-Use `bk --db BOOKS license` to inspect the selected books and activated
-licenses, `bk update-check` to check the signed release feed, and `bk self-update`
-to install an eligible release. Status shows `active and valid` and the major version each
-verified license covers for perpetual use. Any active license covering the
-signed release's major version authorizes self-update for the installation.
-Use the signed installer to update to a 0.x preview. Status explains missing
-activations and verification failures.
+When the owner asks about their license, call `license_status` on the local
+Beankeeper connection. Explain whether the selected books are writable and
+which Desktop versions the installed license covers. If the books need a
+license, offer to activate one the owner already has and continue any work
+Desktop permits. For a revoked license, offer to activate a different one.
+
+When the owner provides a saved license file, claim code, or signed license
+text, call `license_activate` with exactly one source and report what happened.
+Keep signed text, claim codes, and private recovery information out of replies.
+Desktop handles recovery itself. Use the local lifecycle connection for
+activation if the ledger connection only lists `license_status`.
+
+Offer **License and updates** using the report's `settings_url` if the owner
+wants the details in their paired browser. Cached update results show readable
+UTC attempt times and explain failed or incomplete checks. Results are tied to
+the running Desktop version. The daily retry limit applies within each version.
+
+The CLI equivalents are `bk license activate FILE` and `bk license`. Use
+`--json` for the structured result and `--db BOOKS` to select other books.
+`bk update-check` checks the signed release feed. Any active license covering
+the signed release's major version authorizes `bk self-update`. Use the signed
+installer to update to a 0.x preview.
 
 If the owner asks about purchasing, refunds, or read-only mode,
 summarize the approved 1.0 terms and offer the agreement link. A $79 one-time
@@ -964,8 +969,6 @@ explain how the owner can activate one for these books. Use `audit_undo` or
 Stable builds check stable releases; RC builds check stable
 and `-rc.N` releases among the 100 most recent GitHub release records. All
 updates require the signed manifest and bundles from the selected exact tag.
-License files, claim codes and recovery tokens are human-owned;
-never ask for them or perform activation on the human's behalf. Normal ledger
-and agent work does not require online license verification. Automatic update
+Normal ledger and agent work does not require online license verification. Automatic update
 checks can be disabled with `BEANKEEPER_NO_UPDATE_CHECK=1`. See
 [license and update commands](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/license-updates.md).
