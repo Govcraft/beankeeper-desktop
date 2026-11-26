@@ -1153,7 +1153,7 @@ mod tests {
         };
         let snapshot = render_query(&db, "/", &query)?;
         let home = snapshot.content.as_str();
-        assert!(home.contains("Cash on hand in the selected accounts is USD 123.45"));
+        assert!(home.contains("No cash accounts are classified"));
         assert!(home.contains("Net worth is USD 123.45"));
         assert!(home.contains("href=\"/transactions?company=acme\""));
         assert!(!home.contains("Recent activity"));

@@ -139,6 +139,7 @@ fn links_work_without_tabs_in_read_only_mode_and_match_the_cli() -> TestResult {
             },
         )
     })?;
+    ledger.classify_cash("acme", "1000")?;
     let actor = beankeeper_cli::db::Actor::new("owner".parse()?).with_identity(
         beankeeper_cli::identity::verify(db.read(), token(&ledger.writer)?)?,
     );
