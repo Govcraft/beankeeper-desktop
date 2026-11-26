@@ -22,8 +22,10 @@ impl From<crate::entitlement::LedgerLicenseStatus> for BooksAccess {
     }
 }
 
+#[derive(Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
 enum RemovalOutcome {
-    Removed(BooksAccess),
+    Removed { books_access: BooksAccess },
     NotInstalled,
 }
 
@@ -35,7 +37,7 @@ impl std::fmt::Display for RemovalOutcome {
                     "That license is not installed on this computer, so nothing changed.",
                 );
             }
-            Self::Removed(access) => access,
+            Self::Removed { books_access } => books_access,
         };
         f.write_str("The license was removed from this computer without a refund; ")?;
         f.write_str(match access {
@@ -54,18 +56,30 @@ pub(crate) struct RemovalResponse {
 
 impl Serialize for RemovalResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut response = serializer.serialize_struct("RemovalResponse", 5)?;
-        let (code, access) = match self.outcome {
-            RemovalOutcome::Removed(access) => ("removed", access),
-            RemovalOutcome::NotInstalled => ("not_installed", BooksAccess::NotSelected),
-        };
-        response.serialize_field("code", code)?;
-        response.serialize_field("license_id", &self.license_id)?;
-        response.serialize_field("message", &self.message())?;
-        response.serialize_field("books_access", &access)?;
-        response.serialize_field("desktop_path", "/settings")?;
-        response.end()
+        #[derive(Serialize)]
+        struct Response<'a> {
+            license_id: &'a LicenseId,
+            #[serde(flatten)]
+            outcome: &'a RemovalOutcome,
+            #[serde(serialize_with = "display_message")]
+            message: &'a RemovalOutcome,
+            desktop_path: &'static str,
+        }
+
+        fn display_message<S: serde::Serializer>(
+            outcome: &RemovalOutcome,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(outcome)
+        }
+
+        Response {
+            license_id: &self.license_id,
+            outcome: &self.outcome,
+            message: &self.outcome,
+            desktop_path: "/settings",
+        }
+        .serialize(serializer)
     }
 }
 
@@ -87,7 +101,9 @@ pub(super) fn remove(
                 .status()
                 .into()
         });
-        RemovalOutcome::Removed(access)
+        RemovalOutcome::Removed {
+            books_access: access,
+        }
     } else {
         RemovalOutcome::NotInstalled
     };
@@ -140,7 +156,9 @@ mod tests {
                 "not_selected",
             ),
         ] {
-            let outcome = RemovalOutcome::Removed(access);
+            let outcome = RemovalOutcome::Removed {
+                books_access: access,
+            };
             assert_eq!(
                 outcome.to_string(),
                 format!(
@@ -163,6 +181,16 @@ mod tests {
             RemovalOutcome::NotInstalled.to_string(),
             "That license is not installed on this computer, so nothing changed."
         );
+        let response = RemovalResponse {
+            license_id: "lic_01h455vb4pex5vsknk084sn02q"
+                .parse()
+                .expect("valid fixture"),
+            outcome: RemovalOutcome::NotInstalled,
+        };
+        let serialized = serde_json::to_value(&response)?;
+        assert_eq!(serialized["code"], "not_installed");
+        assert_eq!(serialized["message"], response.message());
+        assert!(serialized.get("books_access").is_none());
         Ok(())
     }
 
