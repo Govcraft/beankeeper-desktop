@@ -808,11 +808,11 @@ enum UpdateState {
 enum CheckOutcome {
     UpToDate {
         version: semver::Version,
-        release_notes_url: String,
+        release_notes_url: ReleaseNotesUrl,
     },
     Available {
         version: semver::Version,
-        release_notes_url: String,
+        release_notes_url: ReleaseNotesUrl,
     },
     Incomplete,
     Failed {
@@ -820,9 +820,31 @@ enum CheckOutcome {
     },
 }
 
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+struct ReleaseNotesUrl(String);
+
+impl From<&ReleaseVersion> for ReleaseNotesUrl {
+    fn from(release: &ReleaseVersion) -> Self {
+        Self(format!("{REPOSITORY}/releases/tag/{TAG_PREFIX}{release}"))
+    }
+}
+
+impl AsRef<str> for ReleaseNotesUrl {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ReleaseNotesUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
 impl From<(ReleaseVersion, &semver::Version)> for CheckOutcome {
     fn from((release, installed): (ReleaseVersion, &semver::Version)) -> Self {
-        let release_notes_url = format!("{REPOSITORY}/releases/tag/{TAG_PREFIX}{release}");
+        let release_notes_url = ReleaseNotesUrl::from(&release);
         if &release.0 > installed {
             Self::Available {
                 version: release.0,

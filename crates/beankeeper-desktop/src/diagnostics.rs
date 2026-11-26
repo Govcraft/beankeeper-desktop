@@ -127,23 +127,30 @@ impl Diagnostic {
     }
 
     fn report(self) -> Report {
-        let desktop_updates = matches!(self, Self::UpdateCheck | Self::UpdateStatus).then(|| {
-            product::state_dir()
-                .and_then(|dir| {
-                    if self == Self::UpdateStatus {
-                        return Ok(updates::cached_status(
+        let desktop_updates = match self {
+            Self::Doctor => None,
+            Self::UpdateStatus => Some(
+                product::state_dir()
+                    .and_then(|dir| {
+                        Ok(updates::cached_status(
                             &dir.join("updates.json"),
                             product::update_checks(),
-                        )?);
-                    }
-                    Ok(updates::check(
-                        &dir.join("updates.json"),
-                        product::update_checks(),
-                        updates::now(),
-                    )?)
-                })
-                .map_or_else(DesktopUpdates::from, DesktopUpdates::Status)
-        });
+                        )?)
+                    })
+                    .map_or_else(DesktopUpdates::from, DesktopUpdates::Status),
+            ),
+            Self::UpdateCheck => Some(
+                product::state_dir()
+                    .and_then(|dir| {
+                        Ok(updates::check(
+                            &dir.join("updates.json"),
+                            product::update_checks(),
+                            updates::now(),
+                        )?)
+                    })
+                    .map_or_else(DesktopUpdates::from, DesktopUpdates::Status),
+            ),
+        };
         Report {
             installed_version: env!("CARGO_PKG_VERSION"),
             extension: Observation::discover(),
