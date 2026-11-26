@@ -920,14 +920,14 @@ explain failed or incomplete checks; reading Settings does not contact the feed.
 Results are tied to the running Desktop version. A version change, or a legacy
 cache without a version, hides stale results until the next check refreshes them.
 The daily retry limit, including failures, applies within each version.
-The human can activate a downloaded file with `bk license activate FILE`,
-inspect it with `bk license`, check the signed release feed with
-`bk update-check`, and explicitly install an eligible release with
-`bk self-update`. Verified licenses explicitly show `active and valid`; the
-separate open/ended update window is informational and never expires perpetual
-use. Current release candidates use the signed release date for update
-eligibility. Missing activations and verification failures show their specific
-reason.
+The human can activate each downloaded schema 2 file with
+`bk license activate FILE`, inspect the activated licenses with `bk license`,
+check the signed release feed with `bk update-check`, and install an eligible release with
+`bk self-update`. Status shows `active and valid` and the major version each
+verified license covers for perpetual use. Any active license covering the
+signed release's major version authorizes self-update for the installation.
+Use the signed installer to update to a 0.x preview. Status explains missing
+activations and verification failures.
 
 If the owner asks about purchasing, refunds, or read-only mode,
 summarize the approved 1.0 terms and offer the agreement link. A $79 one-time

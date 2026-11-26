@@ -472,18 +472,14 @@ Release candidates are free to use without a license. You can still open, query,
 export, back up, and restore your books in read-only mode, and use your recovery
 kit. Your encrypted books stay on your computer.
 
-Current release candidates use the v1 signed update deadline. See the issues
-tracking [major-version update eligibility](https://github.com/Govcraft/beankeeper-desktop/issues/169)
-and [read-only mode](https://github.com/Govcraft/beankeeper-desktop/issues/168).
-To activate a downloaded license offline, run
-`bk license activate /path/to/license.json`. Run `bk license` to check its status
-locally.
+To activate a downloaded schema 2 license offline, run
+`bk license activate /path/to/license.json`. Repeat for each license and run
+`bk license` to see the activated licenses.
 
 Both `bk license` and **License and updates** (`/settings`) explicitly show
-`active and valid` after offline verification. The update window is shown
-separately as open or ended according to the local clock. An ended window does
-not expire perpetual use; update eligibility uses the signed release date.
-Missing activations and verification failures show their specific reason.
+`active and valid` after offline verification and list the major version each
+license covers for perpetual use. They explain missing activations and
+verification failures. [License file format](docs/license-format.md)
 
 `bk update-check` checks the signed GitHub release manifest at most once daily,
 including failed attempts, for each running Desktop version. After a version
@@ -498,9 +494,11 @@ Both show a readable UTC last-attempt time and explain incomplete checks,
 including HTTP failures, separately from up-to-date or update-available results.
 Set `BEANKEEPER_NO_UPDATE_CHECK=1` to disable checks before any network access.
 Requests contain only the Desktop version and OS, with no ledger information.
-`bk self-update` installs an eligible release only after mandatory checksum and
-Sigstore verification; it requires `cosign` on PATH. It never falls back to an
-unsigned installation. Restart the server after installing.
+`bk self-update` requires an active license covering the major version in the
+signed manifest. Any matching license on this installation is sufficient. It
+also requires `cosign` on PATH for mandatory Sigstore verification and checks
+the archive checksum before replacing the executable. Use the signed installer
+to update to a 0.x preview. Restart the server after installing.
 
 
 To activate a locally issued license (no storefront), build with the issuer

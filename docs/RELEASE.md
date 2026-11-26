@@ -293,10 +293,9 @@ release assets. Dry runs produce unsigned metadata only. Schema version 1 is:
 ```
 
 `released_at` is the UTC timestamp of the release tag's source commit, emitted
-from Git metadata by the release workflow. The current v1 license format uses
-this signed timestamp for the inclusive update-window comparison, independently
-of the client clock. The approved 1.0 license terms use major-version eligibility.
-[Beankeeper Desktop license agreement](../LICENSE.md) · [Major-version eligibility issue](https://github.com/Govcraft/beankeeper-desktop/issues/169)
+from Git metadata by the release workflow. Desktop uses the authenticated
+`version` to determine which major a license must cover for self-update.
+[Beankeeper Desktop license agreement](../LICENSE.md)
 
 The artifacts map covers the available archive targets from the matrix. Archive
 names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. Self-update uses these archives.

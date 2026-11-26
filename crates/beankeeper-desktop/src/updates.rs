@@ -1,6 +1,6 @@
 //! Signed release discovery and fail-closed installation. No ledger access.
 
-use crate::license::{self, UpdateEligibility, UpdateGrant, VerifiedLicense};
+use crate::license::{self, MajorVersion, VerifiedLicense};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,6 +33,8 @@ pub enum UpdateError {
     Network,
     Http(reqwest::StatusCode),
     Invalid(&'static str),
+    /// No verified local license covers the release major.
+    LicenseRequired(MajorVersion),
     Signature,
     Json(serde_json::Error),
 }
@@ -48,6 +50,10 @@ impl fmt::Display for UpdateError {
                 write!(f, "the release server returned HTTP {}", status.as_u16())
             }
             Self::Invalid(reason) => write!(f, "update refused: {reason}"),
+            Self::LicenseRequired(major) => write!(
+                f,
+                "This update requires a Desktop license that covers {major}.x releases. Use `bk license activate FILE`."
+            ),
             Self::Signature => f.write_str(
                 "Sigstore verification failed; install cosign and require a valid release bundle",
             ),
@@ -94,6 +100,12 @@ struct Artifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ReleaseVersion(semver::Version);
+
+impl ReleaseVersion {
+    fn license_major(&self) -> Option<MajorVersion> {
+        self.0.major.try_into().ok()
+    }
+}
 
 impl fmt::Display for ReleaseVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -184,23 +196,21 @@ impl VerifiedManifest {
 struct NewerRelease(VerifiedManifest);
 
 impl NewerRelease {
-    fn authorize(self, license: &VerifiedLicense) -> Result<AuthorizedRelease, UpdateError> {
-        match license::entitlement(license, self.0.cache_record.released_at) {
-            UpdateEligibility::Eligible(grant) => Ok(AuthorizedRelease {
-                manifest: self.0,
-                _grant: grant,
-            }),
-            UpdateEligibility::OutsideWindow { .. } => Err(UpdateError::Invalid(
-                "activate a license covering this release's update date",
-            )),
+    fn authorize(self, licenses: &[VerifiedLicense]) -> Result<AuthorizedRelease, UpdateError> {
+        let major = self.0.version.license_major().ok_or(UpdateError::Invalid(
+            "this version is outside Desktop license coverage. Use the signed installer",
+        ))?;
+        if !licenses
+            .iter()
+            .any(|license| license::entitlement(license, major))
+        {
+            return Err(UpdateError::LicenseRequired(major));
         }
+        Ok(AuthorizedRelease(self.0))
     }
 }
 
-struct AuthorizedRelease {
-    manifest: VerifiedManifest,
-    _grant: UpdateGrant,
-}
+struct AuthorizedRelease(VerifiedManifest);
 
 /// Discovery is untrusted: only a constrained tag is used, never API asset URLs.
 #[derive(Deserialize)]
@@ -614,13 +624,18 @@ fn check_with(
         let installed = installed_version(current)?;
         match fetch(&installed) {
             Ok(manifest) => {
-                cache.message = if manifest.is_newer_than(&installed) {
+                cache.message = if !manifest.is_newer_than(&installed) {
+                    "Desktop is up to date.".into()
+                } else if let Some(major) = manifest.version.license_major() {
                     format!(
-                        "Desktop {} is available. Run `bk self-update`.",
+                        "Desktop {} is available. Run `bk self-update` with a license that covers {major}.x releases.",
                         manifest.version
                     )
                 } else {
-                    "Desktop is up to date.".into()
+                    format!(
+                        "Desktop {} is available. Use the signed installer.",
+                        manifest.version
+                    )
                 };
                 cache.manifest = Some(manifest.cache_record);
             }
@@ -656,11 +671,11 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
     let current = installed_version(env!("CARGO_PKG_VERSION"))?;
     let release =
         verify_manifest(&bytes, &bundle, Some(version), &Cosign)?.require_newer(&current)?;
-    let license = crate::product::load_update_license().map_err(|_| {
-        UpdateError::Invalid("activate a license covering this release's update date")
+    let licenses = crate::product::load_update_licenses().map_err(|_| {
+        UpdateError::Invalid("could not verify the Desktop license. Run `bk license` for details")
     })?;
-    let authorized = release.authorize(&license)?;
-    let version = &authorized.manifest.version;
+    let authorized = release.authorize(&licenses)?;
+    let version = &authorized.0.version;
     let target = Target::current()?;
     let name = archive_name(version, target);
     let archive = download(&asset_url(version, &name), MAX_ARCHIVE)?;
@@ -708,7 +723,7 @@ fn install(
         checksums,
         checksums_bundle,
     } = files;
-    let manifest = &release.manifest;
+    let manifest = &release.0;
     let version = &manifest.version;
     let name = archive_name(version, target);
     let artifact = manifest
@@ -887,22 +902,22 @@ mod tests {
         let bytes = serde_json::to_vec(manifest)?;
         verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier)
     }
-    fn authorize(manifest: &Manifest, current: &str) -> Result<AuthorizedRelease, Box<dyn Error>> {
+    fn fixture_license(bytes: &[u8]) -> Result<VerifiedLicense, crate::license::LicenseError> {
         let keys = crate::license::TrustedKeys::from_json(include_bytes!(
             "../tests/fixtures/license-public-keys.json"
         ))?;
-        let license = crate::license::verify_offline(
-            include_bytes!("../tests/fixtures/license.json"),
-            &keys,
-        )?;
+        crate::license::verify_offline(bytes, &keys)
+    }
+    fn authorize(manifest: &Manifest, current: &str) -> Result<AuthorizedRelease, Box<dyn Error>> {
+        let license = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
         Ok(verified(manifest)?
             .require_newer(&installed_version(current)?)?
-            .authorize(&license)?)
+            .authorize(&[license])?)
     }
     fn manifest(archive: &[u8], target: &str) -> Manifest {
         Manifest {
             schema_version: 1,
-            version: "9.10.0".into(),
+            version: "1.10.0".into(),
             released_at: "2026-11-20T00:00:00Z".parse().expect("fixture date"),
             artifacts: BTreeMap::from([(
                 target.into(),
@@ -940,7 +955,7 @@ mod tests {
         let command = cosign_command(
             Path::new("archive"),
             Path::new("bundle"),
-            &ReleaseVersion::from_str("9.10.0")?,
+            &ReleaseVersion::from_str("1.10.0")?,
         );
         let arguments: Vec<_> = command
             .get_args()
@@ -953,7 +968,7 @@ mod tests {
                 "--timeout",
                 "30s",
                 "--certificate-identity",
-                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v9.10.0",
+                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v1.10.0",
                 "--certificate-oidc-issuer",
                 "https://token.actions.githubusercontent.com",
                 "--bundle",
@@ -968,9 +983,9 @@ mod tests {
     fn signed_manifest_authenticates_exact_bytes_and_semantic_version() -> TestResult {
         let bytes = serde_json::to_vec(&manifest(b"fixture", "x86_64-unknown-linux-gnu"))?;
         let parsed = verify_manifest(&bytes, &sign(&bytes), None, &OfflineVerifier)?;
-        assert!(parsed.is_newer_than(&installed_version("9.9.99")?));
+        assert!(parsed.is_newer_than(&installed_version("1.9.99")?));
         assert!(!parsed.is_newer_than(&installed_version("10.0.0")?));
-        assert!(parsed.is_newer_than(&installed_version("9.10.0-rc.1")?));
+        assert!(parsed.is_newer_than(&installed_version("1.10.0-rc.1")?));
         let mut tampered = bytes.clone();
         tampered.push(b' ');
         assert!(verify_manifest(&tampered, &sign(&bytes), None, &OfflineVerifier).is_err());
@@ -1208,7 +1223,7 @@ mod tests {
             // including a downgrade and a switch between stable/RC channels.
             for message in [
                 "the release server could not be reached",
-                "Desktop 0.1.0-rc.7 is available. Run `bk self-update`.",
+                "Desktop 0.1.0-rc.7 is available. Use the signed installer.",
             ] {
                 let mut cached_manifest = manifest(b"fixture", "x86_64-unknown-linux-gnu");
                 cached_manifest.version = current.into();
@@ -1343,7 +1358,7 @@ mod tests {
         let cases = [
             (
                 verified(&available),
-                "Desktop 9.10.0 is available. Run `bk self-update`.",
+                "Desktop 1.10.0 is available. Run `bk self-update` with a license that covers 1.x releases.",
             ),
             (verified(&older), "Desktop is up to date."),
             (
@@ -1418,7 +1433,7 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             |_| verified(&manifest(b"fixture", "x86_64-unknown-linux-gnu")),
         )?;
-        assert!(result.contains("9.10.0 is available"));
+        assert!(result.contains("1.10.0 is available"));
         for now in [DAY, DAY + 1, 1, 2 * DAY - 1] {
             assert!(
                 check_with(
@@ -1428,7 +1443,7 @@ mod tests {
                     env!("CARGO_PKG_VERSION"),
                     |_| panic!("cache contacted network")
                 )?
-                .contains("9.10.0 is available")
+                .contains("1.10.0 is available")
             );
         }
         assert!(
@@ -1489,13 +1504,13 @@ mod tests {
         let destination = directory.path().join("bk");
         fs::write(&destination, b"old executable")?;
         let target = Target::LinuxX64;
-        let archive = archive("9.10.0", target.triple());
+        let archive = archive("1.10.0", target.triple());
         let wire = manifest(&archive, target.triple());
-        let manifest = authorize(&wire, "9.9.0")?;
+        let manifest = authorize(&wire, "1.9.0")?;
         let checksums = format!(
             "{}  {}\n",
             sha256(&archive),
-            archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
+            archive_name(&ReleaseVersion::from_str("1.10.0")?, target)
         );
         let bundle = sign(&archive);
         let checksums_bundle = sign(checksums.as_bytes());
@@ -1528,7 +1543,7 @@ mod tests {
             format!(
                 "{}  {}\n",
                 "0".repeat(64),
-                archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
+                archive_name(&ReleaseVersion::from_str("1.10.0")?, target)
             ),
             checksums.repeat(2),
             String::new(),
@@ -1574,16 +1589,16 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("bk");
         let target = Target::LinuxX64;
-        let archive = archive("9.10.0", target.triple());
+        let archive = archive("1.10.0", target.triple());
         let mut wire = manifest(&archive, target.triple());
         let artifact = wire
             .artifacts
             .get_mut(target.triple())
             .ok_or("fixture artifact")?;
         artifact.sha256.make_ascii_uppercase();
-        let name = archive_name(&ReleaseVersion::from_str("9.10.0")?, target);
+        let name = archive_name(&ReleaseVersion::from_str("1.10.0")?, target);
         let checksums = format!("{}  {name}\n", artifact.sha256);
-        let release = authorize(&wire, "9.9.0")?;
+        let release = authorize(&wire, "1.9.0")?;
         install(
             &release,
             target,
@@ -1601,12 +1616,69 @@ mod tests {
     }
 
     #[test]
-    fn release_needs_both_a_newer_version_and_a_covered_release_date() -> TestResult {
+    fn signed_release_requires_a_newer_version_and_exact_major_regardless_of_dates() -> TestResult {
         let mut wire = manifest(b"fixture", Target::LinuxX64.triple());
-        assert!(authorize(&wire, "9.9.0").is_ok());
-        assert!(authorize(&wire, "9.10.0").is_err());
-        wire.released_at = "2030-01-01T00:00:00Z".parse()?;
-        assert!(authorize(&wire, "9.9.0").is_err());
+        let license = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
+        let current = installed_version("0.1.0-rc.2")?;
+        for date in ["1990-01-01T00:00:00Z", "2090-01-01T00:00:00Z"] {
+            wire.released_at = date.parse()?;
+            for version in ["1.0.0", "1.4.2", "1.99.0-rc.1"] {
+                wire.version = version.into();
+                verified(&wire)?
+                    .require_newer(&current)?
+                    .authorize(std::slice::from_ref(&license))?;
+            }
+            wire.version = "2.0.0".into();
+            let error = verified(&wire)?
+                .require_newer(&current)?
+                .authorize(std::slice::from_ref(&license))
+                .err()
+                .ok_or("major 2 should be refused")?;
+            assert!(matches!(error, UpdateError::LicenseRequired(_)));
+            assert!(error.to_string().contains("covers 2.x releases"));
+        }
+        wire.version = "1.10.0".into();
+        assert!(
+            verified(&wire)?
+                .require_newer(&installed_version("1.10.0")?)
+                .is_err()
+        );
+        for version in ["0.1.0-rc.3", "4294967296.0.0"] {
+            wire.version = version.into();
+            assert!(
+                verified(&wire)?
+                    .require_newer(&current)?
+                    .authorize(std::slice::from_ref(&license))
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn any_active_license_can_authorize_an_installation_update() -> TestResult {
+        let major_one = fixture_license(include_bytes!("../tests/fixtures/license.json"))?;
+        let major_two = fixture_license(include_bytes!("../tests/fixtures/license-major-2.json"))?;
+        let mut wire = manifest(b"fixture", Target::LinuxX64.triple());
+        let current = installed_version("1.0.0")?;
+        assert!(matches!(
+            verified(&wire)?.require_newer(&current)?.authorize(&[]),
+            Err(UpdateError::LicenseRequired(_))
+        ));
+        let licenses = [major_one, major_two];
+        for version in ["1.10.0", "2.0.0"] {
+            wire.version = version.into();
+            verified(&wire)?
+                .require_newer(&current)?
+                .authorize(&licenses)?;
+        }
+        wire.version = "3.0.0".into();
+        assert!(matches!(
+            verified(&wire)?
+                .require_newer(&current)?
+                .authorize(&licenses),
+            Err(UpdateError::LicenseRequired(_))
+        ));
         Ok(())
     }
 
@@ -1615,12 +1687,12 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("bk");
         fs::write(&destination, b"old executable")?;
-        let version = "0.1.0-rc.10";
+        let version = "1.0.0-rc.10";
         let target = Target::LinuxX64;
         let archive = archive(version, target.triple());
         let mut manifest = manifest(&archive, target.triple());
         manifest.version = version.into();
-        let manifest = authorize(&manifest, "0.1.0-rc.2")?;
+        let manifest = authorize(&manifest, "1.0.0-rc.2")?;
         let checksums = format!(
             "{}  {}\n",
             sha256(&archive),
@@ -1657,13 +1729,13 @@ mod tests {
         let target = Target::LinuxX64;
         for bytes in [
             b"invalid tar".to_vec(),
-            archive("9.10.0", "aarch64-apple-darwin"),
+            archive("1.10.0", "aarch64-apple-darwin"),
         ] {
-            let manifest = authorize(&manifest(&bytes, target.triple()), "9.9.0")?;
+            let manifest = authorize(&manifest(&bytes, target.triple()), "1.9.0")?;
             let list = format!(
                 "{}  {}\n",
                 sha256(&bytes),
-                archive_name(&ReleaseVersion::from_str("9.10.0")?, target)
+                archive_name(&ReleaseVersion::from_str("1.10.0")?, target)
             );
             assert!(
                 install(
@@ -1691,14 +1763,14 @@ mod tests {
             .compression_method(zip::CompressionMethod::Stored);
         archive.start_file("ignored", options)?;
         archive.write_all(b"must not install")?;
-        archive.start_file("bk-9.10.0-x86_64-pc-windows-msvc/bk.exe", options)?;
+        archive.start_file("bk-1.10.0-x86_64-pc-windows-msvc/bk.exe", options)?;
         archive.write_all(b"Windows executable fixture")?;
         let bytes = archive.finish()?.into_inner();
         let mut output = NamedTempFile::new()?;
         extract_binary(
             &bytes,
             Target::WindowsX64,
-            "bk-9.10.0-x86_64-pc-windows-msvc/bk.exe",
+            "bk-1.10.0-x86_64-pc-windows-msvc/bk.exe",
             &mut output,
         )?;
         assert_eq!(fs::read(output.path())?, b"Windows executable fixture");

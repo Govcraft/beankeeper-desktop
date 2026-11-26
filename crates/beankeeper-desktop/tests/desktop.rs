@@ -101,7 +101,7 @@ fn settings_ignores_other_version_and_legacy_update_results_without_rewriting_ca
 }
 
 #[test]
-fn settings_shows_verified_license_status_and_specific_failures() -> TestResult {
+fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> TestResult {
     let ledger = Ledger::new()?;
     let directory = tempfile::tempdir()?;
     let state_dir = directory.path().join("desktop-state");
@@ -111,7 +111,6 @@ fn settings_shows_verified_license_status_and_specific_failures() -> TestResult 
         &keys_path,
         include_bytes!("fixtures/license-public-keys.json"),
     )?;
-    std::fs::write(&input_path, include_bytes!("fixtures/license.json"))?;
     let mut command = ledger.command();
     command
         .args(["serve", "--bind", "127.0.0.1:0"])
@@ -121,25 +120,61 @@ fn settings_shows_verified_license_status_and_specific_failures() -> TestResult 
     let settings = format!("{}/settings", server.base);
     assert_eq!(server.client.get(&settings).send()?.status(), 401);
     server.pair()?;
-    let activated = clean_command()
-        .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
-        .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path)
-        .args(["license", "activate"])
-        .arg(&input_path)
-        .output()?;
-    assert!(activated.status.success());
+    let license_command = || {
+        let mut command = clean_command();
+        command
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path)
+            .arg("license");
+        command
+    };
+    for (fixture, major) in [
+        (include_str!("fixtures/license.json"), 1),
+        (include_str!("fixtures/license-major-2.json"), 2),
+        (include_str!("fixtures/license.json"), 1),
+    ] {
+        std::fs::write(&input_path, fixture)?;
+        let activated = license_command()
+            .arg("activate")
+            .arg(&input_path)
+            .output()?;
+        assert!(activated.status.success());
+        assert!(
+            String::from_utf8(activated.stdout)?
+                .contains(&format!("covers all {major}.x releases"))
+        );
+    }
+    let cli = license_command().output()?;
+    assert!(cli.status.success());
+    let status = String::from_utf8(cli.stdout)?;
     let html = server.client.get(&settings).send()?.text()?;
-    assert!(html.contains("License status: active and valid."));
-    assert!(html.contains("lic_01h455vb4pex5vsknk084sn02q"));
-    assert!(html.contains("perpetual Desktop use"));
-    assert!(html.contains("2027-11-20T12:00:00+00:00 (inclusive)"));
+    assert_eq!(status.lines().count(), 3);
+    for line in status.lines() {
+        assert!(html.contains(line));
+    }
+    assert!(status.contains("License status: active and valid."));
+    for major in [1, 2] {
+        assert!(status.contains(&format!("covers all {major}.x releases forever.")));
+    }
     assert!(html.contains("Automatic update checks are disabled"));
 
-    let license_path = state_dir.join("license.json");
+    let license_path = state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02q.json");
     let original = std::fs::read_to_string(&license_path)?;
+    let tampered = original.replace("aUm3Ia_", "bUm3Ia_");
+    std::fs::write(&license_path, &tampered)?;
+    let html = server.client.get(&settings).send()?.text()?;
+    assert!(html.contains("covers all 2.x releases"));
+    assert!(!html.contains("covers all 1.x releases"));
+    assert!(
+        html.contains(
+            "One or more license files could not be verified (invalid license signature)."
+        )
+    );
+
+    std::fs::remove_file(state_dir.join("licenses/lic_01h455vb4pex5vsknk084sn02r.json"))?;
     for (license, keys, reason) in [
         (
-            original.replace("AHHH0LU", "BHHH0LU"),
+            tampered,
             include_str!("fixtures/license-public-keys.json"),
             "invalid license signature",
         ),

@@ -10,6 +10,9 @@ fn command(directory: &std::path::Path) -> Command {
         .env_remove("BEANKEEPER_LICENSE_SERVICE_URL");
     command
 }
+
+const ACTIVATION_PATH: &str = "state/licenses/lic_01h455vb4pex5vsknk084sn02q.json";
+
 #[test]
 fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tampering() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -39,16 +42,18 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
         "{}",
         String::from_utf8_lossy(&activated.stderr)
     );
-    assert!(String::from_utf8_lossy(&activated.stdout).contains("perpetual Desktop use"));
+    assert!(
+        String::from_utf8_lossy(&activated.stdout).contains("covers all 1.x releases forever.")
+    );
     assert!(
         String::from_utf8_lossy(&activated.stdout).contains("License status: active and valid.")
     );
     let status = command(directory).arg("license").output()?;
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("2027-11-20T12:00:00+00:00"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("covers all 1.x releases"));
     assert!(String::from_utf8_lossy(&status.stdout).contains("License status: active and valid."));
-    let original = fs::read(directory.join("state/license.json"))?;
-    let tampered = String::from_utf8(original.clone())?.replace("AHHH0LU", "BHHH0LU");
+    let original = fs::read(directory.join(ACTIVATION_PATH))?;
+    let tampered = String::from_utf8(original.clone())?.replace("aUm3Ia_", "bUm3Ia_");
     fs::write(directory.join("input.json"), tampered)?;
     let rejected = command(directory)
         .args(["license", "activate"])
@@ -56,7 +61,7 @@ fn license_cli_activates_fixture_shows_perpetual_entitlement_and_rejects_tamperi
         .output()?;
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("signature"));
-    assert_eq!(fs::read(directory.join("state/license.json"))?, original);
+    assert_eq!(fs::read(directory.join(ACTIVATION_PATH))?, original);
     assert!(!directory.join("state/updates.json").exists());
     Ok(())
 }
@@ -80,11 +85,11 @@ fn stored_license_verification_failures_never_report_active_status() -> TestResu
             .status()?
             .success()
     );
-    let stored_path = directory.join("state/license.json");
+    let stored_path = directory.join(ACTIVATION_PATH);
     let original = fs::read_to_string(&stored_path)?;
     for (stored, keys, reason) in [
         (
-            original.replace("AHHH0LU", "BHHH0LU"),
+            original.replace("aUm3Ia_", "bUm3Ia_"),
             include_str!("fixtures/license-public-keys.json"),
             "invalid license signature",
         ),
@@ -109,6 +114,28 @@ fn stored_license_verification_failures_never_report_active_status() -> TestResu
     assert!(!directory.join("state/updates.json").exists());
     Ok(())
 }
+
+#[test]
+fn schema_one_activation_is_refused_at_the_legacy_location() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let directory = dir.path();
+    let legacy = directory.join("state/license.json");
+    fs::write(
+        directory.join("keys.json"),
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    fs::create_dir(directory.join("state"))?;
+    let mut file = tempfile::NamedTempFile::new_in(directory.join("state"))?;
+    std::io::Write::write_all(&mut file, include_bytes!("fixtures/license-v1.json"))?;
+    beankeeper_desktop::setup::keychain::restrict_file(file.path())?;
+    file.persist(&legacy)?;
+    let status = command(directory).arg("license").output()?;
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stderr).contains("unsupported schema"));
+    assert!(!String::from_utf8_lossy(&status.stdout).contains("active and valid"));
+    Ok(())
+}
+
 #[test]
 fn opt_out_and_self_update_refuse_network_and_leave_no_cache() -> TestResult {
     let dir = tempfile::tempdir()?;
