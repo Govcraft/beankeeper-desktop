@@ -2,6 +2,7 @@
 """Build Desktop release assets. No credentials or third-party Python packages needed."""
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -76,6 +77,88 @@ def version(tag=None, *, check_changelog=False):
     if tag is not None or check_changelog:
         validate_release_changelog(value)
     return value
+
+
+def strict_json(data):
+    """Reject ambiguous duplicate members at the untrusted JSON boundary."""
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON member: {key}")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=object_pairs)
+
+
+def base64url(value, size=None):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("expected unpadded base64url")
+    decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    if base64.urlsafe_b64encode(decoded).decode().rstrip("=") != value:
+        raise ValueError("noncanonical base64url")
+    if size is not None and len(decoded) != size:
+        raise ValueError(f"expected {size} decoded bytes")
+    return decoded
+
+
+def validate_release_revocations(release_version):
+    """Stable tag preflight: authenticate the issuer export before any builds."""
+    if is_prerelease(release_version):
+        return
+    path = ROOT / "packaging/revocations.json"
+    try:
+        with path.open("rb") as source:
+            data = source.read(4 * 1024 * 1024 + 1)
+        if not data or len(data) > 4 * 1024 * 1024:
+            raise ValueError("snapshot must contain 1 byte through 4 MiB")
+        envelope = strict_json(data)
+        if not isinstance(envelope, dict) or set(envelope) != {"format", "key_id", "payload", "signature"}:
+            raise ValueError("expected format, key_id, payload and signature")
+        if envelope["format"] != "beankeeper-revocations-v1":
+            raise ValueError("unsupported revocation format")
+        kid = envelope["key_id"]
+        if not isinstance(kid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", kid):
+            raise ValueError("invalid issuer key ID")
+        config = strict_json((ROOT / "packaging/license-embed.json").read_bytes())
+        keys = strict_json(os.environ["BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON"]) if os.environ.get(
+            "BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON") else config["public_keys"]
+        if kid not in keys:
+            raise ValueError("unknown issuer key ID")
+        key = base64url(keys[kid], 32)
+        signature = base64url(envelope["signature"], 64)
+        payload = base64url(envelope["payload"])
+        message = f"{envelope['format']}\n{kid}\n{envelope['payload']}".encode()
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            # RFC 8410 SubjectPublicKeyInfo wrapper for an Ed25519 public key.
+            (work / "key.der").write_bytes(bytes.fromhex("302a300506032b6570032100") + key)
+            (work / "signature").write_bytes(signature)
+            (work / "message").write_bytes(message)
+            subprocess.run([
+                "openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+                "-inkey", str(work / "key.der"), "-rawin",
+                "-in", str(work / "message"), "-sigfile", str(work / "signature"),
+            ], check=True, capture_output=True)
+        claims = strict_json(payload)
+        if not isinstance(claims, dict) or set(claims) != {"generated_at", "revoked_license_ids"}:
+            raise ValueError("expected generated_at and revoked_license_ids")
+        timestamp = claims["generated_at"]
+        if not isinstance(timestamp, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})", timestamp
+        ):
+            raise ValueError("expected RFC 3339 generation time")
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        ids = claims["revoked_license_ids"]
+        if not isinstance(ids, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"lic_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}", value)
+            for value in ids
+        ):
+            raise ValueError("expected canonical lic_ TypeIDs")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+        raise ValueError(
+            f"stable release requires valid packaging/revocations.json from export-revocations: {error}"
+        ) from error
 
 
 def name(release_version, target):
@@ -363,7 +446,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("command", choices=["version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--tag")
     parser.add_argument(
         "--check-changelog", action="store_true",
@@ -388,6 +471,9 @@ def main():
         return
     try:
         release_version = version(args.tag, check_changelog=args.check_changelog)
+        if args.command == "revocations":
+            validate_release_revocations(release_version)
+            return
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.command == "version":

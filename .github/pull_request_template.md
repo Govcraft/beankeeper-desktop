@@ -16,3 +16,7 @@ Tenets: <!-- Name the tenets this change touches. -->
 <!-- List the checks you ran and their results. -->
 
 - [ ] Local CI checks passed.
+
+For a PM release PR:
+
+- [ ] Stable release: commit a fresh issuer `export-revocations` output as `packaging/revocations.json` and run `python3 scripts/release.py revocations` (not required for RC releases). See [release preparation](../docs/RELEASE.md#preparing-a-release-pr).

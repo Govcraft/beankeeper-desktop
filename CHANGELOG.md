@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fail stable release preflight before packaging when the issuer-signed revocation snapshot is missing or invalid.
+
 - Report stale Claude extensions through CLI and MCP and open signed upgrades with in-process verification, trust-rotation recovery, and restart guidance.
 - Report absent and already-returned licenses with receipt evidence through CLI and MCP, and give CLI-specific return retry guidance.
 

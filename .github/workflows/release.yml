@@ -52,6 +52,12 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Require an issuer-signed revocation snapshot for stable tags
+        if: github.event_name == 'push' && steps.version.outputs.prerelease == 'false'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON: ${{ vars.BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON }}
+        run: python scripts/release.py revocations --tag "$RELEASE_TAG"
       - run: python -B -m unittest discover -s scripts/tests -v
       - name: Select every release target
         id: plan

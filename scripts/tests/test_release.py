@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import importlib.util
 import io
@@ -28,6 +29,82 @@ class PackagingTests(unittest.TestCase):
         self.binary.write_bytes(b"embedded UI and executable\n")
         self.output = self.root / "dist"
         self.output.mkdir()
+
+    def test_release_workflow_checks_stable_tags_in_preflight(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        preflight, packaging = workflow.split("\n  packaging:", 1)
+        self.assertIn("if: github.event_name == 'push' && steps.version.outputs.prerelease == 'false'", preflight)
+        self.assertIn('python scripts/release.py revocations --tag "$RELEASE_TAG"', preflight)
+        self.assertIn("needs: preflight", packaging)
+
+    def test_stable_revocations_accept_committed_issuer_export(self):
+        with patch.dict(os.environ, {"BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON": ""}):
+            release.validate_release_revocations("1.0.1")
+
+    def test_stable_revocations_fail_closed_and_rc_skips(self):
+        packaging = self.root / "packaging"
+        packaging.mkdir()
+        snapshot = packaging / "revocations.json"
+        shutil.copy2(ROOT / "packaging/license-embed.json", packaging)
+        original = json.loads((ROOT / "packaging/revocations.json").read_text())
+        with patch.object(release, "ROOT", self.root), patch.dict(os.environ, {
+            "BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON": "",
+        }):
+            release.validate_release_revocations("1.0.0-rc.1")
+            with self.assertRaisesRegex(ValueError, "export-revocations"):
+                release.validate_release_revocations("1.0.0")
+            invalid = dict(original, signature="A" * 86)
+            cases = [b"", b"{", b"{}", b"[]", b"x" * (4 * 1024 * 1024 + 1),
+                     json.dumps(invalid).encode(),
+                     json.dumps(dict(original, key_id="unknown")).encode(),
+                     json.dumps(dict(original, format="unknown")).encode(),
+                     json.dumps(dict(original, extra=True)).encode(),
+                     json.dumps(dict(original, payload="bad=")).encode(),
+                     b'{"format":1,"format":2}']
+            for data in cases:
+                with self.subTest(data=data[:100]):
+                    snapshot.write_bytes(data)
+                    with self.assertRaisesRegex(ValueError, "export-revocations"):
+                        release.validate_release_revocations("1.0.0")
+                    release.validate_release_revocations("1.0.0-rc.1")
+
+    def test_stable_revocations_authenticate_and_validate_claims(self):
+        packaging = self.root / "packaging"
+        packaging.mkdir()
+        private = self.root / "private.pem"
+        public = self.root / "public.der"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private)], check=True)
+        subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-outform", "DER",
+                        "-out", str(public)], check=True)
+        def encode(data):
+            return base64.urlsafe_b64encode(data).decode().rstrip("=")
+        keys = {"test": encode(public.read_bytes()[-32:])}
+        (packaging / "license-embed.json").write_text(json.dumps({"public_keys": keys}))
+        valid = {"generated_at": "2026-11-26T12:00:00Z", "revoked_license_ids": []}
+        cases = [valid, dict(valid, revoked_license_ids=["lic_01h455vb4pex5vsknk084sn02q"]),
+                 dict(valid, generated_at="yesterday"), dict(valid, generated_at="2026-02-30T00:00:00Z"),
+                 dict(valid, revoked_license_ids=["bad"]), dict(valid, revoked_license_ids={}),
+                 dict(valid, extra=True), {"revoked_license_ids": []}]
+        with patch.object(release, "ROOT", self.root), patch.dict(os.environ, {
+            "BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON": "",
+        }):
+            for index, claims in enumerate(cases):
+                payload = encode(json.dumps(claims).encode())
+                message = self.root / "message"
+                signature = self.root / "signature"
+                message.write_text(f"beankeeper-revocations-v1\ntest\n{payload}")
+                subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(private),
+                                "-in", str(message), "-out", str(signature)], check=True)
+                (packaging / "revocations.json").write_text(json.dumps({
+                    "format": "beankeeper-revocations-v1", "key_id": "test", "payload": payload,
+                    "signature": encode(signature.read_bytes()),
+                }))
+                with self.subTest(claims=claims):
+                    if index < 2:
+                        release.validate_release_revocations("1.0.0")
+                    else:
+                        with self.assertRaisesRegex(ValueError, "export-revocations"):
+                            release.validate_release_revocations("1.0.0")
 
     def test_pr_keeps_version_and_adds_unreleased_notes(self):
         (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.3"\n')
