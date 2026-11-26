@@ -2,9 +2,15 @@
 
 These Desktop commands do not open a ledger or migrate its schema. The
 `license` module owns signature verification, atomic activation and entitlement;
-the `updates` module owns release verification and installation. `bk serve`
-continues to work without an activation while final licensing terms are pending.
-An expired update window does not disable perpetual use.
+the `updates` module owns release verification and installation. This reference
+describes the commands available in current release candidates. Release
+candidates run without activation, and self-update currently uses the v1 signed
+release-date limit. The approved 1.0 terms cover every 1.x release under a 1.x
+license and reserve read-only mode for official non-RC releases from 1.0.0 onward
+after the terms are final. [Beankeeper Desktop license agreement](../LICENSE.md)
+
+See the issues tracking [major-version update eligibility](https://github.com/Govcraft/beankeeper-desktop/issues/169)
+and [read-only mode](https://github.com/Govcraft/beankeeper-desktop/issues/168).
 
 ## Configure issuer trust
 

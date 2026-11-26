@@ -455,11 +455,27 @@ tests the latest upstream commit on each pull request, push to `main`, and daily
 
 ## License and updates
 
-`bk license` shows the local entitlement. Activate a D10 license offline with
-`bk license activate /path/to/license.json`. Updates through the signed deadline
-are included; use of an installed eligible release is perpetual. Desktop does
-not contact the license service after activation. Final Desktop licensing terms
-remain Roland's decision; this preview adds no runtime lockout.
+Beankeeper Desktop 1.0 costs **$79 one time** per license and covers every 1.x
+release for perpetual use. Each license covers one set of books on one computer
+at a time. Bookkeepers need a license for each client's books, even on the same
+computer. If you return your license in the app within 60 days of purchase, the
+original seller automatically issues a full refund, including purchases through
+authorized resellers. The Texas-governed agreement keeps Desktop source-available
+and the Beankeeper ledger and core agent tools open source.
+[Beankeeper Desktop license agreement](LICENSE.md)
+
+Under the agreement, read-only mode for books without an active license applies
+only to official non-RC releases from 1.0.0 onward, after the terms are final.
+Release candidates are free to use without a license. You can still open, query,
+export, back up, and restore your books in read-only mode, and use your recovery
+kit. Your encrypted books stay on your computer.
+
+Current release candidates use the v1 signed update deadline. See the issues
+tracking [major-version update eligibility](https://github.com/Govcraft/beankeeper-desktop/issues/169)
+and [read-only mode](https://github.com/Govcraft/beankeeper-desktop/issues/168).
+To activate a downloaded license offline, run
+`bk license activate /path/to/license.json`. Run `bk license` to check its status
+locally.
 
 Both `bk license` and **License and updates** (`/settings`) explicitly show
 `active and valid` after offline verification. The update window is shown

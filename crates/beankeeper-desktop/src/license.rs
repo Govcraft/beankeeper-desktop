@@ -1,8 +1,7 @@
 //! Offline Desktop entitlements, isolated from ledger and HTTP behavior.
 //!
-//! This boundary can be replaced without rewriting `bk serve`. Final Desktop
-//! licensing terms remain Roland's decision. No signing secret or public test
-//! verification key is trusted by default, and verification never phones home.
+//! The current v1 format uses a signed release-date limit for update eligibility.
+//! Verification uses local bytes and a separately configured public key.
 
 use std::{
     collections::BTreeMap,
