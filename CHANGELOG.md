@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.32] - 2026-11-25
+
 ## [0.1.0-rc.31] - 2026-11-25
 
 - Verify Beankeeper in the current local Codex chat before asking for a restart, and report when a Codex connection is turned off.
