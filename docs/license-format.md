@@ -95,10 +95,11 @@ and publicly accessible license files are refused. Loading re-verifies local
 bytes and performs no HTTP requests.
 
 The command reference describes configuration and the per-user storage path.
-The boundary can be replaced or stubbed without rewriting `bk serve`. Final
-commercial terms and the choice between source-available and fully open Desktop
-licensing remain Roland's decision. This implementation does not impose a new
-runtime lockout policy.
+The v1 format describes current release candidate behavior. The approved 1.0
+terms specify update eligibility by major version and a signed seat count of
+one. [Beankeeper Desktop license agreement](../LICENSE.md)
+
+See the issue tracking [Desktop support for the new format](https://github.com/Govcraft/beankeeper-desktop/issues/169).
 
 ## Optional redemption
 

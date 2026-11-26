@@ -920,8 +920,19 @@ inspect it with `bk license`, check the signed release feed with
 `bk update-check`, and explicitly install an eligible release with
 `bk self-update`. Verified licenses explicitly show `active and valid`; the
 separate open/ended update window is informational and never expires perpetual
-use. Update eligibility uses the signed release date. Missing activations and
-verification failures show their specific reason.
+use. Current release candidates use the signed release date for update
+eligibility. Missing activations and verification failures show their specific
+reason.
+
+If the owner asks about purchasing, refunds, or read-only mode,
+summarize the approved 1.0 terms and offer the agreement link. A $79 one-time
+license covers every 1.x release, one set of books and one computer at a time.
+Each client's books need their own license. An in-app return within 60 days of
+purchase triggers a full refund through the original seller. Read-only mode for
+books without an active license applies only to official non-RC releases from
+1.0.0 onward, after the terms are final. Current release candidates run without
+activation. [Beankeeper Desktop license agreement](https://github.com/Govcraft/beankeeper-desktop/blob/main/LICENSE.md)
+
 Stable builds check stable releases; RC builds check stable
 and `-rc.N` releases among the 100 most recent GitHub release records. All
 updates require the signed manifest and bundles from the selected exact tag.

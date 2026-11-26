@@ -293,11 +293,13 @@ release assets. Dry runs produce unsigned metadata only. Schema version 1 is:
 ```
 
 `released_at` is the UTC timestamp of the release tag's source commit, emitted
-from Git metadata by the release workflow. This signed timestamp supplies the
-inclusive license update-window comparison. It is independent of the client
-clock. The artifacts map covers the available archive targets from the matrix;
-archive names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. OS installers are not
-self-update inputs.
+from Git metadata by the release workflow. The current v1 license format uses
+this signed timestamp for the inclusive update-window comparison, independently
+of the client clock. The approved 1.0 license terms use major-version eligibility.
+[Beankeeper Desktop license agreement](../LICENSE.md) · [Major-version eligibility issue](https://github.com/Govcraft/beankeeper-desktop/issues/169)
+
+The artifacts map covers the available archive targets from the matrix. Archive
+names remain `bk-VERSION-TARGET.tar.gz` or `.zip`. Self-update uses these archives.
 
 Stable clients discover GitHub's latest stable release. RC clients select the
 highest stable or `-rc.N` semantic version among the 100 most recent release
