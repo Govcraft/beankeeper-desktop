@@ -180,7 +180,6 @@ def exercise(target, artifacts, published):
         sandbox = Path(temporary).resolve()
         home = sandbox / "profile"
         codex = home / ".codex"
-        codex.mkdir(parents=True)
         (home / ".claude").mkdir()
         env = dict(os.environ)
         config = native_config(env, sandbox)
@@ -236,9 +235,12 @@ curl() {
                 raise RuntimeError("the first-run service did not create the isolated books and recovery kit")
             if recovery.stat().st_mode & 0o077:
                 raise RuntimeError("the recovery kit must be private to the owner")
-            doctor = json.loads(command([binary, "agents", "doctor", "codex", "--json"], env).stdout)
+            assert not (codex / "config.toml").exists()
+            command([binary, "agents", "connect", "chatgpt-codex", "--json"], env)
+            doctor = json.loads(command([binary, "agents", "doctor", "chatgpt-codex", "--json"], env).stdout)
             if doctor["data"]["agents"][0]["state"] != "configured" or doctor["data"]["service"]["state"] != "ready":
                 raise RuntimeError("the guide did not configure a usable agent connection")
+            command([binary, "agents", "connect", "--all", "--json"], env)
             check_claude_code_connection(home, binary, env)
         finally:
             if binary.is_file():

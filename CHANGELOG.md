@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Verify Beankeeper in the current local Codex chat before asking for a restart, and report when a Codex connection is turned off.
 - Verify schema 2 Desktop licenses offline and authorize signed self-updates by the major version covered by any active license.
 - Use verified local backups to open older books for CLI and MCP, and report schema mismatches with a named error and version details.
 - Publish the approved Beankeeper Desktop 1.0 license and align the licensing documentation.

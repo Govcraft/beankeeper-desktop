@@ -426,7 +426,7 @@ sys.exit({1 if fail else 0})
                 self.assertTrue(separator, f"missing installation section: {heading}")
                 self.assertNotRegex(rest.split("\n## ", 1)[0], r"\b(?:v)?[0-9]+\.[0-9]+\.[0-9]+\b")
 
-    def test_skill_commands_install_verified_binary_and_connect(self):
+    def test_skill_commands_install_verified_binary_and_start_service(self):
         match = re.search(r"```sh\n(.*?)```", (ROOT / "SKILL.md").read_text(), re.DOTALL)
         self.assertIsNotNone(match, "missing Linux/macOS command block")
         script = self.root / "skill.sh"
@@ -478,7 +478,7 @@ else:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue((fake_home / ".local/bin/bk").exists())
                 self.assertEqual(expected.read_text().splitlines(), [
-                    "service install --no-agents", "agents connect --all --json", "service status --json",
+                    "service install --no-agents", "service status --json",
                 ])
                 expected.unlink()
 

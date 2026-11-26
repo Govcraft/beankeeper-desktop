@@ -123,11 +123,10 @@ Run `bk agents connect claude-code` to register or refresh the Claude Code
 connection and skill. Existing entries with the managed command and arguments
 can include `"type": "stdio"` and an empty `env`.
 
-To use Beankeeper with ChatGPT, choose **Codex** and **This computer** in the
-ChatGPT desktop app. Ask Codex to install Beankeeper by following
-`https://beankeeper.app/install.md`. The agent can register an existing install
-with `bk agents connect chatgpt-codex`. See the connection check and supported
-ChatGPT surfaces in [Use Beankeeper with local Codex](docs/chatgpt.md).
+In the ChatGPT desktop app, choose **Codex**, then **Work in → This computer**.
+Say **Install Beankeeper for me by following https://beankeeper.app/install.md**.
+Codex handles the local install and connection. See how to check the connection
+and start your books in [Use Beankeeper with local Codex](docs/chatgpt.md).
 
 If Beankeeper is already available, ask your agent to install or upgrade the
 Claude Desktop extension, or run `bk agents extension`. The command requires

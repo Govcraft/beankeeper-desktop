@@ -7,20 +7,20 @@ use std::{
 };
 
 use jsonc_parser::cst::{CstObject, CstObjectProp, CstRootNode};
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value, value};
 
 use crate::agent_skill::SKILL;
 
 use super::{
     AgentError,
-    adapters::{Adapter, ConfigFormat},
+    adapters::{Adapter, ConfigFormat, TomlClient},
 };
 
 mod env_overrides;
 mod json;
 
 pub(super) use json::ServerConflict;
-use json::{JsonClient, ManagedServer, ParsedServer};
+use json::{ConflictField, JsonClient, ManagedServer, ParsedServer};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const SKILL_MARKER: &str = "\n<!-- Managed by Beankeeper Desktop agent registration. -->\n";
@@ -35,6 +35,38 @@ pub(super) enum Registration {
 enum OwnedEntry {
     Canonical,
     NeedsRewrite,
+    Disabled,
+}
+
+#[derive(Default)]
+enum CodexServerActivation {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+impl TryFrom<Option<&Item>> for CodexServerActivation {
+    type Error = ServerConflict;
+
+    fn try_from(field: Option<&Item>) -> Result<Self, Self::Error> {
+        match field {
+            None => Ok(Self::default()),
+            Some(field) => match field.as_bool() {
+                Some(true) => Ok(Self::Enabled),
+                Some(false) => Ok(Self::Disabled),
+                None => Err(ConflictField::Unknown("enabled").into()),
+            },
+        }
+    }
+}
+
+impl From<CodexServerActivation> for OwnedEntry {
+    fn from(activation: CodexServerActivation) -> Self {
+        match activation {
+            CodexServerActivation::Enabled => Self::Canonical,
+            CodexServerActivation::Disabled => Self::Disabled,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -177,8 +209,14 @@ fn write_private(path: &Path, content: &[u8], mode: WriteMode) -> io::Result<()>
 }
 
 enum Document {
-    Json { root: CstRootNode, kind: JsonClient },
-    Toml(DocumentMut),
+    Json {
+        root: CstRootNode,
+        kind: JsonClient,
+    },
+    Toml {
+        document: DocumentMut,
+        client: TomlClient,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -219,15 +257,54 @@ fn property(
     Ok(first)
 }
 
+fn owned_toml_entry(
+    fields: &dyn TableLike,
+    client: TomlClient,
+    executables: KnownExecutables<'_>,
+    server: Server,
+    path: &Path,
+) -> Result<OwnedEntry, AgentError> {
+    let codex = matches!(client, TomlClient::Codex);
+    let allowed = fields
+        .iter()
+        .all(|(key, _)| matches!(key, "command" | "args") || codex && key == "enabled");
+    let command_matches = fields
+        .get("command")
+        .and_then(Item::as_str)
+        .is_some_and(|command| executables.matches(command));
+    let args_match = fields
+        .get("args")
+        .and_then(Item::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .map(Value::as_str)
+                .eq(server.arguments().iter().copied().map(Some))
+        });
+    if !(allowed && command_matches && args_match) {
+        return Err(AgentError::Conflict(path.into()));
+    }
+    CodexServerActivation::try_from(fields.get("enabled"))
+        .map(OwnedEntry::from)
+        .map_err(|reason| AgentError::RegistrationConflict {
+            path: path.into(),
+            server: server.name(),
+            reason,
+        })
+}
+
 impl Document {
     fn parse(file: &FileSnapshot, format: &ConfigFormat) -> Result<Self, AgentError> {
         let invalid = || AgentError::Invalid(file.path.clone());
         let kind = match format {
-            ConfigFormat::Toml => {
+            ConfigFormat::Toml(client) => {
                 return file
                     .contents()
                     .parse()
-                    .map(Self::Toml)
+                    .map(|document| Self::Toml {
+                        document,
+                        client: *client,
+                    })
                     .map_err(|_| invalid());
             }
             ConfigFormat::Json => JsonClient::Standard,
@@ -270,36 +347,18 @@ impl Document {
                         reason,
                     })
             }
-            Self::Toml(toml) => {
-                let Some(servers) = toml.get("mcp_servers") else {
+            Self::Toml { document, client } => {
+                let Some(servers) = document.get("mcp_servers") else {
                     return Ok(None);
                 };
                 let servers = servers.as_table_like().ok_or_else(invalid)?;
                 let Some(entry) = servers.get(server.name()) else {
                     return Ok(None);
                 };
-                let owned = entry.as_table_like().is_some_and(|fields| {
-                    fields.len() == 2
-                        && fields
-                            .get("command")
-                            .and_then(Item::as_str)
-                            .is_some_and(|command| executables.matches(command))
-                        && fields
-                            .get("args")
-                            .and_then(Item::as_array)
-                            .is_some_and(|items| {
-                                items.len() == server.arguments().len()
-                                    && items
-                                        .iter()
-                                        .zip(server.arguments())
-                                        .all(|(item, argument)| item.as_str() == Some(*argument))
-                            })
-                });
-                if owned {
-                    Ok(Some(OwnedEntry::Canonical))
-                } else {
-                    Err(AgentError::Conflict(path.into()))
-                }
+                let fields = entry
+                    .as_table_like()
+                    .ok_or_else(|| AgentError::Conflict(path.into()))?;
+                owned_toml_entry(fields, *client, executables, server, path).map(Some)
             }
         }
     }
@@ -313,6 +372,9 @@ impl Document {
         let mut changed = false;
         for server in Server::ALL {
             match (change, self.owned_entry(executables, server, path)?) {
+                (Change::Connect, Some(OwnedEntry::Disabled)) => {
+                    return Err(AgentError::ServerDisabled(server.name()));
+                }
                 (Change::Connect, None | Some(OwnedEntry::NeedsRewrite))
                 | (Change::Disconnect, Some(_)) => {
                     self.edit(executables.current, server, change, path)?;
@@ -329,7 +391,7 @@ impl Document {
                 }
                 text
             }
-            Self::Toml(toml) => toml.to_string(),
+            Self::Toml { document, .. } => document.to_string(),
         }))
     }
 
@@ -360,11 +422,11 @@ impl Document {
                     }
                 }
             }
-            Self::Toml(toml) => {
-                if !toml.contains_key("mcp_servers") {
-                    toml["mcp_servers"] = Item::Table(Table::new());
+            Self::Toml { document, .. } => {
+                if !document.contains_key("mcp_servers") {
+                    document["mcp_servers"] = Item::Table(Table::new());
                 }
-                let servers = toml["mcp_servers"]
+                let servers = document["mcp_servers"]
                     .as_table_like_mut()
                     .ok_or_else(invalid)?;
                 match change {
@@ -396,11 +458,17 @@ impl Adapter {
         let document = Document::parse(&snapshot, &self.format)?;
         let ledger = document.owned_entry(binary.into(), Server::Ledger, &self.config)?;
         let lifecycle = document.owned_entry(binary.into(), Server::Lifecycle, &self.config)?;
-        Ok(match (ledger, lifecycle) {
-            (Some(_), Some(_)) => Registration::Owned,
-            (None, None) => Registration::Missing,
-            _ => Registration::Partial,
-        })
+        match (ledger, lifecycle) {
+            (Some(OwnedEntry::Disabled), _) => {
+                Err(AgentError::ServerDisabled(Server::Ledger.name()))
+            }
+            (_, Some(OwnedEntry::Disabled)) => {
+                Err(AgentError::ServerDisabled(Server::Lifecycle.name()))
+            }
+            (Some(_), Some(_)) => Ok(Registration::Owned),
+            (None, None) => Ok(Registration::Missing),
+            _ => Ok(Registration::Partial),
+        }
     }
 
     pub(super) fn skill_available(&self) -> Result<bool, AgentError> {
@@ -494,7 +562,7 @@ mod tests {
 
     fn sample(format: &ConfigFormat) -> &'static str {
         match format {
-            ConfigFormat::Toml => {
+            ConfigFormat::Toml(_) => {
                 "# Personal settings\nmodel = \"personal\"\n[mcp_servers.example]\ncommand = \"example\"\n"
             }
             ConfigFormat::Json => {
