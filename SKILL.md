@@ -982,6 +982,10 @@ window has closed, the return is not accepted, your license stays active and
 nothing changes." Say that confirming requests the return and refund; paid
 features stop on this computer on success; the books stay theirs and readable;
 the books are never touched. Do not infer eligibility from local dates.
+If no license is installed, report `no_license_installed` as nothing to return.
+If the result is `already_returned`, share the saved receipt ID; no further return
+is needed. `choose_license` applies only when several licenses are installed.
+
 Use `license_return` on the local lifecycle connection. Supported clients elicit
 the single confirmation. Otherwise convey the tool's explanation and call again
 with `confirm: true` only after the owner confirms. Select `license_id` when

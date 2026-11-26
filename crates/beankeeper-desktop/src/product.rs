@@ -486,6 +486,7 @@ fn run_return(
             .unwrap_or_else(|never| match never {});
         response = returns::ReturnRequest::new(license_id, confirmed).execute();
     }
+    let response = response.into_cli();
     if json {
         println!("{}", serde_json::json!(response));
     } else {
