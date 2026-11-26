@@ -957,9 +957,9 @@ activation. When a tool returns `LEDGER_WRITE_DENIED`, tell the owner why these
 books are read-only and that reads, exports, backups, restore and recovery still
 work. For the running Desktop's books, `license_status` returns plain words and
 an optional settings link. Offer `https://beankeeper.app` to buy a license or
-explain how the owner can activate one for these books. For an audited undo,
-offer the existing owner undo link or use `bk audit undo` with the appropriate
-credential. [Beankeeper Desktop license agreement](https://github.com/Govcraft/beankeeper-desktop/blob/main/LICENSE.md)
+explain how the owner can activate one for these books. Use `audit_undo` or
+`bk audit undo` for an audited undo the agent is authorized to perform.
+[Beankeeper Desktop license agreement](https://github.com/Govcraft/beankeeper-desktop/blob/main/LICENSE.md)
 
 Stable builds check stable releases; RC builds check stable
 and `-rc.N` releases among the 100 most recent GitHub release records. All

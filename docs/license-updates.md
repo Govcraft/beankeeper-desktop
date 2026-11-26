@@ -9,8 +9,8 @@ without activation. [Beankeeper Desktop license agreement](../LICENSE.md)
 Official stable releases from 1.0.0 apply read-only mode to each set of books
 whose license is missing, invalid, revoked or for another major version.
 Reads, exports, backups, restores, restore undo and recovery are available.
-Existing authorization still applies. The owner can use the audited undo link
-in Changes or run `bk audit undo` with the appropriate credential.
+Agents with existing authorization can undo an audited change with `audit_undo`
+over MCP or `bk audit undo` in the CLI. Owners can also undo from Changes.
 
 ## Configure issuer trust
 
