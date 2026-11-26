@@ -1,17 +1,17 @@
 import hashlib
-import os
-import sys
 import importlib.util
 import io
 import json
-from pathlib import Path
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
 import zipfile
+from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
@@ -292,7 +292,7 @@ class PackagingTests(unittest.TestCase):
             "Do not infer roles from a display name or amount sign",
             "If the chart client cannot",
             "table instead of a",
-            "−$500.00",
+            "\u2212$500.00",
             "**fictional**",
         ):
             with self.subTest(requirement=requirement):
