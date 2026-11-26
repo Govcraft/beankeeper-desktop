@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-26
+
+- Release Beankeeper Desktop 1.0, the first stable release: a $79 one-time license per computer covers all 1.x releases, with a 60-day in-app return.
+
 ## [0.1.0-rc.33] - 2026-11-26
 
 - Guide conversation charts to distinguish debt from cash and use neutral or warning colors for negative net worth.
