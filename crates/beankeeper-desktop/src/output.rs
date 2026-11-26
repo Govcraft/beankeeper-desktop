@@ -38,12 +38,7 @@ impl<C> Envelope<C, (), EnvelopeError> {
             ok: false,
             meta,
             data: None,
-            error: Some(EnvelopeError {
-                code: error.code(),
-                message: error.to_string(),
-                // Desktop setup status and audit commands cannot reconcile statements.
-                details: None,
-            }),
+            error: Some(EnvelopeError::from(error)),
         }
     }
 }

@@ -250,6 +250,11 @@ Desktop backs up the local books and their documents automatically. Tell the
 owner when the available backups were taken using `backup_list`. Take an
 extra backup with `backup_create` when asked.
 
+A backup with reason `before_migration` preserves the books from before a
+format upgrade. If you receive `SCHEMA_MISMATCH`, use the provided versions
+to explain that the books need an upgrade. Opening the books for normal
+ledger use takes and verifies a local backup before upgrading them.
+
 When the owner asks you to restore a backup, identify it with `backup_list`,
 then call `backup_restore` with its `backup_id`. Say what changed, give the
 receipt, and offer to put the previous books back. Use `backup_undo` with the

@@ -342,8 +342,5 @@ impl HostToolHandler for DesktopTools {
 }
 
 pub(crate) fn tool_error(error: &CliError) -> CallToolResult {
-    CallToolResult::structured_error(serde_json::json!({
-        "code": error.error_code(),
-        "message": error.to_string(),
-    }))
+    CallToolResult::structured_error(serde_json::json!(EnvelopeError::from(error)))
 }

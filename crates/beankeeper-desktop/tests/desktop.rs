@@ -14,6 +14,7 @@ use std::{
 
 use beankeeper_cli::{
     db::{Actor, Db, current_schema_version, get_schema_version},
+    error::CliError,
     identity,
 };
 use beankeeper_desktop::browser;
@@ -399,8 +400,24 @@ fn serve_migrates_an_existing_encrypted_ledger_before_opening_snapshots() -> Tes
     let passphrase = fixture_passphrase.into();
     assert!(matches!(
         Db::open_snapshot(&path, Some(&passphrase)),
-        Err(beankeeper_cli::error::CliError::Database(_))
+        Err(CliError::SchemaMismatch { stored, expected })
+            if i64::from(stored) == 1 && expected == current_schema_version()
     ));
+
+    let backup_list = clean_command()
+        .arg("--db")
+        .arg(&path)
+        .arg("--passphrase-file")
+        .arg(&passphrase_file)
+        .args(["--json", "backups", "list"])
+        .output()?;
+    assert_eq!(backup_list.status.code(), Some(4));
+    let error = &serde_json::from_slice::<Value>(&backup_list.stderr)?["error"];
+    assert_eq!(error["code"], "SCHEMA_MISMATCH");
+    assert_eq!(
+        error["details"],
+        json!({"stored": 1, "expected": current_schema_version()})
+    );
 
     let current = Db::open_in_memory()?;
     let expected_version = get_schema_version(current.read())?;
@@ -775,23 +792,78 @@ fn startup_errors_do_not_create_ledgers_and_bind_consent_is_checked_first() -> T
 #[test]
 fn upstream_http_and_stdio_transports_still_run() -> TestResult {
     let ledger = Ledger::new()?;
-    let mut server = Server::start(&ledger, &["mcp", "serve", "--http"], None)?;
-    server.initialize(Some(token(&ledger.reader)?))?;
-    assert!(rpc(server.request("tools/list", json!({}), Some(token(&ledger.reader)?))?)?["result"]["tools"].is_array());
-    let mut child = ledger
-        .command()
-        .args([
-            "--agent-token",
-            token(&ledger.reader)?,
-            "mcp",
-            "serve",
-            "--read-only",
-        ])
+    let bearer = token(&ledger.writer)?;
+    let mut server = Server::start(&ledger, &["mcp", "serve", "--http", "--read-only"], None)?;
+    server.initialize(Some(bearer))?;
+    let discovery = rpc(server.request("tools/list", json!({}), Some(bearer))?)?;
+    let tools = discovery["result"]["tools"].as_array().ok_or("tools")?;
+    assert!(tools.iter().any(|tool| tool["name"] == "company_list"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "txn_post"));
+    let resumed = server
+        .client
+        .get(format!("{}/mcp", server.base))
+        .bearer_auth(bearer)
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Protocol-Version", "2025-11-25")
+        .header(
+            "Mcp-Session-Id",
+            server.session.as_deref().ok_or("session")?,
+        )
+        .header("Last-Event-ID", "0")
+        .send()?;
+    assert_eq!(resumed.status(), 200);
+
+    let mut command = ledger.command();
+    command.args(["--agent-token", bearer]);
+    assert!(stdio_companies(command)?.to_string().contains("Acme"));
+    Ok(())
+}
+
+#[test]
+fn upstream_stdio_serves_migrated_books_from_the_desktop_backup_flow() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("books.db");
+    let passphrase = "migration-fixture-passphrase";
+    let secret = directory.path().join("passphrase");
+    std::fs::write(&secret, passphrase)?;
+    {
+        let fixture = rusqlite::Connection::open(&path)?;
+        fixture.pragma_update(None, "key", passphrase)?;
+        fixture.execute_batch(include_str!("fixtures/ledger-v1.sql"))?;
+    }
+    let mut command = clean_command();
+    command
+        .arg("--db")
+        .arg(&path)
+        .arg("--passphrase-file")
+        .arg(&secret);
+    let companies = stdio_companies(command)?;
+    assert!(companies.to_string().contains("Acme"));
+    let migrated = Db::open_snapshot(&path, Some(&passphrase.into()))?;
+    assert_eq!(
+        get_schema_version(migrated.read())?,
+        i64::from(current_schema_version())
+    );
+    let catalog = directory.path().join(".beankeeper-backups/books.db");
+    let entries = std::fs::read_dir(catalog)?.collect::<Result<Vec<_>, _>>()?;
+    let mut backups = entries.iter().filter(|entry| entry.path().is_dir());
+    let backup = backups.next().ok_or("missing pre-migration backup")?.path();
+    assert!(backups.next().is_none());
+    let manifest: Value = serde_json::from_slice(&std::fs::read(backup.join("backup.json"))?)?;
+    assert_eq!(manifest["reason"], "before_migration");
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["archive_format"], "age_tar");
+    Ok(())
+}
+
+fn stdio_companies(mut command: Command) -> TestResult<Value> {
+    let mut child = command
+        .args(["mcp", "serve", "--read-only"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let result = (|| -> TestResult {
+    let result = (|| -> TestResult<Value> {
         let mut stdin = child.stdin.take().ok_or("stdin")?;
         writeln!(
             stdin,
@@ -802,14 +874,35 @@ fn upstream_http_and_stdio_transports_still_run() -> TestResult {
         let stdout = child.stdout.take().ok_or("stdout")?;
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut line = String::new();
-            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
-            let _ = send.send(result);
+            for line in BufReader::new(stdout).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
         });
         let response: Value =
             serde_json::from_str(&receive.recv_timeout(Duration::from_secs(10))??)?;
         assert_eq!(response["result"]["serverInfo"]["name"], "beankeeper");
-        Ok(())
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"company_list","arguments":{}}})
+        )?;
+        stdin.flush()?;
+        let response: Value =
+            serde_json::from_str(&receive.recv_timeout(Duration::from_secs(10))??)?;
+        let result = &response["result"];
+        assert_ne!(result["isError"], true, "{response}");
+        Ok(serde_json::from_str(
+            result["content"][0]["text"]
+                .as_str()
+                .ok_or("company list")?,
+        )?)
     })();
     let _ = child.kill();
     let _ = child.wait();

@@ -146,7 +146,10 @@ Desktop saves a first backup during setup or startup, then checks hourly for a
 backup due after 24 hours. It also backs up before migrating a ledger and on
 the first ledger open after the Desktop version or core revision changes.
 When a backup fails, the service records the error in its log. A failed
-pre-migration backup leaves the ledger at its existing schema.
+pre-migration backup leaves the ledger at its existing schema. CLI and MCP
+ledger operations use the opened books directly after migration. A backup
+management command run against books that still need an upgrade returns
+`SCHEMA_MISMATCH` with numeric `stored` and `expected` schema versions.
 
 The backup directory is `.beankeeper-backups/<ledger-filename>/` beside the
 ledger. Each backup has a core `books.db` snapshot, backup metadata, and, when
