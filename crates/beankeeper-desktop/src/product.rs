@@ -345,7 +345,7 @@ pub fn state_dir() -> Result<PathBuf, ProductError> {
 /// # Errors
 /// Returns errors for unreadable, incomplete, or invalid trust maps.
 pub fn trusted_keys() -> Result<TrustedKeys, ProductError> {
-    let bytes = if option_env!("BEANKEEPER_OFFICIAL_BUILD").is_none()
+    let bytes = if !EnforcementPolicy::is_official()
         && let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE")
     {
         bounded_file(&PathBuf::from(path), 32_768)?
@@ -532,7 +532,7 @@ pub fn run_license(
             println!("{}", license_status()?);
         }
         Some(LicenseCommand::Trust { json }) => {
-            if option_env!("BEANKEEPER_OFFICIAL_BUILD").is_some() {
+            if EnforcementPolicy::is_official() {
                 license::release_revocations(&trusted_keys()?)?;
             }
             write_embedded_trust(json)?;

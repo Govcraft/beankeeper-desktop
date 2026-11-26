@@ -27,9 +27,13 @@ pub(crate) enum EnforcementPolicy {
 }
 
 impl EnforcementPolicy {
+    pub(crate) fn is_official() -> bool {
+        env!("BEANKEEPER_OFFICIAL_BUILD") == "1"
+    }
+
     pub(crate) fn current() -> Self {
         Version::parse(env!("CARGO_PKG_VERSION")).map_or(Self::Free, |version| {
-            Self::from_release(&version, option_env!("BEANKEEPER_OFFICIAL_BUILD").is_some())
+            Self::from_release(&version, Self::is_official())
         })
     }
 

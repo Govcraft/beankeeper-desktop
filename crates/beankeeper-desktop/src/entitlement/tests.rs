@@ -11,6 +11,7 @@ const KEYS: &[u8] = include_bytes!("../../tests/fixtures/license-public-keys.jso
 const LICENSE: &[u8] = include_bytes!("../../tests/fixtures/license-v4.public.txt");
 const CLEAN: &[u8] = include_bytes!("../../tests/fixtures/revocations-empty.json");
 const REVOKED: &[u8] = include_bytes!("../../tests/fixtures/revocations.json");
+const PASSPHRASE: &str = "desktop-entitlement-test";
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn enforced(
@@ -133,6 +134,8 @@ fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult 
     };
 
     let McpBooks { db, token } = McpBooks::open(&path)?;
+    let passphrase = secrecy::SecretString::from(PASSPHRASE);
+    let passphrase_file = crate::setup::temporary_passphrase(&passphrase)?;
     let access = enforced(&path, dir.path(), CLEAN)?;
     let target = LedgerTarget::default();
     let mut cli = Cli::try_parse_from(["bk", "company", "create", "blocked", "Blocked"])?;
@@ -175,11 +178,11 @@ fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult 
         cli.db.clone_from(&path);
         let db = access
             .clone()
-            .protect(Db::open_existing(&path, None)?, target.clone());
+            .protect(Db::open_existing(&path, Some(&passphrase))?, target.clone());
         commands::dispatch_with_db(&mut cli, db, None)?;
     }
     assert!(export.is_file());
-    let database = access.protect(Db::open_existing(&path, None)?, target);
+    let database = access.protect(Db::open_existing(&path, Some(&passphrase))?, target);
     let actor = Actor::new("owner".parse()?)
         .with_identity(identity::verify(database.read(), token.expose_secret())?);
     let response = LedgerRequest::Restore(RestoreRequest::Backup(backup.clone().try_into()?))
@@ -189,7 +192,7 @@ fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult 
     };
     LedgerRequest::Restore(RestoreRequest::Undo(receipt.restore_id()))
         .execute(&database, &actor)?;
-    let cli = Cli::try_parse_from([
+    let mut cli = Cli::try_parse_from([
         "bk",
         "--db",
         recovered.to_str().ok_or("recovery path")?,
@@ -197,6 +200,7 @@ fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult 
         "--input",
         backup.to_str().ok_or("backup path")?,
     ])?;
+    cli.passphrase.passphrase_file = Some(passphrase_file.path().into());
     commands::dispatch(&cli, None)?;
     assert!(recovered.is_file());
     Ok(())
@@ -209,7 +213,7 @@ struct McpBooks {
 
 impl McpBooks {
     fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let db = Db::open(path, None)?;
+        let db = Db::open(path, Some(&secrecy::SecretString::from(PASSPHRASE)))?;
         let owner = Actor::new("owner".parse()?);
         Granted::<Admin>::with_db(&db, &owner, identity::init_root)?;
         let caller = Granted::<Admin>::with_db(&db, &owner, |grant| {

@@ -40,9 +40,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
     let official = release && std::env::var("BEANKEEPER_OFFICIAL_BUILD").as_deref() == Ok("1");
     embed_revocations(Path::new(&manifest_dir), official)?;
-    if official {
-        rustc_env("BEANKEEPER_OFFICIAL_BUILD", "1");
-    }
+    rustc_env(
+        "BEANKEEPER_OFFICIAL_BUILD",
+        if official { "1" } else { "0" },
+    );
     let file_defaults = if release {
         std::fs::read_to_string(&embed_path)
             .ok()
