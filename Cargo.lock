@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "beankeeper-desktop"
-version = "0.1.0-rc.30"
+version = "0.1.0-rc.31"
 dependencies = [
  "age",
  "assert_cmd",

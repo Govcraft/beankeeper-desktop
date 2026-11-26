@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.31] - 2026-11-25
+
 - Verify Beankeeper in the current local Codex chat before asking for a restart, and report when a Codex connection is turned off.
 - Activate Desktop offline by pasting a PASETO license token or supplying the downloaded license file.
 - Require an active license for ordinary writes per ledger in official stable Desktop releases from 1.0, with reads, exports, and audited undo available through the CLI and MCP.
