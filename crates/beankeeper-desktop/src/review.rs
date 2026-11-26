@@ -220,15 +220,20 @@ pub(crate) fn router(
     company: Option<CompanySlug>,
     pairing: PairingState,
     owner_file: &FsPath,
-) -> Router {
+) -> Result<Router, CliError> {
+    let authority = match ApprovalAuthority::for_launch(&db, owner_file) {
+        Ok(authority) => Some(authority),
+        Err(CliError::WriteDenied { .. }) => None,
+        Err(error) => return Err(error),
+    };
     let state = ReviewState(Arc::new(Mutex::new(Review {
         db,
         company,
-        authority: None,
+        authority,
         owner_file: owner_file.into(),
         verification: None,
     })));
-    Router::new()
+    Ok(Router::new()
         .route(crate::links::REVIEW, get(queue))
         .route(crate::links::REVIEW_ROUTE, get(detail))
         .route("/review/{id}/approve", pairing::human_post(approve))
@@ -238,7 +243,7 @@ pub(crate) fn router(
             pairing,
             pairing::human_guard,
         ))
-        .with_state(state)
+        .with_state(state))
 }
 
 #[derive(Default, Deserialize)]
@@ -439,14 +444,20 @@ fn render(
             .or_else(|| companies.first().map(|company| &company.slug));
         let mut html = verification_panel(verification, session, selected);
         if let Some(company) = selected {
-            let result = render_proposals(
+            let actor = match &review.authority {
+                Some(authority) => authority.actor(&review.db),
+                None => ApprovalAuthority::owner(&review.db, &review.owner_file)?.ok_or_else(|| {
+                    CliError::Forbidden("browser review requires a private owner credential with ledger/admin".into())
+                }),
+            };
+            let result = actor.and_then(|actor| render_proposals(
                 &review.db,
-                &review.owner_file,
+                &actor,
                 &companies,
                 company,
                 id.as_ref(),
                 session,
-            );
+            ));
             match result {
                 Ok(proposals) => html.append(&proposals),
                 Err(error @ (CliError::NotFound(_) | CliError::Validation(_))) => return Err(error),
@@ -477,7 +488,7 @@ fn render(
 
 fn render_proposals(
     db: &Db,
-    owner_file: &FsPath,
+    actor: &Actor,
     companies: &[db::CompanyRow],
     company: &CompanySlug,
     id: Option<&ProposalId>,
@@ -486,15 +497,6 @@ fn render_proposals(
     if !companies.iter().any(|item| &item.slug == company) {
         return Err(CliError::NotFound("company not found".into()));
     }
-    let actor = if db::policy::get(db.read())?.enforce {
-        ApprovalAuthority::owner(db, owner_file)?.ok_or_else(|| {
-            CliError::Forbidden(
-                "browser review requires a private owner credential with ledger/admin".into(),
-            )
-        })?
-    } else {
-        ApprovalAuthority::PolicyOff.actor(db)?
-    };
     let reader = db.read();
     let mut html =
         markup!("<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">");
@@ -518,7 +520,7 @@ fn render_proposals(
         return Ok(html);
     }
 
-    let pending = proposals::list(reader, company, &actor, false)?;
+    let pending = proposals::list(reader, company, actor, false)?;
     write_markup!(html, "<section><h2>Pending proposals</h2>");
     if pending.is_empty() {
         write_markup!(

@@ -183,7 +183,7 @@ fn application_with_id(
         cli.company.clone(),
         pairing.clone(),
         &cli.db.with_extension("owner-token"),
-    );
+    )?;
     let changes = changes::router(
         backups.open()?,
         books,
