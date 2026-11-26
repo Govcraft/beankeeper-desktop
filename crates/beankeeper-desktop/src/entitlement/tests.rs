@@ -574,10 +574,10 @@ fn removing_only_license_keeps_books_intact_and_enforces_read_only() -> TestResu
     let other = ActiveLicense::try_from((other, MajorVersion::try_from(2)?))?;
     other.persist(dir.path())?;
     Bindings(dir.path()).bind(&other, &access.books)?;
-    crate::product::removal::remove_at(dir.path(), other.id().clone())?;
+    crate::product::removal::remove_at(dir.path(), other.id())?;
     assert!(access.status().writable());
     assert!(license::activation_path(dir.path(), active.id()).exists());
-    crate::product::removal::remove_at(dir.path(), active.id().clone())?;
+    crate::product::removal::remove_at(dir.path(), active.id())?;
     assert!(!access.status().writable());
     assert_eq!(fs::read_to_string(path)?, "unchanged books");
     Ok(())

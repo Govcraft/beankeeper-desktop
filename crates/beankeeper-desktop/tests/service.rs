@@ -2884,7 +2884,7 @@ fn license_remove_cli_and_mcp_preserve_other_activation_and_books() -> TestResul
     }
     let result = pipe.tool("license_remove", &json!({"license_id": ids[0]}))?;
     assert_eq!(result["structuredContent"]["code"], "removed");
-    assert_eq!(result["structuredContent"]["writable"], true);
+    assert_eq!(result["structuredContent"]["books_access"], "writable");
     assert!(
         !root
             .path()
