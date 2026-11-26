@@ -148,7 +148,7 @@ def extension_session(launcher, arguments, env):
 def setup_in_extension(launcher, arguments, env, definition):
     with extension_session(launcher, arguments, env) as (request, tool, notifications):
         lifecycle_tools = {
-            "setup", "setup_status", "doctor", "agents_extension", "license_status", "license_activate",
+            "setup", "setup_status", "doctor", "agents_extension", "license_status", "license_activate", "license_return",
         }
         tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
         assert tools == lifecycle_tools, tools
