@@ -29,6 +29,7 @@ Release builds embed `packaging/license-embed.json` (production license public
 keys and `https://license.beankeeper.govcraft.ai`). Repository Actions variables
 `BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON` and `BEANKEEPER_LICENSE_SERVICE_URL` can
 override the file; the public key is not a secret.
+Official stable (non-rc, major >= 1) builds also require `packaging/revocations.json`, the license issuer's signed revocation snapshot. Before each stable release, refresh it on the protected license host with `beankeeper-license --config /etc/beankeeper-license/config.toml export-revocations` and commit it in the release PR. Unsigned dry runs (dispatch and nightly) are not official builds and do not catch a missing snapshot.
 Inspect the compiled-in values with `bk license trust --json`; the release smoke test compares that output to the embed env, rather than grepping raw binary bytes. Windows installers also set a numeric `VersionInfoVersion` (`0.1.0-rc.1` becomes `0.1.0.1`) because Inno Setup cannot store a prerelease string in the PE version resource.
 
 | Target | Assets |
