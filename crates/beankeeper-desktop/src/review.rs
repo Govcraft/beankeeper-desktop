@@ -3,7 +3,7 @@
 mod credential;
 
 use std::{
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -50,7 +50,8 @@ struct Review {
     db: Db,
     company: Option<CompanySlug>,
     // Never sourced from request bearer credentials or exposed to a client.
-    authority: ApprovalAuthority,
+    authority: Option<ApprovalAuthority>,
+    owner_file: PathBuf,
     verification: Option<Verification>,
 }
 
@@ -61,24 +62,27 @@ enum ApprovalAuthority {
 }
 
 impl ApprovalAuthority {
+    fn owner(db: &Db, owner_file: &FsPath) -> Result<Option<Actor>, CliError> {
+        let Ok(owner_token) =
+            PrivateFile::open(owner_file).and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
+        else {
+            return Ok(None);
+        };
+        match identity::verify(db.read(), owner_token.expose_secret().trim())
+            .and_then(OwnerCredential::try_from)
+        {
+            Ok(owner) => Ok(Some(Actor::try_from(owner)?)),
+            Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn for_launch(db: &Db, owner_file: &FsPath) -> Result<Self, CliError> {
         if !db::policy::get(db.read())?.enforce {
             return Ok(Self::PolicyOff);
         }
-
-        let Ok(owner_token) =
-            PrivateFile::open(owner_file).and_then(|file| file.read_secret(BEARER_FILE_LIMIT))
-        else {
+        let Some(owner) = Self::owner(db, owner_file)? else {
             return Ok(Self::Unavailable);
-        };
-        let owner = match identity::verify(db.read(), owner_token.expose_secret().trim())
-            .and_then(OwnerCredential::try_from)
-        {
-            Ok(owner) => Actor::try_from(owner)?,
-            Err(CliError::Unauthorized(_) | CliError::Forbidden(_)) => {
-                return Ok(Self::Unavailable);
-            }
-            Err(error) => return Err(error),
         };
         match Granted::<Admin>::with_db(db, &owner, |grant| {
             let request = HumanCredentialRequest::default();
@@ -179,7 +183,14 @@ impl Review {
         id: &ProposalId,
         decision: Decision,
     ) -> Result<Response, CliError> {
-        let actor = self.authority.actor(&self.db)?;
+        if self.authority.is_none() {
+            self.authority = Some(ApprovalAuthority::for_launch(&self.db, &self.owner_file)?);
+        }
+        let actor = self
+            .authority
+            .as_ref()
+            .unwrap_or(&ApprovalAuthority::Unavailable)
+            .actor(&self.db)?;
         // A failed fresh check must not leave an older intact result visible.
         self.verification = None;
         // Each grant reserves the ledger writer before verification or resolution.
@@ -210,11 +221,16 @@ pub(crate) fn router(
     pairing: PairingState,
     owner_file: &FsPath,
 ) -> Result<Router, CliError> {
-    let authority = ApprovalAuthority::for_launch(&db, owner_file)?;
+    let authority = match ApprovalAuthority::for_launch(&db, owner_file) {
+        Ok(authority) => Some(authority),
+        Err(CliError::WriteDenied { .. }) => None,
+        Err(error) => return Err(error),
+    };
     let state = ReviewState(Arc::new(Mutex::new(Review {
         db,
         company,
         authority,
+        owner_file: owner_file.into(),
         verification: None,
     })));
     Ok(Router::new()
@@ -264,6 +280,18 @@ impl NonEmptyReason {
 }
 
 fn failure(error: &CliError, session: Option<&HumanSession>) -> Response {
+    if let CliError::WriteDenied { reason, .. } = error {
+        return (
+            StatusCode::FORBIDDEN,
+            ui::page(
+                "Review unavailable",
+                "",
+                "/review",
+                &markup!("<p>{}</p>", reason.as_ref()),
+            ),
+        )
+            .into_response();
+    }
     let status = match error {
         CliError::NotFound(_) => StatusCode::NOT_FOUND,
         CliError::Validation(_) => StatusCode::CONFLICT,
@@ -416,14 +444,20 @@ fn render(
             .or_else(|| companies.first().map(|company| &company.slug));
         let mut html = verification_panel(verification, session, selected);
         if let Some(company) = selected {
-            let result = render_proposals(
+            let actor = match &review.authority {
+                Some(authority) => authority.actor(&review.db),
+                None => ApprovalAuthority::owner(&review.db, &review.owner_file)?.ok_or_else(|| {
+                    CliError::Forbidden("browser review requires a private owner credential with ledger/admin".into())
+                }),
+            };
+            let result = actor.and_then(|actor| render_proposals(
                 &review.db,
-                &review.authority,
+                &actor,
                 &companies,
                 company,
                 id.as_ref(),
                 session,
-            );
+            ));
             match result {
                 Ok(proposals) => html.append(&proposals),
                 Err(error @ (CliError::NotFound(_) | CliError::Validation(_))) => return Err(error),
@@ -454,7 +488,7 @@ fn render(
 
 fn render_proposals(
     db: &Db,
-    authority: &ApprovalAuthority,
+    actor: &Actor,
     companies: &[db::CompanyRow],
     company: &CompanySlug,
     id: Option<&ProposalId>,
@@ -463,7 +497,6 @@ fn render_proposals(
     if !companies.iter().any(|item| &item.slug == company) {
         return Err(CliError::NotFound("company not found".into()));
     }
-    let actor = authority.actor(db)?;
     let reader = db.read();
     let mut html =
         markup!("<form method=\"get\" action=\"/review\"><label>Company<select name=\"company\">");
@@ -487,7 +520,7 @@ fn render_proposals(
         return Ok(html);
     }
 
-    let pending = proposals::list(reader, company, &actor, false)?;
+    let pending = proposals::list(reader, company, actor, false)?;
     write_markup!(html, "<section><h2>Pending proposals</h2>");
     if pending.is_empty() {
         write_markup!(

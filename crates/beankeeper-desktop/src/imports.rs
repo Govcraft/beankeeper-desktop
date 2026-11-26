@@ -25,7 +25,7 @@ use beankeeper_cli::{
     db::Db,
     error::CliError,
     identity,
-    mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY},
+    mcp::{LEDGER_TARGET_HEADER, LEDGER_TARGET_META_KEY, LedgerTarget},
     operation::Operation,
 };
 use rmcp::{
@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize, de::value::StrDeserializer};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::entitlement::LedgerAccess;
 use crate::pairing::{AgentKey, Secret};
 use protocol::{ImportCode, ImportMethod, META_VERSION, RpcCall, TaskMethod, ToolCall, VERSION};
 use request::ImportRequest;
@@ -161,6 +162,7 @@ struct Imports {
     uploads: Arc<Mutex<Uploads>>,
     tasks: Arc<Mutex<Tasks>>,
     db: Arc<Mutex<Db>>,
+    access: LedgerAccess,
     fallback: Option<SecretString>,
     request_limit: usize,
     transfers: Arc<tokio::sync::Semaphore>,
@@ -170,17 +172,37 @@ fn locked<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, ImportError> {
     mutex.lock().map_err(|_| ImportError::Unavailable)
 }
 
+#[derive(Clone, Copy)]
+enum ImportAccess {
+    Tool,
+    Transfer,
+}
+
+impl ImportAccess {
+    fn fallback(self, token: Option<&SecretString>) -> Option<&SecretString> {
+        match self {
+            Self::Tool => token,
+            Self::Transfer => None,
+        }
+    }
+
+    fn authorize(self, ledger: &LedgerAccess) -> Result<(), CliError> {
+        match self {
+            Self::Tool => Ok(()),
+            Self::Transfer => ledger.ordinary_write(LedgerTarget::default()),
+        }
+    }
+}
+
 impl Imports {
     async fn authorize(
         &self,
         headers: &HeaderMap,
-        allow_fallback: bool,
+        import: ImportAccess,
     ) -> Result<Principal, ImportError> {
-        let token = bearer(
-            headers,
-            allow_fallback.then_some(self.fallback.as_ref()).flatten(),
-        )?;
+        let token = bearer(headers, import.fallback(self.fallback.as_ref()))?;
         let db = Arc::clone(&self.db);
+        let access = self.access.clone();
         tokio::task::spawn_blocking(move || {
             let db = locked(&db)?;
             let conn = db.read();
@@ -191,6 +213,9 @@ impl Imports {
             )
             .map_err(ImportError::Authorization)?
             .ok_or_else(missing_bearer)?;
+            import
+                .authorize(&access)
+                .map_err(ImportError::Authorization)?;
             Ok(AgentKey::from_verified_identity(&identity))
         })
         .await
@@ -232,6 +257,7 @@ fn bearer(
 pub(crate) fn layer(
     mcp: Router,
     db: Arc<Mutex<Db>>,
+    access: LedgerAccess,
     fallback: Option<SecretString>,
     request_limit: usize,
 ) -> Router {
@@ -239,6 +265,7 @@ pub(crate) fn layer(
         uploads: Arc::default(),
         tasks: Arc::default(),
         db,
+        access,
         fallback,
         request_limit,
         transfers: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -255,30 +282,39 @@ async fn transfer(
     State(state): State<Imports>,
     Path(transfer): Path<String>,
     request: Request,
-) -> StatusCode {
+) -> Response {
     let Ok(transfer) = transfer.parse::<Ticket>() else {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::NOT_FOUND.into_response();
     };
-    let principal = match state.authorize(request.headers(), false).await {
+    let principal = match state
+        .authorize(request.headers(), ImportAccess::Transfer)
+        .await
+    {
         Ok(principal) => principal,
         Err(ImportError::Authorization(CliError::Unauthorized(_))) => {
-            return StatusCode::UNAUTHORIZED;
+            return StatusCode::UNAUTHORIZED.into_response();
         }
-        Err(ImportError::Authorization(_)) => return StatusCode::FORBIDDEN,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+        Err(ImportError::Authorization(error)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(beankeeper_cli::output::json::EnvelopeError::from(&error)),
+            )
+                .into_response();
+        }
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
     let Ok(size) =
         locked(&state.uploads).and_then(|mut uploads| uploads.expected_size(&transfer, &principal))
     else {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::NOT_FOUND.into_response();
     };
     let Ok(_permit) = state.transfers.try_acquire() else {
-        return StatusCode::SERVICE_UNAVAILABLE;
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(Ok(bytes)) =
         tokio::time::timeout(Duration::from_secs(30), to_bytes(request.into_body(), size)).await
     else {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     };
     match locked(&state.uploads).and_then(|mut uploads| uploads.stage(&transfer, &principal, bytes))
     {
@@ -287,6 +323,7 @@ async fn transfer(
         Err(ImportError::Unknown) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
+    .into_response()
 }
 
 /// The header selects a candidate before reading the request body.
@@ -453,7 +490,7 @@ impl Imports {
         if !supported {
             return Err(ImportError::MissingCapability(TASKS));
         }
-        let principal = self.authorize(headers, true).await?;
+        let principal = self.authorize(headers, ImportAccess::Tool).await?;
         let id: ImportTaskId = task_id.parse()?;
         let mut tasks = locked(&self.tasks)?;
         let result = match method {
@@ -492,9 +529,12 @@ impl Imports {
             .as_object()
             .ok_or(ImportError::Validation("Expected statement arguments."))?;
         // File transfers require an explicit credential, including malformed file requests.
-        let principal = self
-            .authorize(request.headers(), !arguments.contains_key("file"))
-            .await?;
+        let import = if arguments.contains_key("file") {
+            ImportAccess::Transfer
+        } else {
+            ImportAccess::Tool
+        };
+        let principal = self.authorize(request.headers(), import).await?;
         let arguments = ImportRequest::try_from(arguments)?;
         let arguments = match (arguments, request_state) {
             (ImportRequest::Inline(arguments), None) => arguments,

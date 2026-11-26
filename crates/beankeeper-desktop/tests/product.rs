@@ -309,3 +309,43 @@ fn license_trust_json_reports_compile_time_embed_not_runtime_overrides() -> Test
     assert!(trust["public_keys"].get("runtime").is_none());
     Ok(())
 }
+
+#[test]
+fn activation_cannot_reuse_a_license_for_a_second_set_of_books() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let directory = dir.path();
+    fs::write(
+        directory.join("keys.json"),
+        include_bytes!("fixtures/license-public-keys.json"),
+    )?;
+    let license = directory.join("input.json");
+    fs::write(&license, include_bytes!("fixtures/license-v4.public.txt"))?;
+    let first = directory.join("first.db");
+    let second = directory.join("second.db");
+    for books in [&first, &second] {
+        beankeeper_cli::db::Db::open(books, None)?;
+    }
+    let activate = |books: &std::path::Path| {
+        command(directory)
+            .arg("--db")
+            .arg(books)
+            .args(["license", "activate"])
+            .arg(&license)
+            .output()
+    };
+    let activated = activate(&first)?;
+    assert!(
+        activated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    assert!(activate(&first)?.status.success());
+
+    let activation = directory.join(ACTIVATION_PATH);
+    fs::remove_file(&activation)?;
+    let rejected = activate(&second)?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("already bound"));
+    assert!(!activation.exists());
+    Ok(())
+}

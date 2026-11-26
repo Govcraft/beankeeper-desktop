@@ -1,7 +1,13 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
-    license::{self, LicenseError, MAX_LICENSE_INPUT, TrustedKeys, VerifiedLicense},
+    entitlement::{Bindings, ENFORCEMENT, LedgerAccess, OFFICIAL_BUILD},
+    instance::BooksPath,
+    license::{
+        self, ActiveLicense, LicenseError, LicenseId, MAX_LICENSE_INPUT, TrustedKeys,
+        UnrevokedLicense,
+    },
     private_file::PrivateFile,
+    release_policy::EnforcementPolicy,
     updates::{self, UpdateError},
 };
 use clap::{Args, Subcommand, ValueEnum};
@@ -22,6 +28,9 @@ pub enum ProductError {
     Update(UpdateError),
     Io(io::Error),
     Configuration(&'static str),
+    LicenseBoundElsewhere,
+    LicenseRevoked(LicenseId),
+    BooksRequired,
     Redemption,
 }
 impl fmt::Display for ProductError {
@@ -31,6 +40,16 @@ impl fmt::Display for ProductError {
             Self::Update(e) => write!(f, "{e}"),
             Self::Io(_) => f.write_str("cannot access Desktop license configuration"),
             Self::Configuration(reason) => f.write_str(reason),
+            Self::LicenseBoundElsewhere => f.write_str(
+                "This license is already bound to another set of books. Choose the original books or use a different license.",
+            ),
+            Self::LicenseRevoked(id) => write!(
+                f,
+                "Desktop license {id} was revoked. Use another license for these books."
+            ),
+            Self::BooksRequired => f.write_str(
+                "Choose an existing set of books with `bk --db BOOKS license activate FILE`.",
+            ),
             Self::Redemption => {
                 f.write_str("license redemption failed; check the service URL and claim code")
             }
@@ -49,7 +68,10 @@ impl Error for ProductError {
 }
 impl From<LicenseError> for ProductError {
     fn from(e: LicenseError) -> Self {
-        Self::License(e)
+        match e {
+            LicenseError::Revoked(id) => Self::LicenseRevoked(id),
+            error => Self::License(error),
+        }
     }
 }
 impl From<UpdateError> for ProductError {
@@ -343,14 +365,15 @@ pub fn state_dir() -> Result<PathBuf, ProductError> {
 /// # Errors
 /// Returns errors for unreadable, incomplete, or invalid trust maps.
 pub fn trusted_keys() -> Result<TrustedKeys, ProductError> {
-    let bytes = if let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE") {
-        bounded_file(&PathBuf::from(path), 32_768)?
-    } else {
-        option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON")
-            .unwrap_or("{}")
-            .as_bytes()
-            .to_vec()
-    };
+    let bytes =
+        if !OFFICIAL_BUILD && let Some(path) = std::env::var_os("BEANKEEPER_LICENSE_KEYS_FILE") {
+            bounded_file(&PathBuf::from(path), 32_768)?
+        } else {
+            option_env!("BEANKEEPER_LICENSE_PUBLIC_KEYS_JSON")
+                .unwrap_or("{}")
+                .as_bytes()
+                .to_vec()
+        };
     Ok(TrustedKeys::from_json(&bytes)?)
 }
 fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
@@ -387,7 +410,7 @@ pub fn license_status() -> Result<String, ProductError> {
     Ok(status)
 }
 
-fn describe(licenses: &[VerifiedLicense]) -> String {
+fn describe(licenses: &[UnrevokedLicense]) -> String {
     let mut status = "License status: active and valid.".to_owned();
     for license in licenses {
         let _ = write!(
@@ -402,7 +425,7 @@ fn describe(licenses: &[VerifiedLicense]) -> String {
 
 #[derive(Default)]
 struct Activations {
-    licenses: Vec<VerifiedLicense>,
+    licenses: Vec<UnrevokedLicense>,
     first_failure: Option<LicenseError>,
 }
 
@@ -413,8 +436,13 @@ fn load_activations() -> Result<Activations, ProductError> {
         return Ok(activations);
     }
     let keys = trusted_keys()?;
+    let revocations = license::release_revocations(&keys)?;
     for path in paths {
-        match license::load(&path, &keys) {
+        match license::load(&path, &keys).and_then(|license| {
+            license
+                .map(|license| revocations.admit(license))
+                .transpose()
+        }) {
             Ok(Some(license))
                 if !activations
                     .licenses
@@ -423,7 +451,7 @@ fn load_activations() -> Result<Activations, ProductError> {
             {
                 activations.licenses.push(license);
             }
-            Ok(_) => {}
+            Ok(_) | Err(LicenseError::Revoked(_)) => {}
             Err(error) => {
                 activations.first_failure.get_or_insert(error);
             }
@@ -438,7 +466,7 @@ fn load_activations() -> Result<Activations, ProductError> {
 }
 
 /// Load the authenticated licenses used for installation-wide update authorization.
-pub(crate) fn load_update_licenses() -> Result<Vec<VerifiedLicense>, ProductError> {
+pub(crate) fn load_update_licenses() -> Result<Vec<UnrevokedLicense>, ProductError> {
     Ok(load_activations()?.licenses)
 }
 
@@ -513,26 +541,91 @@ fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> 
 ///
 /// # Errors
 /// Returns input, trust, redemption, or activation errors.
-pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
+pub fn run_license(
+    options: LicenseOptions,
+    books_path: &Path,
+    requirement: BooksRequirement,
+) -> Result<(), ProductError> {
     match options.command {
-        None => println!("{}", license_status()?),
-        Some(LicenseCommand::Trust { json }) => write_embedded_trust(json)?,
+        None => {
+            if let Some(books) = selected_books(books_path, requirement)? {
+                println!("{}", LedgerAccess::from(books).status());
+            }
+            println!("{}", license_status()?);
+        }
+        Some(LicenseCommand::Trust { json }) => {
+            if OFFICIAL_BUILD {
+                license::release_revocations(&trusted_keys()?)?;
+            }
+            write_embedded_trust(json)?;
+        }
         Some(LicenseCommand::Activate {
             file,
             token,
             code_file,
             storefront,
         }) => {
+            let books = selected_books(books_path, requirement.for_activation(ENFORCEMENT))?;
             let source = LicenseSource::try_from((file, token, code_file, storefront))?;
             // Resolve trust before redeeming a potentially single-use claim.
             let keys = trusted_keys()?;
+            let revocations = license::release_revocations(&keys)?;
             let bytes = source.read()?;
-            let claims = license::activate_in(&bytes, &keys, &state_dir()?)?;
-            println!("{}", describe(std::slice::from_ref(&claims)));
+            let license = revocations.admit(license::verify_offline(&bytes, &keys)?)?;
+            let major = ENFORCEMENT.activation_major(&license);
+            let active = ActiveLicense::try_from((license, major))?;
+            let state = state_dir()?;
+            if let Some(books) = books {
+                Bindings(&state).bind(&active, &books)?;
+            }
+            active.persist(&state)?;
+            println!("{}", describe(std::slice::from_ref(active.as_ref())));
         }
     }
     Ok(())
 }
+/// Whether a license command requires its selected books to exist.
+#[derive(Clone, Copy)]
+pub enum BooksRequirement {
+    /// The default books might not exist yet.
+    Optional,
+    /// The selected books must exist.
+    Required,
+}
+
+impl From<bool> for BooksRequirement {
+    fn from(explicit: bool) -> Self {
+        if explicit {
+            Self::Required
+        } else {
+            Self::Optional
+        }
+    }
+}
+
+impl BooksRequirement {
+    fn for_activation(self, policy: EnforcementPolicy) -> Self {
+        match policy {
+            EnforcementPolicy::Enforced(_) => Self::Required,
+            EnforcementPolicy::Free => self,
+        }
+    }
+}
+
+fn selected_books(
+    path: &Path,
+    requirement: BooksRequirement,
+) -> Result<Option<BooksPath>, ProductError> {
+    match BooksPath::try_from(path) {
+        Ok(books) => Ok(Some(books)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match requirement {
+            BooksRequirement::Optional => Ok(None),
+            BooksRequirement::Required => Err(ProductError::BooksRequired),
+        },
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Opt-out applies before update disk/network activity. Set to `1` or `true`.
 #[must_use]
 pub fn update_checks() -> updates::UpdateChecks {
@@ -557,23 +650,27 @@ pub fn status_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::{describe, embedded_license_trust, embedded_public_keys};
-    use crate::license::{TrustedKeys, verify_offline};
+    use crate::license::{TrustedKeys, VerifiedRevocations, verify_offline};
 
     #[test]
-    fn verified_license_status_describes_perpetual_major_version_coverage() {
+    fn verified_license_status_describes_perpetual_major_version_coverage()
+    -> Result<(), Box<dyn std::error::Error>> {
         let keys =
-            TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))
-                .expect("fixture public keys");
+            TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))?;
         let claims = verify_offline(
             include_bytes!("../tests/fixtures/license-v4.public.txt"),
             &keys,
-        )
-        .expect("verified fixture");
-        let status = describe(&[claims]);
+        )?;
+        let revocations = VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations-empty.json"),
+            &keys,
+        )?;
+        let status = describe(&[revocations.admit(claims)?]);
         assert_eq!(
             status,
             "License status: active and valid.\nLicense lic_01h455vb4pex5vsknk084sn02q covers all 1.x releases forever."
         );
+        Ok(())
     }
 
     #[test]

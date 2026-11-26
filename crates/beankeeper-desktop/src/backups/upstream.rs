@@ -1,5 +1,8 @@
 mod http;
 
+#[cfg(test)]
+pub(crate) use http::NoHostTools;
+
 use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
@@ -9,9 +12,9 @@ use std::{
 use beankeeper_cli::{
     cli::{Cli, Command, McpCommand, PassphraseOptions},
     commands::{self, setup::SetupCommand},
-    db::{Db, companies::CompanySlug},
+    db::companies::CompanySlug,
     error::CliError,
-    mcp::{self, HttpLedgerTargets, LedgerTargets},
+    mcp::{self, HttpLedgerTargets, LedgerTarget, LedgerTargets},
     output::json::Meta,
     passphrase,
 };
@@ -19,7 +22,7 @@ use clap::{ArgMatches, FromArgMatches};
 use secrecy::SecretString;
 use tempfile::NamedTempFile;
 
-use crate::setup;
+use crate::{entitlement::LedgerAccess, instance::BooksPath, setup};
 
 use super::LocalBackups;
 use http::HttpBind;
@@ -34,7 +37,11 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
             cli.company.as_ref().map(CompanySlug::as_str),
         )
     });
-    match dispatch(&mut cli, meta.clone()) {
+    let target = matches
+        .get_one::<LedgerTarget>("ledger_target")
+        .cloned()
+        .unwrap_or_default();
+    match dispatch(&mut cli, meta.clone(), target) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let meta = meta.map(|meta| cli.meta(meta.command, meta.company.as_deref()));
@@ -44,11 +51,11 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-fn dispatch(cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+fn dispatch(cli: &mut Cli, meta: Option<Meta>, target: LedgerTarget) -> Result<(), CliError> {
     let ledgers = DispatchBooks::try_from(&*cli)?;
     let _stored = setup::stored_passphrase_for(&mut cli.passphrase, &ledgers.primary)
         .map_err(|error| CliError::General(error.to_string()))?;
-    ledgers.run(cli, meta)
+    ledgers.run(cli, meta, target)
 }
 
 struct DispatchBooks {
@@ -121,7 +128,7 @@ impl TryFrom<&Cli> for DispatchBooks {
 }
 
 impl DispatchBooks {
-    fn run(self, cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+    fn run(self, cli: &mut Cli, meta: Option<Meta>, target: LedgerTarget) -> Result<(), CliError> {
         match self.open {
             DispatchOpen::CoreOnly => commands::dispatch(cli, meta),
             // Core handles commands without books, such as loan schedules.
@@ -131,17 +138,24 @@ impl DispatchBooks {
                 commands::dispatch(cli, meta)
             }
             DispatchOpen::Existing => {
-                let db = self.open(cli)?;
+                let books =
+                    DispatchKey::try_from((&cli.passphrase, false))?.books(&self.primary)?;
+                let db = books.open_protected(target)?;
                 commands::dispatch_with_db(cli, db, meta)
             }
             DispatchOpen::Stdio { read_only } => {
-                mcp::serve_with_db(cli, self.open(cli)?, read_only)
+                let db = DispatchKey::try_from((&cli.passphrase, false))?
+                    .books(&self.primary)?
+                    .open_protected(target)?;
+                mcp::serve_with_db(cli, db, read_only)
             }
             DispatchOpen::Http { bind, read_only } => {
                 let targets = self.http_targets(cli)?;
                 bind.serve(cli, targets, read_only)
             }
             DispatchOpen::Replace { encrypt } => {
+                LedgerAccess::from(BooksPath::try_from(self.primary.as_path())?)
+                    .ordinary_write(target)?;
                 let key = DispatchKey::try_from((&cli.passphrase, encrypt))?;
                 key.books(&self.primary)?.before_replacement()?;
                 // Core init replaces the file and resolves the destination key itself.
@@ -151,22 +165,20 @@ impl DispatchBooks {
         }
     }
 
-    fn open(&self, cli: &Cli) -> Result<Db, CliError> {
-        DispatchKey::try_from((&cli.passphrase, false))?
-            .books(&self.primary)?
-            .open()
-    }
-
     fn http_targets(&self, cli: &Cli) -> Result<HttpLedgerTargets, CliError> {
         let named = cli.ledger_bindings()?;
         let key = DispatchKey::try_from((&cli.passphrase, false))?;
-        let startup = key.books(&self.primary)?.open()?;
+        let startup = key
+            .books(&self.primary)?
+            .open_protected(LedgerTarget::default())?;
         if named.len() == 0 {
             return Ok(startup.into());
         }
         let targets = LedgerTargets::new(startup);
         for (name, path) in named {
-            targets.register(name.clone().into(), key.books(path.as_ref())?.open()?)?;
+            let target: LedgerTarget = name.clone().into();
+            let db = key.books(path.as_ref())?.open_protected(target.clone())?;
+            targets.register(target, db)?;
         }
         Ok(targets.into())
     }

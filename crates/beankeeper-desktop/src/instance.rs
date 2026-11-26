@@ -138,7 +138,11 @@ impl BooksPath {
     }
 
     pub(crate) fn state_key(&self) -> String {
-        URL_SAFE_NO_PAD.encode(Sha256::digest(self.0.as_os_str().as_encoded_bytes()))
+        URL_SAFE_NO_PAD.encode(self.digest())
+    }
+
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        Sha256::digest(self.0.as_os_str().as_encoded_bytes()).into()
     }
 }
 

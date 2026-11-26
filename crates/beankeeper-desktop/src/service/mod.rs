@@ -918,9 +918,22 @@ fn change_access(cli: &Cli, change: AccessChange) -> Result<(), ServiceError> {
         false,
     )
     .map_err(setup::SetupError::from)?;
-    let db = crate::backups::open(&cli.db, passphrase.as_ref()).map_err(setup::SetupError::from)?;
-    setup::managed::reconcile(&db, &cli.db, change)?;
-    Ok(())
+    let books =
+        crate::instance::BooksPath::try_from(cli.db.as_path()).map_err(setup::SetupError::from)?;
+    let db = crate::backups::LocalBackups::new(books, passphrase)
+        .open_protected(beankeeper_cli::mcp::LedgerTarget::default())
+        .map_err(setup::SetupError::from)?;
+    match setup::managed::reconcile(&db, &cli.db, change) {
+        Err(setup::SetupError::Ledger(
+            error @ beankeeper_cli::error::CliError::WriteDenied { .. },
+        )) if !matches!(change, AccessChange::Set(_)) => {
+            // Let the existing credential keep reading until automatic rotation
+            // can run on a licensed copy.
+            eprintln!("Managed agent access rotation was deferred. {error}");
+            Ok(())
+        }
+        result => result.map_err(Into::into),
+    }
 }
 
 /// Restart the running managed service after replacing its own executable.

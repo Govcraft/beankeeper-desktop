@@ -6,8 +6,11 @@ the `updates` module owns release verification and installation. The approved
 1.0 terms cover every 1.x release under a 1.x license. Release candidates run
 without activation. [Beankeeper Desktop license agreement](../LICENSE.md)
 
-Read-only mode for official non-RC releases from 1.0.0 onward is tracked
-in [issue #168](https://github.com/Govcraft/beankeeper-desktop/issues/168).
+Official stable releases from 1.0.0 apply read-only mode to each set of books
+whose license is missing, invalid, revoked or for another major version.
+Reads, exports, backups, restores, restore undo and recovery are available.
+Agents with existing authorization can undo an audited change with `audit_undo`
+over MCP or `bk audit undo` in the CLI. Owners can also undo from Changes.
 
 ## Configure issuer trust
 
@@ -34,18 +37,27 @@ An agent with CLI access can activate a token the owner pastes in chat. If the
 issuer sent a plain-text license file, the agent can pass its path instead.
 
 ```sh
-bk license activate --token 'PASTE_YOUR_LICENSE_TOKEN_HERE'
-bk license activate /path/to/downloaded.license
-bk license
+bk --db /path/to/books.db license activate --token 'PASTE_YOUR_LICENSE_TOKEN_HERE'
+bk --db /path/to/books.db license activate /path/to/downloaded.license
+bk --db /path/to/books.db license
 ```
 
 Desktop verifies each PASETO v4.public token offline before saving it by license
-ID and preserves existing activations if verification fails. Reactivating the same license replaces only that license's
-file. Each license covers one major version for perpetual use.
+ID and preserves existing activations if verification fails. Desktop binds the
+license ID to the canonical local path of the selected books. Activation is
+repeatable for that path. A license already bound to another path cannot unlock
+a second set of books, including a copied ledger. Activate again with `--db` to
+bind a preview activation saved without a ledger. Each license covers one major
+version for perpetual use.
 
-Successful activation and status checks begin with `License status: active and
-valid.` The `bk license` command and the paired browser's `/settings` page
-re-verify the local files and list each valid license ID and its major version.
+When writes are denied, Desktop returns `LEDGER_WRITE_DENIED` to the CLI and
+MCP. The running Desktop exposes `license_status` to explain the current books'
+status and return a settings link. Activation and local removal take effect
+on the next write without restarting Desktop.
+
+The `bk license` command and the paired browser's `/settings` page show
+the selected books' write access and list verified installed licenses with their
+major versions.
 They also explain when there are no activations or when a file fails verification.
 
 Desktop stores each private activation at `licenses/<license-id>.license`
@@ -70,7 +82,7 @@ claim code in a private text file. Redirects are refused. The key does not enter
 process arguments or diagnostics.
 
 ```sh
-bk license activate --code-file /private/storefront-key.txt --storefront polar
+bk --db /path/to/books.db license activate --code-file /private/storefront-key.txt --storefront polar
 ```
 
 The default storefront is `polar`. `gumroad` and `etsy` use the same D10 adapter

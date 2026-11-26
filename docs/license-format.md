@@ -57,3 +57,17 @@ ask the issuer for a current license token.
 Claim-code redemption is an explicit online action. The issuer returns the same
 plain-text token used for offline activation. Desktop verifies it with the
 provisioned keys before saving it. [Redemption and recovery](license-updates.md#redeem-a-key-or-claim-code)
+
+## Signed revocations in releases
+
+On the protected license host, run
+`beankeeper-license --config /etc/beankeeper-license/config.toml export-revocations`
+and save the signed output as `packaging/revocations.json` in the release PR.
+Include a fresh signed snapshot for each official stable release, even if the
+list is empty. Tagged builds embed that file into the binary. Packaging checks
+the issuer signature against the embedded public keys. The private signing
+keys stay on the license host.
+
+Desktop verifies the exact `beankeeper-revocations-v1\n<key_id>\n<payload>`
+message before reading the UTC generation time and the revoked license IDs.
+Desktop checks the snapshot locally for ledger access and update eligibility.

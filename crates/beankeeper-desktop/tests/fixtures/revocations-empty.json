@@ -1,0 +1,6 @@
+{
+  "format": "beankeeper-revocations-v1",
+  "key_id": "test-2026",
+  "payload": "eyJnZW5lcmF0ZWRfYXQiOiIyMDI2LTExLTI1VDAwOjAwOjAwWiIsInJldm9rZWRfbGljZW5zZV9pZHMiOltdfQ",
+  "signature": "w5wzPrERe7EpfquxK9Eyy81Xsvb7_Qf4V0Ublw-zxHbTnmww2GGa6aMq6p74l8AV5ph29ZUcWTsq2u5FT-SxAw"
+}

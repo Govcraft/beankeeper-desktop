@@ -11,6 +11,7 @@ use axum::{
 use beankeeper_cli::db::{Db, companies::CompanySlug};
 
 use crate::{
+    entitlement::LedgerAccess,
     links::{
         ACCOUNTS, HOME, REPORT_ROUTE, REPORTS, ReportKind, SETTINGS, SUMMARY, TRANSACTION_ROUTE,
         TRANSACTIONS,
@@ -69,16 +70,23 @@ struct ViewState {
     company: Option<CompanySlug>,
 }
 
-pub(crate) fn router(db: Db, company: Option<CompanySlug>, pairing: PairingState) -> Router {
+pub(crate) fn router(
+    db: Db,
+    company: Option<CompanySlug>,
+    pairing: PairingState,
+    access: LedgerAccess,
+) -> Router {
     let data = Router::new()
         .route(HOME, get(view))
         .route(SUMMARY, get(view))
         .route(
             SETTINGS,
-            get(|session: HumanSession| async move {
-                let status = tokio::task::spawn_blocking(crate::product::status_text)
-                    .await
-                    .unwrap_or_else(|_| "Desktop status unavailable.".into());
+            get(move |session: HumanSession| async move {
+                let status = tokio::task::spawn_blocking(move || {
+                    format!("{}\n{}", access.status(), crate::product::status_text())
+                })
+                .await
+                .unwrap_or_else(|_| "Desktop status unavailable.".into());
                 page(
                     "License and updates",
                     "Offline license and last update check",

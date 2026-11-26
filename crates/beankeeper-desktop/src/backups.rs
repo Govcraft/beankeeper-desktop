@@ -11,15 +11,17 @@ mod upstream;
 pub(crate) use tools::BackupTool;
 
 pub use tools::{BackupOptions, run};
+#[cfg(test)]
+pub(crate) use upstream::NoHostTools;
 pub use upstream::run_upstream;
 
 use std::{fs, path::Path, sync::Arc};
 
-use beankeeper_cli::{db::Db, error::CliError};
+use beankeeper_cli::{db::Db, error::CliError, mcp::LedgerTarget};
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
-use crate::instance::BooksPath;
+use crate::{entitlement::LedgerAccess, instance::BooksPath};
 
 use books::BooksState;
 use catalog::{BackupLocation, Catalog, Retention};
@@ -59,6 +61,10 @@ impl LocalBackups {
 
     pub(crate) fn open(&self) -> Result<Db, CliError> {
         self.open_with(OpenMode::Normal)
+    }
+
+    pub(crate) fn open_protected(&self, target: LedgerTarget) -> Result<Db, CliError> {
+        Ok(LedgerAccess::from(self.books.clone()).protect(self.open()?, target))
     }
 
     fn open_for_provisioning(&self) -> Result<Db, CliError> {

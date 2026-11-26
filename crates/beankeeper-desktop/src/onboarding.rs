@@ -28,6 +28,7 @@ use crate::{
     backups::{BackupTool, LocalBackups},
     changes,
     demo::{DemoBooks, DemoOperation},
+    entitlement::LedgerAccess,
     instance::BooksPath,
     links::mcp as link_tool,
     navigation::Navigation,
@@ -36,6 +37,7 @@ use crate::{
 };
 
 pub(crate) const STATUS_TOOL: &str = "setup_status";
+const LICENSE_STATUS_TOOL: &str = "license_status";
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -238,6 +240,7 @@ impl StatusInput {
 
 pub(crate) struct DesktopTools {
     pub(crate) backups: LocalBackups,
+    pub(crate) access: LedgerAccess,
     pub(crate) bound: SocketAddr,
     pub(crate) navigation: Navigation,
     pub(crate) status_db: Arc<Mutex<Db>>,
@@ -252,6 +255,15 @@ impl HostToolHandler for DesktopTools {
         let mut tools = self.navigation.tools();
         tools.push(link_tool::definition());
         tools.extend(changes::definitions());
+        tools.push(HostTool {
+            tool: Tool::new(
+                LICENSE_STATUS_TOOL,
+                "Read whether these books allow Desktop writes and what to do if they are read-only.",
+                JsonObject::from_iter([("type".into(), "object".into())]),
+            ),
+            capability: Capability::Read,
+            effect: HostToolEffect::ReadOnly,
+        });
         tools.extend(BackupTool::ALL.map(BackupTool::definition));
         tools.push(HostTool {
             tool: Tool::new(
@@ -273,6 +285,23 @@ impl HostToolHandler for DesktopTools {
         request: CallToolRequestParams,
         identity: VerifiedAgent,
     ) -> Result<CallToolResult, ErrorData> {
+        if request.name == LICENSE_STATUS_TOOL {
+            let access = self.access.clone();
+            let settings_url = format!("{}settings", crate::server::local_url(self.bound));
+            let result = tokio::task::spawn_blocking(move || {
+                let summary = access.status();
+                let mut result = CallToolResult::structured(serde_json::json!({
+                    "summary": summary,
+                    "settings_url": settings_url,
+                }));
+                result.content = vec![ContentBlock::text(summary)];
+                result
+            })
+            .await;
+            return Ok(result.unwrap_or_else(|_| {
+                tool_error(&CliError::General("license status worker failed".into()))
+            }));
+        }
         if let Ok(tool) = request.name.parse::<BackupTool>() {
             return Ok(tool.call(request, self.backups.clone(), identity).await);
         }
