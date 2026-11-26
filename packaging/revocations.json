@@ -1,6 +1,6 @@
 {
   "format": "beankeeper-revocations-v1",
   "key_id": "prod-2026",
-  "payload": "eyJnZW5lcmF0ZWRfYXQiOiIyMDI2LTExLTI2VDIwOjM4OjA5LjE0MTk1MjM4N1oiLCJyZXZva2VkX2xpY2Vuc2VfaWRzIjpbXX0",
-  "signature": "RSa1-vJCVauEOECvRBZmM9FuuFiA9wAj0Os1hg8AUl2_m87Zqo4Xt0lmlyqR2er_TuyuzzR9TG-vZj1SZ6hDDg"
+  "payload": "eyJnZW5lcmF0ZWRfYXQiOiIyMDI2LTExLTI2VDIxOjU1OjAxLjU5MjkzMTk5MFoiLCJyZXZva2VkX2xpY2Vuc2VfaWRzIjpbImxpY18wMW04Y3ZzczV5ZTlkYTU2NWhwc2RwM3l4cSJdfQ",
+  "signature": "DDcKkVlbKbL6QoDDBwVOvF_FOLrwCQnvhSoYEUgnI10OB3-VI-1qudEVDKVTQzPWK1i6sB-QbyXfD7vLeUKuCQ"
 }
