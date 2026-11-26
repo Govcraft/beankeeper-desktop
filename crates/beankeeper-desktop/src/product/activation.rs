@@ -22,7 +22,7 @@ use crate::{
 
 use super::ProductError;
 
-mod service_url;
+pub(in crate::product) mod service_url;
 use service_url::LicenseServiceUrl;
 
 const CODE_LIMIT: usize = 512;

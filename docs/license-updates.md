@@ -107,6 +107,47 @@ Desktop verifies the redeemed license with the configured issuer keys before
 saving it. Status and offline activation work without contacting the license
 service.
 
+## Return a license and request a refund
+
+Ask your agent to return your license, or run `bk license return`. Before the
+single confirmation, Desktop explains:
+
+> Returns within 60 days of purchase are refunded automatically. If the 60-day
+> window has closed, the return is not accepted, your license stays active and
+> nothing changes.
+
+Confirming requests the return and refund. Paid features stop on this computer
+on success. Your books stay yours and readable. The return never touches your
+books, ledgers or recovery kit. Desktop cannot know the purchase date in advance;
+the license service decides eligibility.
+
+```sh
+bk license return
+bk --json license return --yes
+bk license return --license-id lic_YOUR_LICENSE_ID --yes
+```
+
+If several licenses are installed, select one with `--license-id`. Agents can
+use `--yes` after conveying the policy and obtaining the owner's confirmation.
+The local MCP tool is `license_return`, beside `license_status` and
+`license_activate` on `bk service mcp`. Supported clients show one confirmation
+through MCP elicitation. Other clients receive the policy and must call again
+with `confirm: true` after the owner's confirmation. Neither path requires a
+Desktop screen.
+
+On success, Desktop removes only the returned local license and records the
+receipt ID in its local license event log. Keep the receipt for support. A
+`pending` refund means the return was recorded and the refund is being submitted
+automatically; `submitted` means the seller accepted it. A retried committed
+challenge retrieves the same receipt and local removal is idempotent.
+
+A closed window leaves your license unchanged and active. Complimentary licenses
+have no refund or in-app return; contact support@beankeeper.app. An unauthenticated
+file or challenge cannot be returned. A revoked or replaced license is reported
+as such. If the original seller cannot process the refund, the license stays
+active: try again later or contact support@beankeeper.app. Every failed request
+preserves the local license file.
+
 ## Check and install updates
 
 ```sh

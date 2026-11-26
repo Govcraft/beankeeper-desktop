@@ -14,11 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ServiceError, ServiceOperation, ServiceReply, execute};
-use crate::{
-    agents::extension,
-    product::mcp::{self as license, LicenseTool},
-    setup::AgentAccess,
-};
+use crate::{agents::extension, product::mcp::LicenseTool, setup::AgentAccess};
 
 struct Lifecycle {
     instructions: &'static str,
@@ -52,12 +48,10 @@ impl ServerHandler for Lifecycle {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         if let Some(tool) = LicenseTool::from_name(&request.name) {
-            let result =
-                tokio::task::spawn_blocking(move || tool.call_request(request, None)).await;
-            return Ok(result.unwrap_or_else(|_| license::worker_failure()).into());
+            return Ok(tool.call_with_context(request, context).await.into());
         }
         if request.name == extension::TOOL {
             let result = tokio::task::spawn_blocking(move || extension::mcp_call(request)).await;

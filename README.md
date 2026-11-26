@@ -481,6 +481,12 @@ The CLI equivalents are `bk license activate FILE` and `bk license`. Use
 `--db BOOKS` to select other books. The agent can also offer **License and
 updates** in your paired browser.
 
+To request a return and refund, ask your agent or run `bk license return`.
+Desktop explains the 60-day policy before one confirmation. The service decides
+eligibility. Success stops paid features on this computer and gives you a receipt;
+your books stay yours, readable and untouched. A closed window leaves your
+license active. See the return instructions for seller availability and support.
+
 [License commands and recovery](docs/license-updates.md)
 
 `bk update-check` checks the signed GitHub release manifest at most once daily,

@@ -78,7 +78,7 @@ fn license_mcp_activates_for_selected_books_and_matches_cli_status() -> TestResu
     let mut pipe = McpPipe::start(command().args(["service", "mcp"]))?;
     let listed = pipe.request("tools/list", &json!({}))?;
     let tools = listed["tools"].as_array().ok_or("missing license tools")?;
-    for name in ["license_status", "license_activate"] {
+    for name in ["license_status", "license_activate", "license_return"] {
         assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
     }
     let status = pipe.tool("license_status", &json!({}))?;
@@ -158,6 +158,158 @@ fn license_mcp_activates_for_selected_books_and_matches_cli_status() -> TestResu
     let payload: Value = serde_json::from_slice(&failure.stderr)?;
     assert_eq!(payload["code"], "LICENSE_ARGUMENTS");
     Ok(())
+}
+
+#[test]
+fn license_return_cli_and_mcp_share_confirmation_and_receipt() -> TestResult {
+    use std::{fs, net::TcpListener};
+    let root = tempfile::tempdir()?;
+    let keys = root.path().join("issuer.json");
+    fs::write(&keys, include_bytes!("fixtures/license-public-keys.json"))?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let server = std::thread::spawn(move || serve_return_mock(listener, shutdown));
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys)
+            .env("BEANKEEPER_LICENSE_SERVICE_URL", &origin);
+        command
+    };
+    let mut pipe = McpPipe::start(command().args(["service", "mcp"]))?;
+    let initial = pipe.tool("license_return", &json!({}))?;
+    let cli = command().args(["--json", "license", "return"]).output()?;
+    assert!(!cli.status.success());
+    assert_eq!(
+        initial["structuredContent"],
+        serde_json::from_slice::<Value>(&cli.stdout)?
+    );
+    assert_eq!(
+        initial["structuredContent"]["code"],
+        "confirmation_required"
+    );
+    assert!(
+        initial["structuredContent"]["message"]
+            .as_str()
+            .ok_or("policy missing")?
+            .contains("Returns within 60 days of purchase are refunded automatically.")
+    );
+    assert!(!root.path().join("state").exists());
+
+    let id = "lic_01h455vb4pex5vsknk084sn02q";
+    let activation = root.path().join(format!("state/licenses/{id}.license"));
+    fs::create_dir_all(activation.parent().ok_or("license parent")?)?;
+    fs::write(
+        &activation,
+        include_bytes!("fixtures/license-v4.public.txt"),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&activation, fs::Permissions::from_mode(0o600))?;
+    }
+    let books = root.path().join("books.db");
+    fs::write(&books, b"books must not be touched")?;
+    let returned = pipe.tool("license_return", &json!({"confirm":true, "license_id":id}))?;
+    assert_ne!(returned["isError"], true, "{returned}");
+    assert_eq!(returned["structuredContent"]["code"], "returned");
+    assert!(!activation.exists());
+    assert_eq!(fs::read(&books)?, b"books must not be touched");
+    let replay = command()
+        .args(["--json", "license", "return", "--yes", "--license-id", id])
+        .output()?;
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(
+        returned["structuredContent"],
+        serde_json::from_slice::<Value>(&replay.stdout)?
+    );
+    let _ = stop.send(());
+    server.join().map_err(|_| "return server panicked")??;
+    Ok(())
+}
+
+#[test]
+fn license_return_elicits_once_and_decline_keeps_local_state() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut pipe = McpPipe::spawn(isolated(root.path()).args(["service", "mcp"]))?;
+    pipe.request(
+        "initialize",
+        &json!({
+            "protocolVersion":"2025-11-25", "capabilities":{"elicitation":{"form":{}}},
+            "clientInfo":{"name":"return-elicitation-test","version":"1"}
+        }),
+    )?;
+    writeln!(
+        pipe.input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )?;
+    pipe.id += 1;
+    let request_id = pipe.id;
+    writeln!(
+        pipe.input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":request_id,
+        "method":"tools/call","params":{"name":"license_return","arguments":{}}})
+    )?;
+    pipe.input.flush()?;
+    let elicitation: Value =
+        serde_json::from_str(&pipe.frames.recv_timeout(Duration::from_secs(20))??)?;
+    assert_eq!(elicitation["method"], "elicitation/create");
+    assert!(
+        elicitation["params"]["message"]
+            .as_str()
+            .ok_or("missing policy")?
+            .contains("Confirming requests the return and refund.")
+    );
+    assert_eq!(
+        elicitation["params"]["requestedSchema"]["properties"]["confirm"]["type"],
+        "boolean"
+    );
+    writeln!(
+        pipe.input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":elicitation["id"],
+        "result":{"action":"decline"}})
+    )?;
+    pipe.input.flush()?;
+    let result: Value = serde_json::from_str(&pipe.frames.recv_timeout(Duration::from_secs(20))??)?;
+    assert_eq!(result["id"], request_id);
+    assert_eq!(
+        result["result"]["structuredContent"]["code"],
+        "confirmation_required"
+    );
+    assert!(!root.path().join("state").exists());
+    Ok(())
+}
+
+fn serve_return_mock(
+    listener: std::net::TcpListener,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    use axum::{Json, Router, routing::post};
+    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+        let token = include_str!("fixtures/license-v4.public.txt").trim_end();
+        let challenge = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let app = Router::new()
+            .route("/api/v1/licenses/return/challenge", post(move |Json(body): Json<String>| async move {
+                assert_eq!(body.trim_end(), token);
+                Json(json!({"challenge":challenge,"expires_at":"2099-01-01T00:00:00Z"}))
+            }))
+            .route("/api/v1/licenses/return", post(move |Json(body): Json<Value>| async move {
+                assert_eq!(body["license"].as_str().map(str::trim_end), Some(token));
+                assert_eq!(body["challenge"], challenge);
+                Json(json!({"receipt_id":"ret_01h455vb4pex5vsknk084sn02q","returned_at":"2026-11-26T00:00:00Z","storefront":"polar","refund_status":"pending"}))
+            }));
+        axum::serve(tokio::net::TcpListener::from_std(listener)?, app)
+            .with_graceful_shutdown(async { let _ = shutdown.await; }).await
+    })
 }
 
 fn assert_invalid_license_inputs(pipe: &mut McpPipe, token: &str) -> TestResult {
@@ -484,6 +636,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
             "agents_extension",
             "license_status",
             "license_activate",
+            "license_return",
         ]
     );
     for tool in tools {
@@ -998,7 +1151,7 @@ fn assert_managed_skill_discovery(command: &mut std::process::Command) -> TestRe
         tools.iter().any(|tool| tool["name"] == "setup_status"),
         "{list}"
     );
-    for name in ["license_status", "license_activate"] {
+    for name in ["license_status", "license_activate", "license_return"] {
         assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
     }
     let license = pipe.request(
