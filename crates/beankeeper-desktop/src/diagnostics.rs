@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, process::ExitCode, str::FromStr};
 
 /// Read-only diagnostic operations available to both shell and chat agents.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Diagnostic {
     /// Inspect the locally installed Claude extension.
     Doctor,
@@ -15,7 +15,7 @@ pub enum Diagnostic {
 }
 
 /// Named failures at the diagnostic tool boundary.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DiagnosticError {
     /// The requested tool is not a diagnostic operation.
     UnknownTool,
@@ -37,11 +37,10 @@ impl std::error::Error for DiagnosticError {}
 impl FromStr for Diagnostic {
     type Err = DiagnosticError;
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        match name {
-            "doctor" => Ok(Self::Doctor),
-            "update_check" => Ok(Self::UpdateCheck),
-            _ => Err(DiagnosticError::UnknownTool),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.as_ref() == name)
+            .ok_or(DiagnosticError::UnknownTool)
     }
 }
 
@@ -53,10 +52,64 @@ struct NoArguments {}
 struct Report {
     extension: Observation,
     #[serde(skip_serializing_if = "Option::is_none")]
-    desktop_updates: Option<String>,
+    desktop_updates: Option<DesktopUpdates>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DesktopUpdates {
+    Status(updates::UpdateStatus),
+    Unavailable { code: &'static str, message: String },
+}
+
+impl From<product::ProductError> for DesktopUpdates {
+    fn from(error: product::ProductError) -> Self {
+        Self::Unavailable {
+            code: "DESKTOP_UPDATE_CHECK_UNAVAILABLE",
+            message: format!("Could not check Desktop updates: {error}"),
+        }
+    }
+}
+
+impl fmt::Display for DesktopUpdates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Status(status) => status.fmt(f),
+            Self::Unavailable { message, .. } => f.write_str(message),
+        }
+    }
+}
+
+impl AsRef<str> for Diagnostic {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Doctor => "doctor",
+            Self::UpdateCheck => "update_check",
+        }
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
 }
 
 impl Diagnostic {
+    /// Complete diagnostic catalog shared by CLI and MCP adapters.
+    pub const ALL: [Self; 2] = [Self::Doctor, Self::UpdateCheck];
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Doctor => {
+                "Read the installed Claude extension version and compare it with this Desktop version. A stale extension never blocks the books. Ask agents_extension to open an upgrade when the owner requests it."
+            }
+            Self::UpdateCheck => {
+                "Check signed Desktop releases and report the same Claude extension status as doctor. Takes no arguments."
+            }
+        }
+    }
+
     fn report(self) -> Report {
         let desktop_updates = matches!(self, Self::UpdateCheck).then(|| {
             product::state_dir()
@@ -67,10 +120,10 @@ impl Diagnostic {
                         updates::now(),
                     )?)
                 })
-                .unwrap_or_else(|error| format!("Could not check Desktop updates: {error}"))
+                .map_or_else(DesktopUpdates::from, DesktopUpdates::Status)
         });
         Report {
-            extension: Observation::default(),
+            extension: Observation::discover(),
             desktop_updates,
         }
     }
@@ -104,13 +157,19 @@ pub fn run(operation: Diagnostic, json: bool) -> ExitCode {
 
 pub(crate) fn tools() -> Vec<Tool> {
     let schema = schemars::schema_for!(NoArguments).to_value();
-    [
-        ("doctor", "Read the installed Claude extension version and compare it with this Desktop version. A stale extension never blocks the books. Ask agents_extension to open an upgrade when the owner requests it."),
-        ("update_check", "Check signed Desktop releases and report the same Claude extension status as doctor. Takes no arguments."),
-    ].into_iter().filter_map(|(name, description)| Some(
-        Tool::new(name, description, schema.as_object()?.clone())
-            .with_annotations(ToolAnnotations::new().read_only(true).destructive(false))
-    )).collect()
+    Diagnostic::ALL
+        .into_iter()
+        .filter_map(|operation| {
+            Some(
+                Tool::new(
+                    operation.to_string(),
+                    operation.description(),
+                    schema.as_object()?.clone(),
+                )
+                .with_annotations(ToolAnnotations::new().read_only(true).destructive(false)),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn call(operation: Diagnostic, request: CallToolRequestParams) -> CallToolResult {
@@ -159,6 +218,17 @@ pub fn after_update(version: semver::Version) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn catalog_names_round_trip_and_match_tools() {
+        let tools = tools();
+        assert_eq!(tools.len(), Diagnostic::ALL.len());
+        for (operation, tool) in Diagnostic::ALL.into_iter().zip(tools) {
+            assert_eq!(operation.as_ref().parse(), Ok(operation));
+            assert_eq!(operation.to_string(), tool.name);
+        }
+        assert!("unknown".parse::<Diagnostic>().is_err());
+    }
+
     #[test]
     fn diagnostic_arguments_are_validated_into_a_request() {
         assert!(DiagnosticRequest::try_from((Diagnostic::Doctor, None)).is_ok());

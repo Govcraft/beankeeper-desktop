@@ -53,11 +53,13 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .filter(|command| include_status || *command != ExtensionCommand::Status)
         .filter_map(ExtensionCommand::tool)
         .chain(agents_extension::mcp_tool())
-        .chain(
-            crate::diagnostics::tools()
-                .into_iter()
-                .filter(|tool| tool.name != "doctor"),
-        )
+        // `doctor` already diagnoses the extension's authenticated ledger connection.
+        // `update_check` carries the shared version report on this surface so that
+        // existing agents retain the connection diagnostic without a name collision.
+        .chain(crate::diagnostics::tools().into_iter().filter(|tool| {
+            tool.name.parse::<crate::diagnostics::Diagnostic>()
+                != Ok(crate::diagnostics::Diagnostic::Doctor)
+        }))
         .chain(LicenseTool::tools())
         .collect()
 }
@@ -217,15 +219,15 @@ impl Session {
             );
             return response(output, id, result).map(|()| true);
         }
-        if message["params"]["name"] == "update_check" {
+        if let Some(operation @ crate::diagnostics::Diagnostic::UpdateCheck) =
+            message["params"]["name"]
+                .as_str()
+                .and_then(|name| name.parse::<crate::diagnostics::Diagnostic>().ok())
+        {
             let params = CallToolRequestParams::deserialize(&message["params"])
                 .map_err(|_| BridgeError::Protocol)?;
-            return response(
-                output,
-                id,
-                crate::diagnostics::call(crate::diagnostics::Diagnostic::UpdateCheck, params),
-            )
-            .map(|()| true);
+            return response(output, id, crate::diagnostics::call(operation, params))
+                .map(|()| true);
         }
         Ok(false)
     }

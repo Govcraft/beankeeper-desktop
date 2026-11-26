@@ -177,9 +177,13 @@ prevent installation. Self-update runs only when requested.
 Discovery requests send the Desktop `version` and `os`, plus the RC list's
 `per_page=100` pagination parameter, with a fixed product User Agent. They send
 no company, account, transaction, passphrase, license ID or purchaser data. Downloads use bounded HTTPS requests. Verification uses the Sigstore crate's
-embedded production trust roots without a separate network request. If future
-signing keys are absent from those roots, verification fails closed; updating
-Desktop's verifier and trust-root dependency restores support.
+embedded production trust roots without a separate network request. If those
+roots do not cover future signing authorities or log keys, Desktop can recover
+through `cosign verify-blob` when cosign is on PATH, with the same exact release
+identity and issuer. It first checks the artifact digest, signature, and identity;
+tampering and identity mismatches never select recovery. Cosign must then verify
+the full bundle against its trust roots. Missing cosign or failed recovery leaves
+verification closed with the same error.
 
 `bk serve` checks after successful startup without delaying ledger access, then
 once per day. `bk update-check` shares the persisted attempt time and process

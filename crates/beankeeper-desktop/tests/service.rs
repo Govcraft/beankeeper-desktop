@@ -709,6 +709,7 @@ fn extension_diagnostics_match_cli_and_mcp_without_cosign_or_a_ledger() -> TestR
         assert!(output.status.success());
         let updates: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(cli["extension"], updates["extension"]);
+        assert_eq!(updates["desktop_updates"]["state"], "disabled");
         for args in [["service", "mcp"], ["mcp", "extension"]] {
             let mut pipe = McpPipe::start(command().args(args))?;
             let listed = pipe.request("tools/list", &json!({}))?;
@@ -724,6 +725,12 @@ fn extension_diagnostics_match_cli_and_mcp_without_cosign_or_a_ledger() -> TestR
                 );
                 let report = pipe.tool(name, &json!({}))?;
                 assert_eq!(report["structuredContent"]["extension"], cli["extension"]);
+                if name == "update_check" {
+                    assert_eq!(
+                        report["structuredContent"]["desktop_updates"],
+                        updates["desktop_updates"]
+                    );
+                }
             }
         }
         assert_eq!(fs::read(&registry)?, bytes);

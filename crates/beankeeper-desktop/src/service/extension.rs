@@ -157,7 +157,7 @@ impl Progress<'_> {
             progress: self,
             claude_restart_required: false,
             summary: self.summary(),
-            extension: crate::agents::extension_status::Observation::default(),
+            extension: crate::agents::extension_status::Observation::discover(),
         }
     }
 

@@ -103,21 +103,30 @@ pub(crate) enum Observation {
     },
 }
 
-impl Default for Observation {
-    fn default() -> Self {
-        let service_version = crate::service::status()
-            .ok()
-            .and_then(|status| status.version);
-        let running = service_version
-            .as_deref()
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .parse()
-            .map_err(|_| AgentError::Home);
-        Self::from(running.and_then(discover))
-    }
-}
-
 impl Observation {
+    pub(crate) fn discover() -> Self {
+        Self::from_service(crate::service::status())
+    }
+
+    fn from_service(status: Result<crate::service::Status, crate::service::ServiceError>) -> Self {
+        match status {
+            Err(crate::service::ServiceError::Version) => Self::Unavailable {
+                state: Unavailable::Unavailable,
+                code: crate::service::ServiceError::Version.code(),
+                message: "Could not read the service version. Your books are still available."
+                    .into(),
+            },
+            status => {
+                let running = status
+                    .ok()
+                    .and_then(|status| status.version)
+                    .map_or_else(|| env!("CARGO_PKG_VERSION").parse(), Ok)
+                    .map_err(|_| AgentError::Version);
+                Self::from(running.and_then(discover))
+            }
+        }
+    }
+
     pub(crate) fn at_version(version: semver::Version) -> Self {
         Self::from(discover(version))
     }
@@ -151,6 +160,14 @@ impl fmt::Display for Observation {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn invalid_service_version_has_a_distinct_diagnostic() -> Result<(), serde_json::Error> {
+        let observation = Observation::from_service(Err(crate::service::ServiceError::Version));
+        let result = serde_json::to_value(observation)?;
+        assert_eq!(result["code"], "SERVICE_VERSION_INVALID");
+        Ok(())
+    }
 
     #[test]
     fn registry_states_are_semantic_read_only_and_ignore_other_extensions()

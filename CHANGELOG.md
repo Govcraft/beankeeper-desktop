@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Report stale Claude extensions through CLI and MCP and open signed upgrades without requiring cosign, with restart guidance.
+- Report stale Claude extensions through CLI and MCP and open signed upgrades with in-process verification, trust-rotation recovery, and restart guidance.
 
 ## [1.0.1] - 2026-11-26
 
