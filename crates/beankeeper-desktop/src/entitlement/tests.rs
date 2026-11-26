@@ -127,7 +127,12 @@ fn activation_is_per_ledger_and_signed_revocations_apply_offline() -> TestResult
 fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("books.db");
-    let db = Db::open(&path, None)?;
+    use beankeeper_cli::{
+        db::audit::restore::RestoreRequest,
+        request::{LedgerRequest, LedgerResponse},
+    };
+
+    let McpBooks { db, token } = McpBooks::open(&path)?;
     let access = enforced(&path, dir.path(), CLEAN)?;
     let target = LedgerTarget::default();
     let mut cli = Cli::try_parse_from(["bk", "company", "create", "blocked", "Blocked"])?;
@@ -174,6 +179,16 @@ fn stable_cli_keeps_reads_exports_and_backup_recovery_available() -> TestResult 
         commands::dispatch_with_db(&mut cli, db, None)?;
     }
     assert!(export.is_file());
+    let database = access.protect(Db::open_existing(&path, None)?, target);
+    let actor = Actor::new("owner".parse()?)
+        .with_identity(identity::verify(database.read(), token.expose_secret())?);
+    let response = LedgerRequest::Restore(RestoreRequest::Backup(backup.clone().try_into()?))
+        .execute(&database, &actor)?;
+    let LedgerResponse::Restore(_, receipt) = response else {
+        return Err("expected a restore receipt".into());
+    };
+    LedgerRequest::Restore(RestoreRequest::Undo(receipt.restore_id()))
+        .execute(&database, &actor)?;
     let cli = Cli::try_parse_from([
         "bk",
         "--db",
@@ -227,7 +242,10 @@ impl McpClient {
         url: String,
         token: &secrecy::SecretString,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = reqwest::Client::builder().no_proxy().build()?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
         let response = client.post(&url)
             .header("accept", "application/json, text/event-stream")
             .header("mcp-protocol-version", "2025-11-25")
