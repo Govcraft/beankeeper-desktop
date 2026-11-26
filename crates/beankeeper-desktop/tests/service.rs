@@ -261,7 +261,7 @@ fn license_return_cli_and_mcp_share_confirmation_and_receipt() -> TestResult {
 #[test]
 fn license_return_empty_and_multiple_match_across_cli_and_mcp() -> TestResult {
     let root = tempfile::tempdir()?;
-    let mut pipe = McpPipe::spawn(isolated(root.path()).args(["service", "mcp"]))?;
+    let mut pipe = McpPipe::start(isolated(root.path()).args(["service", "mcp"]))?;
     for (count, code) in [(0, "no_license_installed"), (2, "choose_license")] {
         if count == 2 {
             let directory = root.path().join("state/licenses");
