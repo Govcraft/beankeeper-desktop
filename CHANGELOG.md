@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0-rc.33] - 2026-11-26
+
 - Guide conversation charts to distinguish debt from cash and use neutral or warning colors for negative net worth.
 - Request a license return and automatic refund through CLI or MCP with one confirmation, a receipt, and untouched books.
 
