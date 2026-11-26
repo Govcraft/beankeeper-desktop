@@ -486,6 +486,10 @@ The CLI equivalents are `bk license activate FILE` and `bk license`. Use
 updates** in your paired browser.
 
 To request a return and refund, ask your agent or run `bk license return`.
+With no installed license, CLI and MCP report that there is nothing to return;
+a saved return reports its latest receipt ID. With several installed licenses,
+select a license ID. If the CLI prompt receives no answer, rerun with `--yes`
+to request the return.
 Desktop explains the 60-day policy before one confirmation. The service decides
 eligibility. Success stops paid features on this computer and gives you a receipt;
 your books stay yours, readable and untouched. A closed window leaves your

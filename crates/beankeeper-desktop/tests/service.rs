@@ -183,8 +183,8 @@ fn license_return_cli_and_mcp_share_confirmation_and_receipt() -> TestResult {
     let cli = command().args(["--json", "license", "return"]).output()?;
     assert!(!cli.status.success());
     assert_eq!(
-        initial["structuredContent"],
-        serde_json::from_slice::<Value>(&cli.stdout)?
+        initial["structuredContent"]["code"],
+        serde_json::from_slice::<Value>(&cli.stdout)?["code"]
     );
     assert_eq!(
         initial["structuredContent"]["code"],
@@ -212,13 +212,23 @@ fn license_return_cli_and_mcp_share_confirmation_and_receipt() -> TestResult {
     }
     let books = root.path().join("books.db");
     fs::write(&books, b"books must not be touched")?;
-    let returned = pipe.tool("license_return", &json!({"confirm":true, "license_id":id}))?;
+    let returned = pipe.tool("license_return", &json!({"confirm":true}))?;
     assert_ne!(returned["isError"], true, "{returned}");
     assert_eq!(returned["structuredContent"]["code"], "returned");
     assert!(!activation.exists());
     assert_eq!(fs::read(&books)?, b"books must not be touched");
+    // A single installed license is also selected automatically by the CLI.
+    fs::write(
+        &activation,
+        include_bytes!("fixtures/license-v4.public.txt"),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&activation, fs::Permissions::from_mode(0o600))?;
+    }
     let replay = command()
-        .args(["--json", "license", "return", "--yes", "--license-id", id])
+        .args(["--json", "license", "return", "--yes"])
         .output()?;
     assert!(
         replay.status.success(),
@@ -229,8 +239,69 @@ fn license_return_cli_and_mcp_share_confirmation_and_receipt() -> TestResult {
         returned["structuredContent"],
         serde_json::from_slice::<Value>(&replay.stdout)?
     );
+    let already = pipe.tool("license_return", &json!({"confirm":true}))?;
+    let cli = command()
+        .args(["--json", "license", "return", "--yes"])
+        .output()?;
+    assert!(cli.status.success());
+    assert_eq!(
+        already["structuredContent"],
+        serde_json::from_slice::<Value>(&cli.stdout)?
+    );
+    assert_eq!(already["structuredContent"]["code"], "already_returned");
+    assert_eq!(
+        already["structuredContent"]["receipt"]["receipt_id"],
+        returned["structuredContent"]["receipt"]["receipt_id"]
+    );
     let _ = stop.send(());
     server.join().map_err(|_| "return server panicked")??;
+    Ok(())
+}
+
+#[test]
+fn license_return_empty_and_multiple_match_across_cli_and_mcp() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut pipe = McpPipe::start(isolated(root.path()).args(["service", "mcp"]))?;
+    for (count, code) in [(0, "no_license_installed"), (2, "choose_license")] {
+        if count == 2 {
+            let directory = root.path().join("state/licenses");
+            std::fs::create_dir_all(&directory)?;
+            for name in ["first.license", "second.license"] {
+                std::fs::write(directory.join(name), "not read until selected")?;
+            }
+        }
+        let mcp = pipe.tool("license_return", &json!({"confirm":true}))?;
+        let cli = isolated(root.path())
+            .args(["--json", "license", "return", "--yes"])
+            .output()?;
+        assert_eq!(
+            mcp["structuredContent"],
+            serde_json::from_slice::<Value>(&cli.stdout)?
+        );
+        assert_eq!(mcp["structuredContent"]["code"], code);
+        assert_eq!(cli.status.success(), count == 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn license_return_closed_stdin_gives_cli_retry_guidance() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let output = isolated(root.path())
+        .args(["license", "return"])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stdout.contains("rerun bk license return --yes"));
+    assert!(!stdout.contains("license_return"));
+    assert_eq!(
+        format!("{stdout}{stderr}")
+            .matches("Returns within 60 days")
+            .count(),
+        1
+    );
     Ok(())
 }
 

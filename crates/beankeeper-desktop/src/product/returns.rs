@@ -68,23 +68,23 @@ impl ReturnRequest {
         };
         let result = (|| {
             let state = super::state_dir().map_err(|_| Outcome::LocalUnavailable)?;
-            let service = ReturnService::configured()?;
-            self.execute_at(&state, &service, confirmed)
+            self.execute_at(&state, confirmed)
         })();
         result.unwrap_or_else(Into::into)
     }
     fn execute_at(
         self,
         state: &Path,
-        service: &ReturnService,
         confirmed: ConfirmedReturn,
     ) -> Result<ReturnResponse, Outcome> {
         let (id, selected_proof) = if let Some(id) = self.license_id {
             (id, None)
         } else {
             let paths = license::activation_paths(state).map_err(|_| Outcome::LocalUnavailable)?;
-            let [path] = paths.as_slice() else {
-                return Err(Outcome::ChooseLicense);
+            let path = match paths.as_slice() {
+                [] => return previous_return(state),
+                [path] => path,
+                [_, _, ..] => return Err(Outcome::ChooseLicense),
             };
             let proof = Proof::read(path)?;
             (proof.id.clone(), Some(proof))
@@ -105,9 +105,46 @@ impl ReturnRequest {
         if proof.id != id {
             return Err(Outcome::InvalidLicenseProof);
         }
-        finish_return(state, &proof, &event, service, confirmed)
+        let service = ReturnService::configured()?;
+        finish_return(state, &proof, &event, &service, confirmed)
     }
 }
+// Receipt history is local evidence, so this path never needs the return service.
+fn previous_return(state: &Path) -> Result<ReturnResponse, Outcome> {
+    let entries = match fs::read_dir(state.join("license-returns")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Outcome::NoLicenseInstalled.into());
+        }
+        Err(_) => return Err(Outcome::LocalUnavailable),
+    };
+    let mut receipts = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|_| Outcome::LocalUnavailable)?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            let bytes =
+                super::bounded_file(&path, 16_384).map_err(|_| Outcome::LocalUnavailable)?;
+            let receipt: Receipt =
+                serde_json::from_slice(&bytes).map_err(|_| Outcome::LocalUnavailable)?;
+            receipts.push(receipt);
+        }
+    }
+    // Report the newest return; the receipt ID breaks timestamp ties deterministically.
+    let Some(receipt) = receipts
+        .into_iter()
+        .max_by_key(|receipt| (receipt.returned_at, receipt.id.to_string()))
+    else {
+        return Ok(Outcome::NoLicenseInstalled.into());
+    };
+    let mut response = ReturnResponse::from(Outcome::AlreadyReturned);
+    response.message = format!("{} Receipt: {}.", response.message, receipt.id);
+    response.receipt = Some(receipt);
+    Ok(response)
+}
+
 fn finish_return(
     state: &Path,
     proof: &Proof,
@@ -271,6 +308,8 @@ enum Outcome {
     ServiceUnavailable,
     LocalUnavailable,
     ChooseLicense,
+    NoLicenseInstalled,
+    AlreadyReturned,
 }
 impl Outcome {
     fn message(self) -> &'static str {
@@ -299,6 +338,12 @@ impl Outcome {
             }
             Self::LocalUnavailable => {
                 "Desktop could not finish updating its local license records. Your books were never touched. Try again or contact support@beankeeper.app."
+            }
+            Self::NoLicenseInstalled => {
+                "No license is installed on this computer. There is nothing to return. Your books were never touched."
+            }
+            Self::AlreadyReturned => {
+                "Your license was already returned. There is nothing more to return. Your books were never touched."
             }
             Self::ChooseLicense => {
                 "Choose the license to return using license_id. Use license_status to see your installed licenses."
@@ -356,11 +401,24 @@ impl From<Receipt> for ReturnResponse {
     }
 }
 impl ReturnResponse {
+    pub(crate) fn into_cli(mut self) -> Self {
+        if self.needs_confirmation() {
+            "To request the return and refund, rerun bk license return --yes."
+                .clone_into(&mut self.message);
+        }
+        self
+    }
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
     pub(crate) fn is_error(&self) -> bool {
-        !matches!(self.code, Outcome::Returned | Outcome::ConfirmationRequired)
+        !matches!(
+            self.code,
+            Outcome::Returned
+                | Outcome::AlreadyReturned
+                | Outcome::NoLicenseInstalled
+                | Outcome::ConfirmationRequired
+        )
     }
     pub(crate) fn needs_confirmation(&self) -> bool {
         self.code == Outcome::ConfirmationRequired
@@ -472,6 +530,39 @@ mod tests {
         thread,
     };
     const RECEIPT: &str = r#"{"receipt_id":"ret_01h455vb4pex5vsknk084sn02q","returned_at":"2026-11-26T00:00:00Z","storefront":"polar","refund_status":"pending"}"#;
+
+    #[test]
+    fn return_history_uses_newest_receipt_and_rejects_corruption()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = tempfile::tempdir()?;
+        assert_eq!(
+            previous_return(state.path())?.code,
+            Outcome::NoLicenseInstalled
+        );
+        let history = state.path().join("license-returns");
+        fs::create_dir(&history)?;
+        fs::write(
+            history.join("older.json"),
+            RECEIPT.replace("2026-11-26", "2026-11-25"),
+        )?;
+        fs::write(history.join("newer.json"), RECEIPT)?;
+        let response = previous_return(state.path())?;
+        assert_eq!(response.code, Outcome::AlreadyReturned);
+        assert_eq!(
+            response
+                .receipt
+                .ok_or("missing receipt")?
+                .returned_at
+                .to_rfc3339(),
+            "2026-11-26T00:00:00+00:00"
+        );
+        fs::write(history.join("corrupt.json"), "{}")?;
+        assert!(matches!(
+            previous_return(state.path()),
+            Err(Outcome::LocalUnavailable)
+        ));
+        Ok(())
+    }
 
     #[test]
     fn every_server_failure_has_a_closed_typed_outcome() {
