@@ -329,6 +329,8 @@ private agent-token file path. This bridge connects to the running `bk serve`.
 Start a manually hosted ledger with `bk --db /path/to/books.db serve` or
 rerun `setup --force`. Stored passphrases are resolved automatically
 for enrolled ledgers; explicit upstream secret sources take precedence.
+Direct Streamable HTTP clients of standalone `bk serve` can resume an
+interrupted stream in the same session using `Last-Event-ID`.
 
 `setup --force` resumes without deleting data, rotating the root or changing an
 existing preset. Capability changes and token renewal use upstream commands

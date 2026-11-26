@@ -176,6 +176,8 @@ prompting, using upstream's `--passphrase-file`, `--passphrase-fd` or
 All upstream CLI commands remain available, including
 `bk mcp serve` for stdio and `bk mcp serve --http` for MCP-only HTTP. Desktop
 extends upstream's command parser and delegates those commands to its dispatcher.
+Standalone `bk serve` supports resuming interrupted MCP streams within the
+same session. See [Stream resumption](docs/service.md#stream-resumption).
 Use `bk --help` or `bk serve --help` for options.
 The MCP router receives the already-resolved passphrase through upstream's
 public host-tool factory, preserving one-shot secret sources without a pipe or

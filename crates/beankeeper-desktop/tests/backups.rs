@@ -2,7 +2,13 @@
 
 pub mod common;
 
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
 use beankeeper::types::{AccountType, Currency, DebitOrCredit, DocumentType};
 use beankeeper_cli::{
@@ -12,6 +18,7 @@ use beankeeper_cli::{
         StoreAttachmentParams, ids::TransactionId, verification::VerifiedLedger,
     },
     identity::{self, Admin, Granted, IssueRequest, Post},
+    mcp::LEDGER_TARGET_HEADER,
 };
 use serde_json::{Value, json};
 
@@ -64,12 +71,12 @@ fn admin(ledger: &Ledger) -> TestResult<String> {
     Ok(token(&grant)?.to_owned())
 }
 
-fn local_backup(ledger: &Ledger, id: &str) -> std::path::PathBuf {
+fn local_backup(ledger: &Ledger, name: &str) -> std::path::PathBuf {
     ledger
         .path
         .with_file_name(".beankeeper-backups")
         .join("books.db")
-        .join(id)
+        .join(name)
 }
 
 fn accounts(ledger: &Ledger) -> TestResult {
@@ -158,6 +165,110 @@ fn contains_txn(ledger: &Ledger, txn: TransactionId) -> TestResult<bool> {
         [txn],
         |row| row.get(0),
     )?)
+}
+
+#[test]
+fn standalone_desktop_replays_missed_startup_ledger_response() -> TestResult {
+    let ledger = Ledger::new()?;
+    let bearer = token(&ledger.reader)?;
+    let mut server = Server::start(&ledger, &["serve"], None)?;
+    server.initialize(Some(bearer))?;
+    let expected = data(cli(&ledger, bearer).arg("list"))?;
+
+    // Hold the tool in flight while the first stream drops and its replacement attaches.
+    let catalog_lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(local_backup(&ledger, "catalog.lock"))?;
+    catalog_lock.lock()?;
+    let original = server.request(
+        "tools/call",
+        json!({"name":"backup_list", "arguments":{}}),
+        Some(bearer),
+    )?;
+    assert_eq!(original.status(), 200);
+    let mut lines = BufReader::new(original).lines();
+    let checkpoint = loop {
+        let line = lines.next().ok_or("missing SSE checkpoint")??;
+        if let Some(id) = line.strip_prefix("id:") {
+            break id.trim().to_owned();
+        }
+    };
+    drop(lines);
+
+    let session = server.session.as_deref().ok_or("session")?;
+    let resume = || {
+        server
+            .client
+            .get(format!("{}/mcp", server.base))
+            .header("Accept", "text/event-stream")
+            .header("Mcp-Session-Id", session)
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .header("Last-Event-ID", &checkpoint)
+    };
+    assert_eq!(resume().bearer_auth("invalid").send()?.status(), 401);
+    let resumed = resume().bearer_auth(bearer).send()?;
+    drop(catalog_lock);
+    let replayed = rpc(resumed)?;
+    assert_eq!(replayed["id"], 1);
+    assert_eq!(replayed["result"]["structuredContent"], expected);
+    Ok(())
+}
+
+#[test]
+fn upstream_http_backs_up_startup_and_named_books_before_serving() -> TestResult {
+    let startup = Ledger::new()?;
+    let mut named = Ledger::new()?;
+    let named_path = named.path.with_file_name("books=secondary.db");
+    fs::rename(&named.path, &named_path)?;
+    named.path = named_path;
+    let binding = format!("secondary={}", named.path.display());
+    let mut command = startup.command();
+    command.args([
+        "--ledger",
+        &binding,
+        "--ledger-target",
+        "secondary",
+        "mcp",
+        "serve",
+        "--http",
+        "--bind",
+        "127.0.0.1:0",
+    ]);
+    let mut server = Server::launch(command)?;
+    for ledger in [&startup, &named] {
+        let catalog = data(cli(ledger, token(&ledger.reader)?).arg("list"))?;
+        assert_eq!(catalog["backups"][0]["reason"], "first_backup");
+    }
+
+    let bearer = token(&named.reader)?;
+    let expected = data(startup.command().args([
+        "--ledger",
+        &binding,
+        "--ledger-target",
+        "secondary",
+        "--agent-token",
+        bearer,
+        "--json",
+        "company",
+        "list",
+    ]))?;
+    server.initialize(Some(token(&startup.reader)?))?;
+    let response = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .bearer_auth(bearer)
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .header("Mcp-Session-Id", server.session.as_deref().ok_or("session")?)
+        .header(LEDGER_TARGET_HEADER, "secondary")
+        .json(&json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"company_list", "arguments":{}}}))
+        .send()?;
+    let result = &rpc(response)?["result"];
+    let content: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().ok_or("content")?)?;
+    assert_eq!(content, expected);
+    Ok(())
 }
 
 #[test]

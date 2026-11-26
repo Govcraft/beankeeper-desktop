@@ -99,6 +99,18 @@ that the tool list changed. A bridge process from a release that loaded its
 credential only at startup may need one MCP reconnect after upgrading.
 Use explicit bridge `--url` and `--token-file` for manual servers.
 
+### Stream resumption
+
+A Streamable HTTP client connected directly to standalone `bk serve` can
+resume an interrupted SSE stream with a `GET /mcp` request. Put the last received
+event ID in `Last-Event-ID`. Send the same `Mcp-Session-Id` and MCP protocol version,
+`Accept: text/event-stream`, and a valid bearer credential. For a tool call,
+reconnect while the request is still running to receive its response. Managed
+hosting returns HTTP 405 for resume requests because a session can switch
+between the owner's books and fictional demo books.
+
+### Status and diagnostics
+
 Status verifies Desktop's launch identity and PID before using the private agent
 credential to open a short MCP session. It reads the version from the responding
 server and retrieves the verified `agent_access` from `setup_status`. The

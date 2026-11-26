@@ -5,6 +5,7 @@ use beankeeper_cli::{
     commands::{self, setup::SetupCommand},
     db::companies::CompanySlug,
     error::CliError,
+    ledger_target::LedgerPath,
     output::json::Meta,
     passphrase,
 };
@@ -26,7 +27,7 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
             cli.company.as_ref().map(CompanySlug::as_str),
         )
     });
-    match dispatch(&mut cli, matches, meta.clone()) {
+    match dispatch(&mut cli, meta.clone()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let meta = meta.map(|meta| cli.meta(meta.command, meta.company.as_deref()));
@@ -36,8 +37,8 @@ pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-fn dispatch(cli: &mut Cli, matches: &ArgMatches, meta: Option<Meta>) -> Result<(), CliError> {
-    let ledgers = DispatchBooks::try_from((&*cli, matches))?;
+fn dispatch(cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+    let ledgers = DispatchBooks::try_from(&*cli)?;
     let _stored = setup::stored_passphrase_for(&mut cli.passphrase, &ledgers.primary)
         .map_err(|error| CliError::General(error.to_string()))?;
     let _replay = ledgers.prepare(cli)?;
@@ -52,14 +53,14 @@ struct DispatchBooks {
 enum DispatchOpen {
     CoreOnly,
     Existing,
-    Http(Vec<PathBuf>),
+    Http(Vec<LedgerPath>),
     Replace { encrypt: bool },
 }
 
-impl TryFrom<(&Cli, &ArgMatches)> for DispatchBooks {
+impl TryFrom<&Cli> for DispatchBooks {
     type Error = CliError;
 
-    fn try_from((cli, matches): (&Cli, &ArgMatches)) -> Result<Self, CliError> {
+    fn try_from(cli: &Cli) -> Result<Self, CliError> {
         let primary = match &cli.command {
             Command::Init {
                 path: Some(path), ..
@@ -97,30 +98,20 @@ impl TryFrom<(&Cli, &ArgMatches)> for DispatchBooks {
                 if !allow_remote && bind.is_some_and(|address| !address.ip().is_loopback()) {
                     DispatchOpen::CoreOnly
                 } else {
-                    // db_path() above validated core's typed binding set. Core
-                    // keeps its entries private, so project the paths from the
-                    // accepted values until it exposes an iterator.
-                    let named = matches
-                        .get_raw("ledger_bindings")
-                        .into_iter()
-                        .flatten()
-                        .map(|binding| {
-                            binding
-                                .to_str()
-                                .and_then(|value| value.split_once('='))
-                                .map(|(_, path)| PathBuf::from(path))
-                                .ok_or_else(|| {
-                                    CliError::General(
-                                        "cannot obtain the upstream HTTP ledger binding path"
-                                            .into(),
-                                    )
-                                })
-                        })
-                        .collect::<Result<_, _>>()?;
+                    let named = cli
+                        .ledger_bindings()?
+                        .map(|(_, path)| path.clone())
+                        .collect();
                     DispatchOpen::Http(named)
                 }
             }
             _ => DispatchOpen::Existing,
+        };
+        // HTTP opens the startup books as well as every named binding.
+        let primary = if matches!(open, DispatchOpen::Http(_)) {
+            cli.db.clone()
+        } else {
+            primary
         };
         Ok(Self { primary, open })
     }
@@ -148,8 +139,9 @@ impl DispatchBooks {
         books.prepare(matches!(self.open, DispatchOpen::Replace { .. }))?;
         if let DispatchOpen::Http(named) = self.open {
             for path in named {
+                let path = path.as_ref();
                 if path.try_exists()? {
-                    LocalBackups::new(path.as_path().try_into()?, key.0.clone()).prepare(false)?;
+                    LocalBackups::new(path.try_into()?, key.0.clone()).prepare(false)?;
                 }
             }
         }

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Resume interrupted standalone Desktop MCP streams and prepare named-ledger backups from Beankeeper's validated CLI bindings.
 - Automatically back up local books and attachments before Desktop and CLI migrations or upgrades, protect the newest migration or upgrade backup, and list, restore, or undo backups through Desktop MCP and the CLI.
 
 ## [0.1.0-rc.30] - 2026-11-25
