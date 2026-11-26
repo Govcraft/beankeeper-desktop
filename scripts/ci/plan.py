@@ -82,6 +82,11 @@ RULES: tuple[tuple[str, Checks, str], ...] = (
         RUST | packaging(ALL_TARGETS),
         "embedded license trust",
     ),
+    (
+        "packaging/revocations.json",
+        RUST | packaging(ALL_TARGETS),
+        "embedded signed license revocations",
+    ),
     ("crates/", RUST, "Rust source"),
     ("ui/", RUST, "embedded UI"),
     ("Cargo.toml", RUST, "workspace manifest"),
