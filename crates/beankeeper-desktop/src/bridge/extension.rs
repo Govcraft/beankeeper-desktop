@@ -53,6 +53,11 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .filter(|command| include_status || *command != ExtensionCommand::Status)
         .filter_map(ExtensionCommand::tool)
         .chain(agents_extension::mcp_tool())
+        .chain(
+            crate::diagnostics::tools()
+                .into_iter()
+                .filter(|tool| tool.name != "doctor"),
+        )
         .chain(LicenseTool::tools())
         .collect()
 }
@@ -161,19 +166,8 @@ impl Session {
                 .map(|managed| managed.books.as_path());
             return response(output, id, tool.call(&message["params"], books));
         }
-        if request.kind() == MethodKind::ToolsCall
-            && message["params"]["name"] == agents_extension::TOOL
-        {
-            let result = CallToolRequestParams::deserialize(&message["params"]).map_or_else(
-                |_| {
-                    failure(
-                        agents_extension::ARGUMENTS_ERROR,
-                        "Use the extension tool's arguments.",
-                    )
-                },
-                agents_extension::mcp_call,
-            );
-            return response(output, id, result);
+        if request.kind() == MethodKind::ToolsCall && Self::local_tool(message, id, output)? {
+            return Ok(());
         }
         let command = (request.kind() == MethodKind::ToolsCall)
             .then(|| {
@@ -204,6 +198,36 @@ impl Session {
             }
             _ => self.forward(&request, id, output, unavailable.as_ref()),
         }
+    }
+
+    fn local_tool(
+        message: &Value,
+        id: &Value,
+        output: &mut impl Write,
+    ) -> Result<bool, BridgeError> {
+        if message["params"]["name"] == agents_extension::TOOL {
+            let result = CallToolRequestParams::deserialize(&message["params"]).map_or_else(
+                |_| {
+                    failure(
+                        agents_extension::ARGUMENTS_ERROR,
+                        "Use the extension tool's arguments.",
+                    )
+                },
+                agents_extension::mcp_call,
+            );
+            return response(output, id, result).map(|()| true);
+        }
+        if message["params"]["name"] == "update_check" {
+            let params = CallToolRequestParams::deserialize(&message["params"])
+                .map_err(|_| BridgeError::Protocol)?;
+            return response(
+                output,
+                id,
+                crate::diagnostics::call(crate::diagnostics::Diagnostic::UpdateCheck, params),
+            )
+            .map(|()| true);
+        }
+        Ok(false)
     }
 
     fn initialize(

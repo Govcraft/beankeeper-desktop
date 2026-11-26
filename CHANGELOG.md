@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+- Report stale Claude extensions through CLI and MCP and open signed upgrades without requiring cosign, with restart guidance.
+
 ## [1.0.1] - 2026-11-26
 
 - Embed the license issuer's signed revocation snapshot so official stable builds package; 1.0.0 was tagged but never published, so 1.0.1 is the first stable release.
+
 
 ## [1.0.0] - 2026-11-26
 

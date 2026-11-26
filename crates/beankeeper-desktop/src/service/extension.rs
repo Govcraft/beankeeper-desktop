@@ -157,6 +157,7 @@ impl Progress<'_> {
             progress: self,
             claude_restart_required: false,
             summary: self.summary(),
+            extension: crate::agents::extension_status::Observation::default(),
         }
     }
 
@@ -168,7 +169,10 @@ impl Progress<'_> {
         } else {
             CallToolResult::structured(payload)
         };
-        result.content = vec![ContentBlock::text(report.summary)];
+        result.content = vec![ContentBlock::text(format!(
+            "{} {}",
+            report.summary, report.extension
+        ))];
         Ok(result)
     }
 }
@@ -179,6 +183,7 @@ struct Report<'a> {
     progress: &'a Progress<'a>,
     claude_restart_required: bool,
     summary: &'static str,
+    extension: crate::agents::extension_status::Observation,
 }
 
 #[derive(Serialize)]
@@ -218,7 +223,7 @@ pub(super) fn run(command: ExtensionCommand, json: bool) -> Result<(), ServiceEr
                 .map_err(|_| ServiceError::Configuration("cannot serialize extension status"))?
         );
     } else if !failed {
-        println!("{}", report.summary);
+        println!("{} {}", report.summary, report.extension);
     }
     if failed || command == ExtensionCommand::Setup {
         outcome?;

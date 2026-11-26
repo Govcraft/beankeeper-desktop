@@ -3,6 +3,7 @@
 mod adapters;
 mod config;
 pub(crate) mod extension;
+pub(crate) mod extension_status;
 
 use std::{
     env,

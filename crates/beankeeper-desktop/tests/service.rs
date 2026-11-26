@@ -634,6 +634,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
             "setup_status",
             "doctor",
             "agents_extension",
+            "update_check",
             "license_status",
             "license_activate",
             "license_return",
@@ -661,6 +662,73 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     );
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("data").exists());
+    Ok(())
+}
+
+#[test]
+fn extension_diagnostics_match_cli_and_mcp_without_cosign_or_a_ledger() -> TestResult {
+    use std::fs;
+    let root = tempfile::tempdir()?;
+    let profile = root.path().join("claude");
+    fs::create_dir(&profile)?;
+    let registry = profile.join("extensions-installations.json");
+    for version in [None, Some("0.0.0"), Some(env!("CARGO_PKG_VERSION"))] {
+        let entries = version.map_or_else(
+            || json!({}),
+            |version| {
+                json!({
+                    "local.mcpb.govcraft.beankeeper": {"version":version}
+                })
+            },
+        );
+        let bytes = serde_json::to_vec(&json!({"extensions":entries}))?;
+        fs::write(&registry, &bytes)?;
+        let command = || {
+            let mut command = isolated(root.path());
+            command
+                .env("CLAUDE_USER_DATA_DIR", &profile)
+                .env("BEANKEEPER_NO_UPDATE_CHECK", "1");
+            command
+        };
+        let output = command().args(["doctor", "--json"]).output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cli: Value = serde_json::from_slice(&output.stdout)?;
+        let state = if version.is_none() {
+            "not_installed"
+        } else if version == Some("0.0.0") {
+            "behind"
+        } else {
+            "current"
+        };
+        assert_eq!(cli["extension"]["state"], state);
+        let output = command().args(["update-check", "--json"]).output()?;
+        assert!(output.status.success());
+        let updates: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(cli["extension"], updates["extension"]);
+        for args in [["service", "mcp"], ["mcp", "extension"]] {
+            let mut pipe = McpPipe::start(command().args(args))?;
+            let listed = pipe.request("tools/list", &json!({}))?;
+            for name in ["doctor", "update_check"] {
+                assert_eq!(
+                    listed["tools"]
+                        .as_array()
+                        .ok_or("missing tools")?
+                        .iter()
+                        .filter(|tool| tool["name"] == name)
+                        .count(),
+                    1
+                );
+                let report = pipe.tool(name, &json!({}))?;
+                assert_eq!(report["structuredContent"]["extension"], cli["extension"]);
+            }
+        }
+        assert_eq!(fs::read(&registry)?, bytes);
+        assert!(!root.path().join("data").exists());
+    }
     Ok(())
 }
 

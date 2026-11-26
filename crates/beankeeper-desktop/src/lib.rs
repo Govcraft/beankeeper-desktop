@@ -10,6 +10,7 @@ pub mod browser;
 pub mod changes;
 pub mod cli;
 pub mod demo;
+pub mod diagnostics;
 mod entitlement;
 #[doc(hidden)]
 pub mod imports;

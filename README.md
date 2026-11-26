@@ -129,8 +129,12 @@ Codex handles the local install and connection. See how to check the connection
 and start your books in [Use Beankeeper with local Codex](docs/chatgpt.md).
 
 If Beankeeper is already available, ask your agent to install or upgrade the
-Claude Desktop extension, or run `bk agents extension`. The command requires
-`cosign`. [Install or upgrade the signed extension](docs/claude-desktop.md#install-or-upgrade-from-beankeeper)
+Claude Desktop extension, or run `bk agents extension`. Verification runs
+in-process without a separate cosign installation. `bk doctor` and `bk update-check`
+report whether Claude's separate extension is behind Desktop; the `doctor` and
+`update_check` MCP tools return the same status. After installing, restart Claude
+Desktop or toggle the extension to load the upgrade.
+[Install or upgrade the signed extension](docs/claude-desktop.md#install-or-upgrade-from-beankeeper)
 
 ## Build and run
 
@@ -504,7 +508,7 @@ Set `BEANKEEPER_NO_UPDATE_CHECK=1` to disable checks before any network access.
 Requests contain only the Desktop version and OS, with no ledger information.
 `bk self-update` requires an active license covering the major version in the
 signed manifest. Any matching license on this installation is sufficient. It
-also requires `cosign` on PATH for mandatory Sigstore verification and checks
+uses in-process Sigstore verification and checks
 the archive checksum before replacing the executable. Use the signed installer
 to update to a 0.x preview. Restart the server after installing.
 

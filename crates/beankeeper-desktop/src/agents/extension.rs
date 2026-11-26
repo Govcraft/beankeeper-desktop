@@ -79,12 +79,12 @@ impl Handoff {
             Self::Opened {
                 removed_stdio: false,
             } => {
-                "Opened the verified Beankeeper extension. Select Install in Claude Desktop to finish."
+                "Opened the verified Beankeeper extension. Click Install in Claude Desktop, then restart Claude Desktop or toggle the extension to load the new version."
             }
             Self::Opened {
                 removed_stdio: true,
             } => {
-                "Opened the verified Beankeeper extension and removed the duplicate local Beankeeper connection. Select Install in Claude Desktop to finish."
+                "Opened the verified Beankeeper extension and removed the duplicate local Beankeeper connection. Click Install in Claude Desktop, then restart Claude Desktop or toggle the extension to load the new version."
             }
         }
     }

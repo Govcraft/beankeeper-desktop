@@ -10,7 +10,6 @@ use std::{
     fmt, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     str::FromStr,
     time::Duration,
 };
@@ -55,7 +54,7 @@ impl fmt::Display for UpdateError {
                 "This update requires a Desktop license that covers {major}.x releases. Ask your agent to activate a license you already have."
             ),
             Self::Signature => f.write_str(
-                "Sigstore verification failed; install cosign and require a valid release bundle",
+                "Sigstore verification failed; a valid signed release bundle is required",
             ),
             Self::Json(_) => f.write_str("invalid release metadata or update cache"),
         }
@@ -279,50 +278,35 @@ trait BundleVerifier {
     ) -> Result<(), UpdateError>;
 }
 
-/// Uses cosign from PATH with fixed trust identity and no shell interpolation.
-struct Cosign;
-impl BundleVerifier for Cosign {
+/// Verifies the same release identity, certificate chain and transparency log in-process.
+struct Sigstore;
+
+fn release_policy(version: &ReleaseVersion) -> sigstore_verify::VerificationPolicy {
+    sigstore_verify::VerificationPolicy::new(
+        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}"),
+        "https://token.actions.githubusercontent.com",
+    )
+}
+
+impl BundleVerifier for Sigstore {
     fn verify(
         &self,
         artifact: &Path,
         bundle: &Path,
         version: &ReleaseVersion,
     ) -> Result<(), UpdateError> {
-        if !bundle.is_file() || fs::metadata(bundle)?.len() == 0 {
-            return Err(UpdateError::Signature);
-        }
-        let status = cosign_command(artifact, bundle, version)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        use sigstore_verify::{trust_root, types::Bundle};
+        let bundle =
+            Bundle::from_json(&fs::read_to_string(bundle).map_err(|_| UpdateError::Signature)?)
+                .map_err(|_| UpdateError::Signature)?;
+        let root = trust_root::TrustedRoot::from_json(trust_root::SIGSTORE_PRODUCTION_TRUSTED_ROOT)
             .map_err(|_| UpdateError::Signature)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(UpdateError::Signature)
-        }
+        let verifier = sigstore_verify::Verifier::new(&root).map_err(|_| UpdateError::Signature)?;
+        verifier
+            .verify_reader(fs::File::open(artifact)?, &bundle, &release_policy(version))
+            .map_err(|_| UpdateError::Signature)?;
+        Ok(())
     }
-}
-
-fn cosign_command(artifact: &Path, bundle: &Path, version: &ReleaseVersion) -> Command {
-    let identity =
-        format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/{TAG_PREFIX}{version}");
-    let mut command = Command::new("cosign");
-    command
-        .args([
-            "verify-blob",
-            "--timeout",
-            "30s",
-            "--certificate-identity",
-            &identity,
-            "--certificate-oidc-issuer",
-            "https://token.actions.githubusercontent.com",
-            "--bundle",
-        ])
-        .arg(bundle)
-        .arg(artifact);
-    command
 }
 
 fn verify_bytes(
@@ -569,7 +553,7 @@ fn status_with(path: &Path, checks: UpdateChecks, current: &str) -> Result<Strin
 /// Returns errors when cached update state cannot be read or written.
 pub fn check(path: &Path, checks: UpdateChecks, now: u64) -> Result<String, UpdateError> {
     check_with(path, checks, now, env!("CARGO_PKG_VERSION"), |current| {
-        fetch_manifest(current, download, &Cosign)
+        fetch_manifest(current, download, &Sigstore)
     })
 }
 fn check_with(
@@ -656,7 +640,7 @@ fn check_with(
 ///
 /// # Errors
 /// Returns errors for unsupported targets, unavailable releases, ineligible licenses, or invalid artifacts.
-pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> {
+pub fn self_update(cache: &Path, destination: &Path) -> Result<semver::Version, UpdateError> {
     let cached = read_cache(cache, env!("CARGO_PKG_VERSION"))?
         .manifest
         .ok_or(UpdateError::Invalid(
@@ -670,7 +654,7 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
     )?;
     let current = installed_version(env!("CARGO_PKG_VERSION"))?;
     let release =
-        verify_manifest(&bytes, &bundle, Some(version), &Cosign)?.require_newer(&current)?;
+        verify_manifest(&bytes, &bundle, Some(version), &Sigstore)?.require_newer(&current)?;
     let licenses = crate::product::load_update_licenses().map_err(|_| {
         UpdateError::Invalid("could not verify the Desktop license. Run `bk license` for details")
     })?;
@@ -698,8 +682,9 @@ pub fn self_update(cache: &Path, destination: &Path) -> Result<(), UpdateError> 
             checksums_bundle: &checksums_bundle,
         },
         destination,
-        &Cosign,
-    )
+        &Sigstore,
+    )?;
+    Ok(version.0.clone())
 }
 
 struct ReleaseFiles<'a> {
@@ -867,7 +852,7 @@ mod tests {
     use ed25519_dalek::{Signature, Signer, SigningKey};
     type TestResult = Result<(), Box<dyn Error>>;
     // Cryptographic offline substitute only at the verifier boundary. Production
-    // always invokes cosign to validate Fulcio identity and transparency evidence.
+    // uses in-process Sigstore verification to validate Fulcio identity and transparency evidence.
     struct OfflineVerifier;
     impl BundleVerifier for OfflineVerifier {
         fn verify(
@@ -955,31 +940,31 @@ mod tests {
             .expect("gzip finished")
     }
     #[test]
+    fn in_process_verifier_authenticates_a_real_release_and_rejects_tampering() -> TestResult {
+        let bytes = include_bytes!("../tests/fixtures/sigstore/checksums-sha256.txt");
+        let bundle = include_bytes!("../tests/fixtures/sigstore/checksums-sha256.txt.sigstore");
+        let version = "0.1.0-rc.33".parse()?;
+        verify_bytes(bytes, bundle, &version, &Sigstore)?;
+        assert!(verify_bytes(b"changed", bundle, &version, &Sigstore).is_err());
+        assert!(verify_bytes(bytes, bundle, &"0.1.0-rc.32".parse()?, &Sigstore).is_err());
+        assert!(verify_bytes(bytes, b"{}", &version, &Sigstore).is_err());
+        let mut evidence: serde_json::Value = serde_json::from_slice(bundle)?;
+        evidence["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
+        assert!(verify_bytes(bytes, &serde_json::to_vec(&evidence)?, &version, &Sigstore).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn official_verifier_pins_exact_identity_and_issuer_without_bypass_flags() -> TestResult {
-        let command = cosign_command(
-            Path::new("archive"),
-            Path::new("bundle"),
-            &ReleaseVersion::from_str("1.10.0")?,
-        );
-        let arguments: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+        let policy = release_policy(&ReleaseVersion::from_str("1.10.0")?);
         assert_eq!(
-            arguments,
-            [
-                "verify-blob",
-                "--timeout",
-                "30s",
-                "--certificate-identity",
-                "https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v1.10.0",
-                "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                "--bundle",
-                "bundle",
-                "archive"
-            ]
+            policy.issuer(),
+            Some("https://token.actions.githubusercontent.com")
         );
+        assert!(policy.verifies_tlog());
+        assert!(policy.identity().is_some_and(|identity| identity.matches(
+            &sigstore_verify::SubjectAltName::Uri("https://github.com/Govcraft/beankeeper-desktop/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v1.10.0".into())
+        )));
         assert!(ReleaseVersion::from_str("../../tag").is_err());
         Ok(())
     }
@@ -1193,12 +1178,7 @@ mod tests {
             );
             assert!(result.is_err_and(|error| error.to_string().contains(expected)));
         }
-        let command = cosign_command(
-            Path::new("archive"),
-            Path::new("bundle"),
-            &ReleaseVersion::from_str("0.1.0-rc.2")?,
-        );
-        assert!(command.get_args().any(|arg| arg == format!("{REPOSITORY}/.github/workflows/release.yml@refs/tags/beankeeper-desktop-v0.1.0-rc.2").as_str()));
+        assert!(release_policy(&ReleaseVersion::from_str("0.1.0-rc.2")?).verifies_tlog());
         Ok(())
     }
     #[test]
@@ -1379,7 +1359,7 @@ mod tests {
             ),
             (
                 Err(UpdateError::Signature),
-                "Could not check for updates: Sigstore verification failed; install cosign and require a valid release bundle. Checks run at most once per day.",
+                "Could not check for updates: Sigstore verification failed; a valid signed release bundle is required. Checks run at most once per day.",
             ),
         ];
         for (day, (result, expected)) in cases.into_iter().enumerate() {

@@ -170,14 +170,16 @@ The selected tag supplies both `update-manifest.json` and
 only selects a tag; its asset URLs are never trusted. The manifest must verify
 against that exact tag and name the same version. Discovery failures, missing
 assets or invalid signatures are cached as failures without an unsigned fallback.
-`cosign` must be on PATH for both checks and installation. Missing cosign, missing
+Checks and installation verify Sigstore evidence in-process, with no `cosign` prerequisite. Missing
 bundles, invalid checksums, wrong signing identity and invalid metadata all
 prevent installation. Self-update runs only when requested.
 
 Discovery requests send the Desktop `version` and `os`, plus the RC list's
 `per_page=100` pagination parameter, with a fixed product User Agent. They send
-no company, account, transaction, passphrase, license ID or purchaser data. Downloads use bounded HTTPS requests. Cosign can retrieve its
-public trust roots from Sigstore, independently of the GitHub metadata request.
+no company, account, transaction, passphrase, license ID or purchaser data. Downloads use bounded HTTPS requests. Verification uses the Sigstore crate's
+embedded production trust roots without a separate network request. If future
+signing keys are absent from those roots, verification fails closed; updating
+Desktop's verifier and trust-root dependency restores support.
 
 `bk serve` checks after successful startup without delaying ledger access, then
 once per day. `bk update-check` shares the persisted attempt time and process

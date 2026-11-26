@@ -79,12 +79,14 @@ pub fn command() -> Command {
             Command::new("license").about("Show, activate, or print compiled-in license trust"),
         ))
         .subcommand(
+            Command::new("doctor").about("Report the locally installed Claude extension status"),
+        )
+        .subcommand(
             Command::new("update-check")
                 .about("Check the signed Desktop release feed, at most daily"),
         )
         .subcommand(
-            Command::new("self-update")
-                .about("Verify and install an eligible Desktop release (requires cosign)"),
+            Command::new("self-update").about("Verify and install an eligible Desktop release"),
         )
         .mut_subcommand("mcp", |command| {
             command
