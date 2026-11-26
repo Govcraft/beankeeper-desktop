@@ -1,10 +1,9 @@
 # Offline license contract
 
-Desktop consumes the version 1 format published by D10 in
-[Govcraft/beankeeper-license, docs/license-format.md](https://github.com/Govcraft/beankeeper-license/blob/main/docs/license-format.md)
-(file revision `5da2a49a0709b32e6e7df031d80847f04c05bdad`). It is an Ed25519
-envelope, separate from the PASETO bearer tokens used for agent authentication.
+Desktop consumes claims schema 2 in the issuer's `beankeeper-license-v1`
+Ed25519 envelope. Agent authentication uses separate PASETO bearer tokens.
 No license, activation or update operation changes the ledger schema.
+[Issuer's license format](https://github.com/Govcraft/beankeeper-license/blob/main/docs/license-format.md)
 
 ## Envelope and exact signed bytes
 
@@ -44,14 +43,14 @@ its 32-byte Ed25519 public key. An empty trust store fails verification.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "license_id": "lic_01h455vb4pex5vsknk084sn02q",
   "product": "beankeeper-desktop",
   "purchaser_ref": "customer-fixture-1",
   "storefront": "polar",
   "issued_at": "2026-11-20T12:00:00Z",
-  "updates_until": "2027-11-20T12:00:00Z",
-  "seats": null
+  "eligible_major": 1,
+  "seats": 1
 }
 ```
 
@@ -61,14 +60,15 @@ a noncanonical `lic_` TypeID, and products other than `beankeeper-desktop`.
 without control characters or `@`; it is never an email address. `storefront` has
 1 to 32 lowercase ASCII letters, digits, underscores or hyphens. Timestamps are
 RFC 3339, with UTC year 1970 through 9999. The service normalizes timestamps to
-UTC. `seats` is null or a positive integer no larger than 4,294,967,295. There is
-no machine binding or global activation counter.
+UTC. `eligible_major` is a JSON integer from 1 through 4,294,967,295 inclusive.
+`seats` is the integer 1, the contractual limit of one computer per license.
+The signed file carries no device or ledger identifier.
 
-Use is perpetual. `updates_until` is an inclusive release-date limit, evaluated
-against authenticated release metadata, without contacting the license service.
-Passing that instant never disables an installed eligible release. Reissue may
-have `updates_until` earlier than `issued_at`, because the service preserves the
-purchase's original update window. There is no usage-expiry field.
+Use is perpetual. A release is covered when the major version in its signed
+manifest equals `eligible_major`. A major-1 license covers 1.0.0, 1.4.2 and
+1.99.0-rc.1 for perpetual use. Verifying coverage requires local license bytes,
+the issuer's public key and signed release metadata. Desktop rejects schema 1
+files. Ask for a schema 2 file if you still have a schema 1 test license.
 
 The service's public fixture key, ID `test-2026`, is:
 
@@ -77,7 +77,7 @@ The service's public fixture key, ID `test-2026`, is:
 ```
 
 It comes from a public seed of 32 bytes equal to `0x07`. Desktop's tests verify
-D10's independently generated [license-v1.json fixture](https://github.com/Govcraft/beankeeper-license/blob/main/tests/fixtures/license-v1.json).
+D10's independently generated [license-v2.json fixture](https://github.com/Govcraft/beankeeper-license/blob/main/tests/fixtures/license-v2.json).
 This fixture key is **not trusted by default**. Production builds must provision
 production public keys separately; signing secrets never ship in Desktop.
 Rotation introduces a new identifier and public key before the service uses it.
@@ -89,17 +89,10 @@ recalled by a server-side revocation; revocation blocks future downloads only.
 
 `crates/beankeeper-desktop/src/license.rs` exposes `verify_offline`, `activate`, `load`, and `entitlement`.
 The server and ledger code do not implement license signatures or policy.
-Activation verifies before atomically replacing a private local license file;
-failed verification preserves the previous activation. Existing symbolic links
-and publicly accessible license files are refused. Loading re-verifies local
-bytes and performs no HTTP requests.
-
-The command reference describes configuration and the per-user storage path.
-The v1 format describes current release candidate behavior. The approved 1.0
-terms specify update eligibility by major version and a signed seat count of
-one. [Beankeeper Desktop license agreement](../LICENSE.md)
-
-See the issue tracking [Desktop support for the new format](https://github.com/Govcraft/beankeeper-desktop/issues/169).
+Activation verifies before atomically saving a private local file keyed by the
+signed license ID. Failed verification preserves existing activations. Desktop
+refuses symbolic links and publicly accessible license files. It re-verifies
+the local files without an HTTP request. [License and update commands](license-updates.md)
 
 ## Optional redemption
 

@@ -4,12 +4,12 @@ use crate::{
     private_file::PrivateFile,
     updates::{self, UpdateError},
 };
-use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
 use std::{
     error::Error,
-    fmt, fs,
+    fmt::{self, Write as _},
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     time::Duration,
@@ -350,36 +350,76 @@ fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
 /// # Errors
 /// Returns storage or verification errors for existing activations.
 pub fn license_status() -> Result<String, ProductError> {
-    let path = state_dir()?.join("license.json");
-    if !path.try_exists()? {
+    let activations = load_activations()?;
+    if activations.licenses.is_empty() {
         return Ok(
             "License status: not activated. No Desktop license activated. Use `bk license activate FILE`."
                 .into(),
         );
     }
-    let claims = license::load(&path, &trusted_keys()?)?
-        .ok_or(ProductError::Configuration("activated license is missing"))?;
-    Ok(describe(&claims, Utc::now()))
+    let mut status = describe(&activations.licenses);
+    if let Some(error) = activations.first_failure {
+        let _ = write!(
+            status,
+            "\nOne or more license files could not be verified ({error})."
+        );
+    }
+    Ok(status)
 }
-fn describe(claims: &VerifiedLicense, now: DateTime<Utc>) -> String {
-    // The clock only informs the display. Installation eligibility still uses
-    // the authenticated release date in the signed manifest.
-    let update_window = if now <= claims.updates_until() {
-        "open"
-    } else {
-        "ended; perpetual Desktop use remains active"
-    };
-    format!(
-        "License status: active and valid.\nLicense {}: perpetual Desktop use; updates through {} (inclusive).\nUpdate window: {update_window}. Eligibility is based on the signed release date.",
-        claims.id(),
-        claims.updates_until().to_rfc3339()
-    )
+
+fn describe(licenses: &[VerifiedLicense]) -> String {
+    let mut status = "License status: active and valid.".to_owned();
+    for license in licenses {
+        let _ = write!(
+            status,
+            "\nLicense {} covers all {}.x releases forever.",
+            license.id(),
+            license.eligible_major()
+        );
+    }
+    status
 }
-/// Load the authenticated license used for release authorization.
-pub(crate) fn load_update_license() -> Result<VerifiedLicense, ProductError> {
-    license::load(&state_dir()?.join("license.json"), &trusted_keys()?)?.ok_or(
-        ProductError::Configuration("activate a Desktop license before self-update"),
-    )
+
+#[derive(Default)]
+struct Activations {
+    licenses: Vec<VerifiedLicense>,
+    first_failure: Option<LicenseError>,
+}
+
+fn load_activations() -> Result<Activations, ProductError> {
+    let paths = license::activation_paths(&state_dir()?)?;
+    let mut activations = Activations::default();
+    if paths.is_empty() {
+        return Ok(activations);
+    }
+    let keys = trusted_keys()?;
+    for path in paths {
+        match license::load(&path, &keys) {
+            Ok(Some(license))
+                if !activations
+                    .licenses
+                    .iter()
+                    .any(|item| item.id() == license.id()) =>
+            {
+                activations.licenses.push(license);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                activations.first_failure.get_or_insert(error);
+            }
+        }
+    }
+    if activations.licenses.is_empty()
+        && let Some(error) = activations.first_failure
+    {
+        return Err(error.into());
+    }
+    Ok(activations)
+}
+
+/// Load the authenticated licenses used for installation-wide update authorization.
+pub(crate) fn load_update_licenses() -> Result<Vec<VerifiedLicense>, ProductError> {
+    Ok(load_activations()?.licenses)
 }
 
 fn license_service_origin() -> Result<String, ProductError> {
@@ -465,8 +505,8 @@ pub fn run_license(options: LicenseOptions) -> Result<(), ProductError> {
             // Resolve trust before redeeming a potentially single-use claim.
             let keys = trusted_keys()?;
             let bytes = source.read()?;
-            let claims = license::activate(&bytes, &keys, &state_dir()?.join("license.json"))?;
-            println!("{}", describe(&claims, Utc::now()));
+            let claims = license::activate_in(&bytes, &keys, &state_dir()?)?;
+            println!("{}", describe(std::slice::from_ref(&claims)));
         }
     }
     Ok(())
@@ -498,30 +538,17 @@ mod tests {
     use crate::license::{TrustedKeys, verify_offline};
 
     #[test]
-    fn verified_license_status_distinguishes_update_window_from_perpetual_use() {
+    fn verified_license_status_describes_perpetual_major_version_coverage() {
         let keys =
             TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))
                 .expect("fixture public keys");
         let claims = verify_offline(include_bytes!("../tests/fixtures/license.json"), &keys)
             .expect("verified fixture");
-        for (now, expected_window) in [
-            (
-                claims.updates_until() - chrono::Duration::days(1),
-                "Update window: open.",
-            ),
-            (claims.updates_until(), "Update window: open."),
-            (
-                claims.updates_until() + chrono::Duration::seconds(1),
-                "Update window: ended; perpetual Desktop use remains active.",
-            ),
-        ] {
-            let status = describe(&claims, now);
-            assert!(status.starts_with("License status: active and valid."));
-            assert!(status.contains(expected_window));
-            assert!(status.contains("2027-11-20T12:00:00+00:00 (inclusive)"));
-            assert!(status.contains("Eligibility is based on the signed release date."));
-            assert!(!status.contains("customer-fixture-1"));
-        }
+        let status = describe(&[claims]);
+        assert_eq!(
+            status,
+            "License status: active and valid.\nLicense lic_01h455vb4pex5vsknk084sn02q covers all 1.x releases forever."
+        );
     }
 
     #[test]

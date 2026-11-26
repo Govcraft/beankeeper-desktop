@@ -152,9 +152,9 @@ impl ExtensionError {
                 "AGENT_EXTENSION_DOWNLOAD"
             }
             Self::Release(UpdateError::Signature) => "AGENT_EXTENSION_SIGNATURE",
-            Self::Release(UpdateError::Invalid(_) | UpdateError::Json(_)) => {
-                "AGENT_EXTENSION_INVALID_RELEASE"
-            }
+            Self::Release(
+                UpdateError::Invalid(_) | UpdateError::Json(_) | UpdateError::LicenseRequired(_),
+            ) => "AGENT_EXTENSION_INVALID_RELEASE",
             Self::Config(error) => error.code(),
             Self::Launch(_) => "AGENT_EXTENSION_LAUNCH",
         }

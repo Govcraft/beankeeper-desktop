@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Verify schema 2 Desktop licenses offline and authorize signed self-updates by the major version covered by any active license.
 - Use verified local backups to open older books for CLI and MCP, and report schema mismatches with a named error and version details.
 - Publish the approved Beankeeper Desktop 1.0 license and align the licensing documentation.
 - Resume interrupted standalone Desktop MCP streams and prepare named-ledger backups from Beankeeper's validated CLI bindings.

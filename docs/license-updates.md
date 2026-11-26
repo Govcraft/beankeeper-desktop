@@ -2,15 +2,12 @@
 
 These Desktop commands do not open a ledger or migrate its schema. The
 `license` module owns signature verification, atomic activation and entitlement;
-the `updates` module owns release verification and installation. This reference
-describes the commands available in current release candidates. Release
-candidates run without activation, and self-update currently uses the v1 signed
-release-date limit. The approved 1.0 terms cover every 1.x release under a 1.x
-license and reserve read-only mode for official non-RC releases from 1.0.0 onward
-after the terms are final. [Beankeeper Desktop license agreement](../LICENSE.md)
+the `updates` module owns release verification and installation. The approved
+1.0 terms cover every 1.x release under a 1.x license. Release candidates run
+without activation. [Beankeeper Desktop license agreement](../LICENSE.md)
 
-See the issues tracking [major-version update eligibility](https://github.com/Govcraft/beankeeper-desktop/issues/169)
-and [read-only mode](https://github.com/Govcraft/beankeeper-desktop/issues/168).
+Read-only mode for official non-RC releases from 1.0.0 onward is tracked
+in [issue #168](https://github.com/Govcraft/beankeeper-desktop/issues/168).
 
 ## Configure issuer trust
 
@@ -40,24 +37,19 @@ bk license activate /path/to/downloaded-license.json
 bk license
 ```
 
-File activation verifies offline before saving and preserves an existing
-activation if validation fails. Inspecting the entitlement re-verifies it
-offline. The result reports the license ID, perpetual use, and inclusive update
-deadline, without printing purchaser information.
+Activate each schema 2 file with its own command. Desktop verifies the file
+offline before saving it by license ID and preserves existing activations if
+verification fails. Reactivating the same license replaces only that license's
+file. Each license covers one major version for perpetual use.
 
 Successful activation and status checks begin with `License status: active and
-valid.` The paired browser's `/settings` page uses the same status. Missing
-activations are labeled `not activated`, and verification or configuration
-failures report their specific reason instead of an active status.
+valid.` The `bk license` command and the paired browser's `/settings` page
+re-verify the local files and list each valid license ID and its major version.
+They also explain when there are no activations or when a file fails verification.
 
-The update window is displayed separately as `open` or `ended`, using the local
-clock and an inclusive deadline. This display is informational: an ended update
-window leaves perpetual Desktop use active, and self-update eligibility still
-compares the signed release date with the deadline. Older eligible releases
-remain covered even after the window ends.
-
-The private activated file is `license.json` inside the per-user Desktop state
-directory:
+Desktop stores each private activation at `licenses/<license-id>.json` inside
+the per-user state directory. Status still checks the earlier `license.json`
+location so it can report an unsupported schema 1 file.
 
 | Platform | Default directory |
 | --- | --- |
@@ -147,10 +139,12 @@ The paired browser's `/settings` page reads cached status without making an
 HTTP request to the release feed. It requires the same human session and local
 Host/Origin checks as other workspace pages.
 
-Self-update re-authenticates the selected manifest, compares versions
-numerically, and verifies that its signed release timestamp falls within the
-activated update window. It downloads the matching target archive, checksum
-list and both mandatory Sigstore bundles. Only the exact regular `bk` member
+Self-update re-authenticates the selected manifest and requires a newer version
+whose major matches any active license on the installation. A 1.x license
+covers every 1.x release regardless of dates, and 2.x requires a 2.x license.
+For 0.x preview updates, use the signed installer. Self-update downloads the
+matching target archive, checksum list and both mandatory Sigstore bundles.
+Only the exact regular `bk` member
 is copied into a temporary file beside the destination. All verification and
 extraction finish before replacement. On Unix the rename is atomic; on Windows
 `self-replace` handles the running executable and schedules old-file cleanup.
