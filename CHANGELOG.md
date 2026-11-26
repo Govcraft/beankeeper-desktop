@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Use verified local backups to open older books for CLI and MCP, and report schema mismatches with a named error and version details.
 - Publish the approved Beankeeper Desktop 1.0 license and align the licensing documentation.
 - Resume interrupted standalone Desktop MCP streams and prepare named-ledger backups from Beankeeper's validated CLI bindings.
 - Automatically back up local books and attachments before Desktop and CLI migrations or upgrades, protect the newest migration or upgrade backup, and list, restore, or undo backups through Desktop MCP and the CLI.

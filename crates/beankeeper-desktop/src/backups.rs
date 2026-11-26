@@ -30,6 +30,13 @@ pub(crate) struct LocalBackups {
     passphrase: Option<Arc<SecretString>>,
 }
 
+#[derive(Clone, Copy)]
+enum OpenMode {
+    Normal,
+    Provisioning,
+    Replacement,
+}
+
 impl LocalBackups {
     pub(crate) fn new(books: BooksPath, passphrase: Option<SecretString>) -> Self {
         Self {
@@ -51,36 +58,29 @@ impl LocalBackups {
     }
 
     pub(crate) fn open(&self) -> Result<Db, CliError> {
-        self.with_state(false, |state| state.prepare()?.open())
+        self.open_with(OpenMode::Normal)
     }
 
     fn open_for_provisioning(&self) -> Result<Db, CliError> {
-        self.with_state(false, |state| match state {
-            BooksState::Current(books) => books.open_existing(),
-            BooksState::NeedsMigration(books) => books.open(),
-        })
+        self.open_with(OpenMode::Provisioning)
     }
 
-    fn prepare(&self, replacing: bool) -> Result<(), CliError> {
-        self.with_state(replacing, |state| state.prepare().map(drop))
+    fn before_replacement(&self) -> Result<(), CliError> {
+        self.open_with(OpenMode::Replacement).map(drop)
     }
 
-    fn with_state<T>(
-        &self,
-        allow_plaintext: bool,
-        use_books: impl FnOnce(BooksState<'_>) -> Result<T, CliError>,
-    ) -> Result<T, CliError> {
+    fn open_with(&self, mode: OpenMode) -> Result<Db, CliError> {
         let location = self.location()?;
         let catalog = location.lock()?;
         let plaintext = Self::new(self.books.clone(), None);
         let state = BooksState::try_from((self, &catalog)).or_else(|error| {
-            if allow_plaintext && self.key().is_some() {
+            if matches!(mode, OpenMode::Replacement) && self.key().is_some() {
                 BooksState::try_from((&plaintext, &catalog)).map_err(|_| error)
             } else {
                 Err(error)
             }
         })?;
-        use_books(state)
+        state.open(mode)
     }
 
     pub(crate) fn automatic(&self) {

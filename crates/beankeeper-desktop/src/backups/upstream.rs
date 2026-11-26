@@ -1,11 +1,17 @@
-use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
+mod http;
+
+use std::{
+    io::{self, IsTerminal},
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use beankeeper_cli::{
     cli::{Cli, Command, McpCommand, PassphraseOptions},
     commands::{self, setup::SetupCommand},
-    db::companies::CompanySlug,
+    db::{Db, companies::CompanySlug},
     error::CliError,
-    ledger_target::LedgerPath,
+    mcp::{self, HttpLedgerTargets, LedgerTargets},
     output::json::Meta,
     passphrase,
 };
@@ -16,6 +22,7 @@ use tempfile::NamedTempFile;
 use crate::setup;
 
 use super::LocalBackups;
+use http::HttpBind;
 
 /// Dispatch a core CLI command after preparing any books its writer can open.
 pub fn run_upstream(matches: &ArgMatches) -> ExitCode {
@@ -41,8 +48,7 @@ fn dispatch(cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
     let ledgers = DispatchBooks::try_from(&*cli)?;
     let _stored = setup::stored_passphrase_for(&mut cli.passphrase, &ledgers.primary)
         .map_err(|error| CliError::General(error.to_string()))?;
-    let _replay = ledgers.prepare(cli)?;
-    commands::dispatch(cli, meta)
+    ledgers.run(cli, meta)
 }
 
 struct DispatchBooks {
@@ -53,7 +59,8 @@ struct DispatchBooks {
 enum DispatchOpen {
     CoreOnly,
     Existing,
-    Http(Vec<LedgerPath>),
+    Stdio { read_only: bool },
+    Http { bind: HttpBind, read_only: bool },
     Replace { encrypt: bool },
 }
 
@@ -93,22 +100,18 @@ impl TryFrom<&Cli> for DispatchBooks {
                 http: true,
                 bind,
                 allow_remote,
-                ..
-            }) => {
-                if !allow_remote && bind.is_some_and(|address| !address.ip().is_loopback()) {
-                    DispatchOpen::CoreOnly
-                } else {
-                    let named = cli
-                        .ledger_bindings()?
-                        .map(|(_, path)| path.clone())
-                        .collect();
-                    DispatchOpen::Http(named)
-                }
-            }
+                read_only,
+            }) => DispatchOpen::Http {
+                bind: (*bind, *allow_remote).try_into()?,
+                read_only: *read_only,
+            },
+            Command::Mcp(McpCommand::Serve { read_only, .. }) => DispatchOpen::Stdio {
+                read_only: *read_only,
+            },
             _ => DispatchOpen::Existing,
         };
         // HTTP opens the startup books as well as every named binding.
-        let primary = if matches!(open, DispatchOpen::Http(_)) {
+        let primary = if matches!(open, DispatchOpen::Http { .. }) {
             cli.db.clone()
         } else {
             primary
@@ -118,42 +121,88 @@ impl TryFrom<&Cli> for DispatchBooks {
 }
 
 impl DispatchBooks {
-    fn prepare(self, cli: &mut Cli) -> Result<Option<NamedTempFile>, CliError> {
-        // Core owns missing-ledger behavior, including creating or recovering
-        // new books and standalone loan calculations.
-        if matches!(self.open, DispatchOpen::CoreOnly) || !self.primary.try_exists()? {
-            return Ok(None);
-        }
-        let key = DispatchKey::try_from((
-            &cli.passphrase,
-            matches!(self.open, DispatchOpen::Replace { encrypt: true }),
-        ))?;
-        // Core resolves its own credential. Replay the same resolved secret
-        // through its file interface, including one-shot FDs and commands.
-        let replay = key
-            .0
-            .as_ref()
-            .map(setup::temporary_passphrase)
-            .transpose()?;
-        let books = LocalBackups::new(self.primary.as_path().try_into()?, key.0.clone());
-        books.prepare(matches!(self.open, DispatchOpen::Replace { .. }))?;
-        if let DispatchOpen::Http(named) = self.open {
-            for path in named {
-                let path = path.as_ref();
-                if path.try_exists()? {
-                    LocalBackups::new(path.try_into()?, key.0.clone()).prepare(false)?;
-                }
+    fn run(self, cli: &mut Cli, meta: Option<Meta>) -> Result<(), CliError> {
+        match self.open {
+            DispatchOpen::CoreOnly => commands::dispatch(cli, meta),
+            // Core handles commands without books, such as loan schedules.
+            DispatchOpen::Existing | DispatchOpen::Replace { .. }
+                if !self.primary.try_exists()? =>
+            {
+                commands::dispatch(cli, meta)
+            }
+            DispatchOpen::Existing => {
+                let db = self.open(cli)?;
+                commands::dispatch_with_db(cli, db, meta)
+            }
+            DispatchOpen::Stdio { read_only } => {
+                mcp::serve_with_db(cli, self.open(cli)?, read_only)
+            }
+            DispatchOpen::Http { bind, read_only } => {
+                let targets = self.http_targets(cli)?;
+                bind.serve(cli, targets, read_only)
+            }
+            DispatchOpen::Replace { encrypt } => {
+                let key = DispatchKey::try_from((&cli.passphrase, encrypt))?;
+                key.books(&self.primary)?.before_replacement()?;
+                // Core init replaces the file and resolves the destination key itself.
+                let _replay = key.replay(&mut cli.passphrase)?;
+                commands::dispatch(cli, meta)
             }
         }
-        if let Some(file) = &replay {
-            cli.passphrase.passphrase_fd = None;
-            cli.passphrase.passphrase_file = Some(file.path().into());
+    }
+
+    fn open(&self, cli: &Cli) -> Result<Db, CliError> {
+        DispatchKey::try_from((&cli.passphrase, false))?
+            .books(&self.primary)?
+            .open()
+    }
+
+    fn http_targets(&self, cli: &Cli) -> Result<HttpLedgerTargets, CliError> {
+        let named = cli.ledger_bindings()?;
+        let key = DispatchKey::try_from((&cli.passphrase, false))?;
+        let startup = key.books(&self.primary)?.open()?;
+        if named.len() == 0 {
+            return Ok(startup.into());
         }
-        Ok(replay)
+        let targets = LedgerTargets::new(startup);
+        for (name, path) in named {
+            targets.register(name.clone().into(), key.books(path.as_ref())?.open()?)?;
+        }
+        Ok(targets.into())
     }
 }
 
 struct DispatchKey(Option<SecretString>);
+
+impl DispatchKey {
+    fn books(&self, path: &Path) -> Result<LocalBackups, CliError> {
+        let path = path.try_into().map_err(|error: io::Error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                CliError::NotFound(format!(
+                    "database '{}' not found; run `bk init --path '{}'` to create it",
+                    path.display(),
+                    path.display()
+                ))
+            } else {
+                error.into()
+            }
+        })?;
+        Ok(LocalBackups::new(path, self.0.clone()))
+    }
+
+    fn replay(&self, options: &mut PassphraseOptions) -> Result<Option<NamedTempFile>, CliError> {
+        let replay = self
+            .0
+            .as_ref()
+            .map(setup::temporary_passphrase)
+            .transpose()?;
+        if let Some(file) = &replay {
+            options.passphrase_fd = None;
+            options.passphrase_file = Some(file.path().into());
+        }
+        Ok(replay)
+    }
+}
 
 impl TryFrom<(&PassphraseOptions, bool)> for DispatchKey {
     type Error = CliError;
