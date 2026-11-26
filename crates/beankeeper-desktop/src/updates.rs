@@ -52,7 +52,7 @@ impl fmt::Display for UpdateError {
             Self::Invalid(reason) => write!(f, "update refused: {reason}"),
             Self::LicenseRequired(major) => write!(
                 f,
-                "This update requires a Desktop license that covers {major}.x releases. Paste your license with `bk license activate --token TOKEN` or supply a license file."
+                "This update requires a Desktop license that covers {major}.x releases. Ask your agent to activate a license you already have."
             ),
             Self::Signature => f.write_str(
                 "Sigstore verification failed; install cosign and require a valid release bundle",

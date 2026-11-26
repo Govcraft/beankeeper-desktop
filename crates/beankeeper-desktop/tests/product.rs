@@ -1,5 +1,10 @@
 //! Real CLI boundaries use isolated user state and never contact the network.
-use std::{error::Error, fs, process::Command};
+use std::{
+    error::Error,
+    fs,
+    io::Write,
+    process::{Command, Stdio},
+};
 type TestResult = Result<(), Box<dyn Error>>;
 fn command(directory: &std::path::Path) -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("bk"));
@@ -76,9 +81,18 @@ fn pasted_token_activates_offline_and_status_reads_saved_token() -> TestResult {
         include_bytes!("fixtures/license-public-keys.json"),
     )?;
     let token = include_str!("fixtures/license-v4.public.txt").trim_end();
-    let output = command(directory)
-        .args(["license", "activate", "--token", token])
-        .output()?;
+    let mut child = command(directory)
+        .args(["license", "activate", "--token-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("license stdin")?
+        .write_all(token.as_bytes())?;
+    let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
         "{}",

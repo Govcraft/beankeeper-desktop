@@ -33,22 +33,30 @@ license exist under `crates/beankeeper-desktop/tests/fixtures/` for offline test
 
 ## Activate and inspect
 
-An agent with CLI access can activate a token the owner pastes in chat. If the
-issuer sent a plain-text license file, the agent can pass its path instead.
+Ask your agent to activate the license you received. On the local MCP connection,
+`license_activate` accepts exactly one of `file_path` (a saved copy), `claim_code`
+(online redemption), or `license` (signed text). The Claude Desktop extension
+and local lifecycle connection provide both tools, including when the managed
+service is stopped. On a direct ledger MCP connection, `license_status` reports
+write access for the connected books.
 
 ```sh
-bk --db /path/to/books.db license activate --token 'PASTE_YOUR_LICENSE_TOKEN_HERE'
-bk --db /path/to/books.db license activate /path/to/downloaded.license
-bk --db /path/to/books.db license
+bk license activate /path/to/downloaded.license
+bk license activate --token-stdin < /path/to/downloaded.license
+bk license
+bk --json license
 ```
 
+The local tools and CLI use the managed books when configured, otherwise the
+default books. Use the CLI's `--db BOOKS` option to select another set. Use
+`--json` on status or activation for the same structured result as local MCP.
+
 Desktop verifies each PASETO v4.public token offline before saving it by license
-ID and preserves existing activations if verification fails. Desktop binds the
-license ID to the canonical local path of the selected books. Activation is
-repeatable for that path. A license already bound to another path cannot unlock
-a second set of books, including a copied ledger. Activate again with `--db` to
-bind a preview activation saved without a ledger. Each license covers one major
-version for perpetual use.
+ID. Activation binds the license to the canonical path of the selected books.
+You can reactivate for the same path. Each additional set of books needs its
+own license, including a copied ledger. If you activated a preview license
+before creating books, activate it again after setup to bind it. Each license
+covers one major version for perpetual use.
 
 When writes are denied, Desktop returns `LEDGER_WRITE_DENIED` to the CLI and
 MCP. The running Desktop exposes `license_status` to explain the current books'
@@ -85,15 +93,18 @@ process arguments or diagnostics.
 bk --db /path/to/books.db license activate --code-file /private/storefront-key.txt --storefront polar
 ```
 
-The default storefront is `polar`. `gumroad` and `etsy` use the same D10 adapter
-contract and depend on service configuration. Etsy additionally requires
-`BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE`, a private file containing a retained
-32 to 512 byte recovery token different from the claim code. Generate the token
-from at least 32 random bytes and keep it before redemption. If the connection
-fails after a single-use code is consumed, recover the original token via D10's
-`POST /api/v1/licenses/recover` using that retained token. Desktop never prints
-or stores this recovery token. Public keys are checked for configuration before
-redemption. Desktop verifies the returned token before activation.
+The CLI defaults to `polar`. In MCP, checkout codes beginning with `cs_live_`
+or `cs_test_` select `stripe`. Other claim codes default to `etsy`. Set
+`storefront` when redeeming a Polar or Gumroad key. Desktop keeps the Etsy recovery
+credential in a private file before redemption. If the service used the claim
+code but its first reply went missing, repeat the activation with the same
+claim code. Desktop uses its saved credential to recover the signed license.
+An existing CLI installation can still supply its own private credential file
+with `BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE`.
+
+Desktop verifies the redeemed license with the configured issuer keys before
+saving it. Status and offline activation work without contacting the license
+service.
 
 ## Check and install updates
 

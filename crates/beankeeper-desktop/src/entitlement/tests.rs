@@ -137,6 +137,16 @@ fn activation_is_per_ledger_and_signed_revocations_apply_offline() -> TestResult
     assert!(
         matches!(revoked.current_entitlement(major), Entitlement::Revoked(revoked_id) if &revoked_id == id)
     );
+    let verified_revocations = license::VerifiedRevocations::verify(REVOKED, &keys)?;
+    let status = revoked.status_from(dir.path(), |id| {
+        load_activation(
+            &license::activation_path(dir.path(), id),
+            &keys,
+            &verified_revocations,
+        )
+    });
+    assert!(!status.writable());
+    assert!(status.to_string().contains("was revoked"));
     let tampered = String::from_utf8(REVOKED.to_vec())?.replace("KIS9Uh", "LIS9Uh");
     assert!(matches!(
         license::VerifiedRevocations::verify(tampered.as_bytes(), &keys),

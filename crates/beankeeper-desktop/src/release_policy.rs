@@ -24,6 +24,12 @@ impl TryFrom<u64> for MajorVersion {
     }
 }
 
+impl From<MajorVersion> for u32 {
+    fn from(value: MajorVersion) -> Self {
+        value.0.get()
+    }
+}
+
 impl fmt::Display for MajorVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)

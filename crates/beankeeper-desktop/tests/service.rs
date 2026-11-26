@@ -61,6 +61,252 @@ fn local_lifecycle_mcp_lists_all_commands_and_reports_named_errors_when_stopped(
     check_lifecycle(isolated(root.path()), "SERVICE_NOT_INSTALLED", false)
 }
 
+#[test]
+fn license_mcp_activates_for_selected_books_and_matches_cli_status() -> TestResult {
+    use std::fs;
+    let root = tempfile::tempdir()?;
+    let keys = root.path().join("issuer.json");
+    fs::write(&keys, include_bytes!("fixtures/license-public-keys.json"))?;
+    fs::File::create(root.path().join("beankeeper.db"))?;
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .current_dir(root.path())
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys);
+        command
+    };
+    let mut pipe = McpPipe::start(command().args(["service", "mcp"]))?;
+    let listed = pipe.request("tools/list", &json!({}))?;
+    let tools = listed["tools"].as_array().ok_or("missing license tools")?;
+    for name in ["license_status", "license_activate"] {
+        assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
+    }
+    let status = pipe.tool("license_status", &json!({}))?;
+    let cli = command().arg("license").output()?;
+    assert!(cli.status.success());
+    assert_eq!(status["structuredContent"]["status"], "not_activated");
+    assert_eq!(status["structuredContent"]["writable"], true);
+    assert_eq!(
+        status["structuredContent"]["message"],
+        std::str::from_utf8(&cli.stdout)?.trim_end()
+    );
+
+    let cli_json = command().args(["--json", "license"]).output()?;
+    assert!(cli_json.status.success());
+    assert_eq!(
+        status["structuredContent"],
+        serde_json::from_slice::<Value>(&cli_json.stdout)?
+    );
+
+    let token = include_str!("fixtures/license-v4.public.txt").trim_end();
+    assert_invalid_license_inputs(&mut pipe, token)?;
+    let wrong_keys = root.path().join("different-issuer.json");
+    fs::write(
+        &wrong_keys,
+        br#"{"unknown":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"}"#,
+    )?;
+    let mut wrong_issuer = McpPipe::start(
+        command()
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", wrong_keys)
+            .args(["service", "mcp"]),
+    )?;
+    let response = wrong_issuer.tool("license_activate", &json!({"license": token}))?;
+    assert_eq!(response["structuredContent"]["code"], "LICENSE_UNVERIFIED");
+    assert!(!response.to_string().contains(token));
+    assert!(!root.path().join("state").exists());
+
+    let activated = pipe.tool("license_activate", &json!({"license": token}))?;
+    let report = &activated["structuredContent"];
+    assert_eq!(report["status"], "active");
+    assert_eq!(report["licenses"][0]["eligible_major"], 1);
+    assert_eq!(report["desktop_path"], "/settings");
+    assert!(!activated.to_string().contains(token));
+    let status = pipe.tool("license_status", &json!({}))?;
+    let cli = command().arg("license").output()?;
+    assert!(cli.status.success());
+    assert_eq!(status["structuredContent"], *report);
+    assert_eq!(
+        report["message"],
+        std::str::from_utf8(&cli.stdout)?.trim_end()
+    );
+
+    let file = root.path().join("saved-license");
+    let comp = include_str!("fixtures/license-major-2-v4.public.txt");
+    fs::write(&file, comp)?;
+    let activated = pipe.tool("license_activate", &json!({"file_path": file}))?;
+    assert_eq!(activated["structuredContent"]["status"], "active");
+    assert_eq!(
+        activated["structuredContent"]["licenses"][0]["eligible_major"],
+        2
+    );
+    assert!(!activated.to_string().contains(comp.trim_end()));
+
+    fs::write(&file, token)?;
+    let other_books = root.path().join("other.db");
+    fs::File::create(&other_books)?;
+    let already_bound = command()
+        .arg("--db")
+        .arg(&other_books)
+        .args(["license", "activate"])
+        .arg(&file)
+        .output()?;
+    assert!(!already_bound.status.success());
+    assert!(std::str::from_utf8(&already_bound.stderr)?.contains("already bound"));
+    assert!(!std::str::from_utf8(&already_bound.stderr)?.contains(token));
+    let failure = command().args(["--json", "license", "activate"]).output()?;
+    assert!(!failure.status.success());
+    let payload: Value = serde_json::from_slice(&failure.stderr)?;
+    assert_eq!(payload["code"], "LICENSE_ARGUMENTS");
+    Ok(())
+}
+
+fn assert_invalid_license_inputs(pipe: &mut McpPipe, token: &str) -> TestResult {
+    let tampered = token.replacen("v4.public.eyJ", "v4.public.fyJ", 1);
+    for (input, code) in [
+        (json!({}), "LICENSE_ARGUMENTS"),
+        (
+            json!({"license": token, "claim_code": "different"}),
+            "LICENSE_ARGUMENTS",
+        ),
+        (
+            json!({"license": token, "recovery_token": "unexpected"}),
+            "LICENSE_ARGUMENTS",
+        ),
+        (json!({"claim_code": "short"}), "LICENSE_INVALID_CLAIM_CODE"),
+        (
+            json!({"license": "v4.public.invalid.token"}),
+            "LICENSE_INVALID",
+        ),
+        (json!({"license": tampered}), "LICENSE_UNVERIFIED"),
+    ] {
+        let failed = pipe.tool("license_activate", &input)?;
+        assert_eq!(failed["isError"], true);
+        assert_eq!(failed["structuredContent"]["code"], code);
+        assert!(!failed.to_string().contains(token));
+        assert!(!failed.to_string().contains(&tampered));
+    }
+    Ok(())
+}
+
+#[test]
+fn license_mcp_recovers_a_claim_with_the_same_private_credential() -> TestResult {
+    use std::{fs, net::TcpListener};
+
+    let root = tempfile::tempdir()?;
+    let issuer = root.path().join("issuer.json");
+    fs::write(&issuer, include_bytes!("fixtures/license-public-keys.json"))?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    listener.set_nonblocking(true)?;
+
+    let (requests, observed) = mpsc::channel::<Value>();
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || serve_license_mock(listener, requests, shutdown));
+    let mut command = isolated(root.path());
+    command
+        .current_dir(root.path())
+        .env("BEANKEEPER_LICENSE_KEYS_FILE", &issuer)
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", origin)
+        .env_remove("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE");
+    let mut pipe = McpPipe::start(command.args(["service", "mcp"]))?;
+
+    let claim = "0123456789abcdefghijklmnopqrstuv";
+    let activated = pipe.tool("license_activate", &json!({"claim_code":claim}))?;
+    assert_eq!(activated["structuredContent"]["status"], "active");
+    let first = observed.recv_timeout(Duration::from_secs(2))?;
+    let recovered = observed.recv_timeout(Duration::from_secs(2))?;
+    assert_eq!(first["storefront"], "etsy");
+    assert_eq!(first["key"], claim);
+    let credential = first["recovery_token"]
+        .as_str()
+        .ok_or("missing recovery credential")?;
+    assert!(credential.len() >= 32);
+    assert_ne!(credential, claim);
+    assert_eq!(recovered, json!({"recovery_token":credential}));
+    assert!(!activated.to_string().contains(credential));
+    assert!(!activated.to_string().contains(claim));
+    assert!(
+        !activated
+            .to_string()
+            .contains(include_str!("fixtures/license-v4.public.txt").trim_end())
+    );
+
+    let mut files = fs::read_dir(root.path().join("state/license-recovery"))?;
+    let file = files.next().ok_or("missing private recovery file")??;
+    assert!(files.next().is_none());
+    assert_eq!(fs::read_to_string(file.path())?, credential);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+    }
+    assert!(root.path().join("state/licenses").is_dir());
+    let checkout = "cs_live_mock_checkout";
+    let stripe = pipe.tool("license_activate", &json!({"claim_code":checkout}))?;
+    assert_eq!(stripe["structuredContent"]["status"], "active");
+    assert!(!stripe.to_string().contains(checkout));
+    let stripe_request = observed.recv_timeout(Duration::from_secs(2))?;
+    assert_eq!(
+        stripe_request,
+        json!({"storefront": "stripe", "key": checkout, "recovery_token": null})
+    );
+    let _ = stop.send(());
+    server
+        .join()
+        .map_err(|_| "mock license server panicked")??;
+    Ok(())
+}
+
+fn serve_license_mock(
+    listener: std::net::TcpListener,
+    requests: mpsc::Sender<Value>,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let app =
+                    Router::new()
+                        .route(
+                            "/api/v1/licenses/redeem",
+                            post(
+                                |State(seen): State<mpsc::Sender<Value>>,
+                                 Json(body): Json<Value>| async move {
+                                    let stripe = body["storefront"] == "stripe";
+                                    let _ = seen.send(body);
+                                    if stripe {
+                                        (
+                                            StatusCode::OK,
+                                            include_str!("fixtures/license-v4.public.txt"),
+                                        )
+                                    } else {
+                                        (StatusCode::CONFLICT, "")
+                                    }
+                                },
+                            ),
+                        )
+                        .route(
+                            "/api/v1/licenses/recover",
+                            post(
+                                |State(seen): State<mpsc::Sender<Value>>,
+                                 Json(body): Json<Value>| async move {
+                                    let _ = seen.send(body);
+                                    include_str!("fixtures/license-v4.public.txt")
+                                },
+                            ),
+                        )
+                        .with_state(requests);
+            axum::serve(tokio::net::TcpListener::from_std(listener)?, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown.await;
+                })
+                .await
+        })
+}
+
 fn check_lifecycle(
     mut command: std::process::Command,
     start_error: &str,
@@ -231,7 +477,14 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     let tools = listed["tools"].as_array().ok_or("missing setup tools")?;
     assert_eq!(
         tools.iter().map(|tool| &tool["name"]).collect::<Vec<_>>(),
-        ["setup", "setup_status", "doctor", "agents_extension"]
+        [
+            "setup",
+            "setup_status",
+            "doctor",
+            "agents_extension",
+            "license_status",
+            "license_activate",
+        ]
     );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
@@ -744,6 +997,21 @@ fn assert_managed_skill_discovery(command: &mut std::process::Command) -> TestRe
     assert!(
         tools.iter().any(|tool| tool["name"] == "setup_status"),
         "{list}"
+    );
+    for name in ["license_status", "license_activate"] {
+        assert_eq!(tools.iter().filter(|tool| tool["name"] == name).count(), 1);
+    }
+    let license = pipe.request(
+        "tools/call",
+        &inline_params(json!({"name":"license_status","arguments":{}})),
+    )?;
+    let license = &license["structuredContent"];
+    assert_eq!(license["status"], "not_activated");
+    assert_eq!(license["writable"], true);
+    assert!(
+        license["settings_url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/settings"))
     );
     let companies = pipe.request(
         "tools/call",

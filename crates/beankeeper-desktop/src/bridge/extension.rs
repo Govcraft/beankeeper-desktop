@@ -25,6 +25,7 @@ use super::{
 use crate::{
     agent_skill,
     agents::extension as agents_extension,
+    product::mcp::LicenseTool,
     service::{
         self, Endpoint, ExtensionCommand, ServiceError,
         extension::{self, ExtensionRequest, Progress, Registration},
@@ -52,6 +53,7 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .filter(|command| include_status || *command != ExtensionCommand::Status)
         .filter_map(ExtensionCommand::tool)
         .chain(agents_extension::mcp_tool())
+        .chain(LicenseTool::tools())
         .collect()
 }
 
@@ -146,6 +148,18 @@ impl Session {
         }
         if request.kind() == MethodKind::Ping && inline.is_none() {
             return response(output, id, json!({}));
+        }
+        if request.kind() == MethodKind::ToolsCall
+            && let Some(tool) = message["params"]["name"]
+                .as_str()
+                .and_then(LicenseTool::from_name)
+        {
+            let books = self
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.managed.as_ref())
+                .map(|managed| managed.books.as_path());
+            return response(output, id, tool.call(&message["params"], books));
         }
         if request.kind() == MethodKind::ToolsCall
             && message["params"]["name"] == agents_extension::TOOL

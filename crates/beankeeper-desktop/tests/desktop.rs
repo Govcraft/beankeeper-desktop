@@ -123,6 +123,7 @@ fn settings_and_cli_show_multiple_verified_licenses_and_specific_failures() -> T
     let license_command = || {
         let mut command = clean_command();
         command
+            .current_dir(directory.path())
             .env("BEANKEEPER_DESKTOP_STATE_DIR", &state_dir)
             .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys_path)
             .arg("license");

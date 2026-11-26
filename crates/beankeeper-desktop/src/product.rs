@@ -1,37 +1,49 @@
 //! CLI, configuration and local status adapters for isolated licensing/updates.
 use crate::{
-    entitlement::{Bindings, ENFORCEMENT, LedgerAccess, OFFICIAL_BUILD},
-    instance::BooksPath,
-    license::{
-        self, ActiveLicense, LicenseError, LicenseId, MAX_LICENSE_INPUT, TrustedKeys,
-        UnrevokedLicense,
+    entitlement::{
+        Bindings, CheckedActivation, ENFORCEMENT, Entitlement, LedgerAccess, LedgerLicenseStatus,
+        OFFICIAL_BUILD, load_activation,
     },
-    private_file::PrivateFile,
+    instance::BooksPath,
+    license::{self, ActiveLicense, LicenseError, LicenseId, TrustedKeys, UnrevokedLicense},
     release_policy::EnforcementPolicy,
     updates::{self, UpdateError},
 };
-use clap::{Args, Subcommand, ValueEnum};
-use secrecy::{ExposeSecret, SecretString};
+use clap::{Args, Subcommand};
 use std::{
+    borrow::Cow,
     error::Error,
-    fmt::{self, Write as _},
-    fs,
+    fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Duration,
+    process::ExitCode,
+    sync::Arc,
 };
+
+mod activation;
+pub(crate) mod mcp;
+mod report;
+
+pub use activation::Storefront;
+use activation::{ActivationInputs, ActivationSource};
+use report::{LicenseInventory, LicenseReport};
 
 /// Product command errors, with secret-bearing service diagnostics discarded.
 #[derive(Debug)]
 pub enum ProductError {
-    License(LicenseError),
+    License(Arc<LicenseError>),
     Update(UpdateError),
     Io(io::Error),
     Configuration(&'static str),
     LicenseBoundElsewhere,
     LicenseRevoked(LicenseId),
     BooksRequired,
+    BooksConfiguration,
     Redemption,
+    ActivationInput,
+    InvalidLicenseInput,
+    InvalidClaimCode,
+    Recovery,
 }
 impl fmt::Display for ProductError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,14 +60,27 @@ impl fmt::Display for ProductError {
                 "Desktop license {id} was revoked. Use another license for these books."
             ),
             Self::BooksRequired => f.write_str(
-                "Choose an existing set of books with `bk --db BOOKS license activate FILE`.",
+                "Desktop needs an existing set of books to attach this license to. Set up your books and try again.",
             ),
+            Self::BooksConfiguration => f.write_str("Desktop could not find the selected books. Check the local Desktop setup."),
             Self::Redemption => {
-                f.write_str("license redemption failed; check the service URL and claim code")
+                f.write_str("The license service could not redeem that code. Check the code or try again later.")
             }
+            Self::ActivationInput => f.write_str("Provide exactly one signed license, saved license file, or claim code."),
+            Self::InvalidLicenseInput => f.write_str("Desktop could not read that license. Use the original license or file you received."),
+            Self::InvalidClaimCode => f.write_str("That claim code is incomplete or has an invalid format."),
+            Self::Recovery => f.write_str("Desktop could not save or read its private license recovery information."),
         }
     }
 }
+impl ProductError {
+    /// A named, secret-free error for machine-readable CLI output.
+    #[must_use]
+    pub fn structured(&self) -> serde_json::Value {
+        serde_json::json!(report::LicenseResponse::from(self))
+    }
+}
+
 impl Error for ProductError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -70,7 +95,7 @@ impl From<LicenseError> for ProductError {
     fn from(e: LicenseError) -> Self {
         match e {
             LicenseError::Revoked(id) => Self::LicenseRevoked(id),
-            error => Self::License(error),
+            error => Self::License(Arc::new(error)),
         }
     }
 }
@@ -96,17 +121,16 @@ pub struct LicenseOptions {
 pub enum LicenseCommand {
     /// Verify and store a license, or redeem a storefront key with a configured service.
     Activate {
-        /// Plain-text file containing the license token.
-        #[arg(required_unless_present_any = ["token", "code_file"], conflicts_with_all = ["token", "code_file"])]
+        /// Signed license file. Offline activation makes no network request.
         file: Option<PathBuf>,
-        /// Paste the license token for offline activation.
-        #[arg(long, conflicts_with = "code_file")]
-        token: Option<String>,
+        /// Read a pasted signed license from standard input.
+        #[arg(long)]
+        token_stdin: bool,
         /// Private text file containing a storefront key or single-use claim code.
         #[arg(long)]
         code_file: Option<PathBuf>,
         /// D10 storefront adapter used only with --code-file.
-        #[arg(long, requires = "code_file", ignore_case = true)]
+        #[arg(long, ignore_case = true)]
         storefront: Option<Storefront>,
     },
     /// Show the license service URL and issuer keys compiled into this binary.
@@ -115,164 +139,6 @@ pub enum LicenseCommand {
         #[arg(long)]
         json: bool,
     },
-}
-
-/// Storefront adapters supported for online license redemption.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum Storefront {
-    /// Polar license key (the default).
-    #[default]
-    Polar,
-    /// Gumroad license key.
-    Gumroad,
-    /// Etsy single-use claim code.
-    Etsy,
-}
-
-enum LicenseSource {
-    File(PathBuf),
-    Token(String),
-    Code {
-        file: PathBuf,
-        storefront: Storefront,
-    },
-}
-
-impl
-    TryFrom<(
-        Option<PathBuf>,
-        Option<String>,
-        Option<PathBuf>,
-        Option<Storefront>,
-    )> for LicenseSource
-{
-    type Error = ProductError;
-
-    fn try_from(
-        (file, token, code_file, storefront): (
-            Option<PathBuf>,
-            Option<String>,
-            Option<PathBuf>,
-            Option<Storefront>,
-        ),
-    ) -> Result<Self, Self::Error> {
-        match (file, token, code_file, storefront) {
-            (Some(file), None, None, None) => Ok(Self::File(file)),
-            (None, Some(token), None, None) => Ok(Self::Token(token)),
-            (None, None, Some(file), storefront) => Ok(Self::Code {
-                file,
-                storefront: storefront.unwrap_or_default(),
-            }),
-            _ => Err(ProductError::Configuration(
-                "select one license file, --token, or --code-file",
-            )),
-        }
-    }
-}
-
-impl LicenseSource {
-    fn read(self) -> Result<Vec<u8>, ProductError> {
-        match self {
-            Self::File(file) => bounded_file(&file, MAX_LICENSE_INPUT as u64),
-            Self::Token(token) => Ok(token.into_bytes()),
-            Self::Code { file, storefront } => redeem(&file, storefront),
-        }
-    }
-}
-
-struct RecoveryToken(SecretString);
-
-impl RecoveryToken {
-    fn read_for(code: &SecretString) -> Result<Self, ProductError> {
-        let path = std::env::var_os("BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE")
-            .map(PathBuf::from)
-            .ok_or(ProductError::Configuration("Etsy redemption requires BEANKEEPER_LICENSE_RECOVERY_TOKEN_FILE; retain this separate private recovery credential before redeeming a single-use code"))?;
-        let token = read_redemption_secret(&path)?;
-        let value = token.expose_secret().trim();
-        if !(32..=512).contains(&value.len()) || value == code.expose_secret().trim() {
-            return Err(ProductError::Configuration(
-                "Etsy recovery token must contain 32 to 512 bytes and differ from the claim code",
-            ));
-        }
-        Ok(Self(token))
-    }
-}
-
-enum Redemption {
-    Polar(SecretString),
-    Gumroad(SecretString),
-    Etsy {
-        code: SecretString,
-        recovery: RecoveryToken,
-    },
-}
-
-impl Redemption {
-    fn from_file(file: &Path, storefront: Storefront) -> Result<Self, ProductError> {
-        let code = read_redemption_secret(file)?;
-        Ok(match storefront {
-            Storefront::Polar => Self::Polar(code),
-            Storefront::Gumroad => Self::Gumroad(code),
-            Storefront::Etsy => Self::Etsy {
-                recovery: RecoveryToken::read_for(&code)?,
-                code,
-            },
-        })
-    }
-
-    fn request(&self) -> RedemptionRequest<'_> {
-        match self {
-            Self::Polar(code) => RedemptionRequest::Polar {
-                key: code.expose_secret().trim(),
-                recovery_token: (),
-            },
-            Self::Gumroad(code) => RedemptionRequest::Gumroad {
-                key: code.expose_secret().trim(),
-                recovery_token: (),
-            },
-            Self::Etsy { code, recovery } => RedemptionRequest::Etsy {
-                key: code.expose_secret().trim(),
-                recovery_token: recovery,
-            },
-        }
-    }
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "storefront", rename_all = "lowercase")]
-enum RedemptionRequest<'a> {
-    Polar {
-        key: &'a str,
-        recovery_token: (),
-    },
-    Gumroad {
-        key: &'a str,
-        recovery_token: (),
-    },
-    Etsy {
-        key: &'a str,
-        #[serde(serialize_with = "serialize_recovery_token")]
-        recovery_token: &'a RecoveryToken,
-    },
-}
-
-fn serialize_recovery_token<S: serde::Serializer>(
-    token: &RecoveryToken,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(token.0.expose_secret().trim())
-}
-
-fn read_redemption_secret(path: &Path) -> Result<SecretString, ProductError> {
-    PrivateFile::open(path)?
-        .read_secret(4096)
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::FileTooLarge => {
-                ProductError::Configuration("license input exceeds size limit")
-            }
-            io::ErrorKind::InvalidData => ProductError::Redemption,
-            _ => error.into(),
-        })
 }
 
 /// Compile-time license trust, ignoring runtime environment overrides.
@@ -393,150 +259,143 @@ fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, ProductError> {
 /// # Errors
 /// Returns storage or verification errors for existing activations.
 pub fn license_status() -> Result<String, ProductError> {
-    let activations = load_activations()?;
-    if activations.licenses.is_empty() {
-        return Ok(
-            "License status: not activated. No Desktop license activated. Paste your license with `bk license activate --token TOKEN` or supply a license file."
-                .into(),
-        );
-    }
-    let mut status = describe(&activations.licenses);
-    if let Some(error) = activations.first_failure {
-        let _ = write!(
-            status,
-            "\nOne or more license files could not be verified ({error})."
-        );
-    }
-    Ok(status)
+    Ok(LicenseRequest::Status
+        .execute(None)?
+        .inventory()?
+        .to_string())
 }
 
-fn describe(licenses: &[UnrevokedLicense]) -> String {
-    let mut status = "License status: active and valid.".to_owned();
-    for license in licenses {
-        let _ = write!(
-            status,
-            "\nLicense {} covers all {}.x releases forever.",
-            license.id(),
-            license.eligible_major()
-        );
+enum LicenseRequest {
+    Status,
+    Activate(ActivationSource),
+}
+
+impl LicenseRequest {
+    fn run(self, target: &BooksSelection<'_>) -> Result<LicenseReport, ProductError> {
+        let books = target.resolve(&self)?;
+        self.execute(books.as_ref())
     }
-    status
+
+    fn execute(self, books: Option<&BooksPath>) -> Result<LicenseReport, ProductError> {
+        let state = state_dir()?;
+        match self {
+            Self::Status => {
+                let snapshot = ActivationSnapshot::load(&state);
+                let access = books.map(|books| {
+                    let access = LedgerAccess::from(books.clone());
+                    access.status_from(&state, |id| match &snapshot {
+                        Ok(snapshot) => snapshot.for_id(&state, id),
+                        Err(ProductError::License(error)) => Err(Arc::clone(error)),
+                        Err(_) => Err(Arc::new(LicenseError::Io(io::Error::other(
+                            "Desktop activation storage is unavailable",
+                        )))),
+                    })
+                });
+                let inventory = snapshot.and_then(|snapshot| snapshot.installed().map(Into::into));
+                Ok(LicenseReport { inventory, access })
+            }
+            Self::Activate(source) => {
+                // Establish trust and the target before spending a potentially single-use claim.
+                let keys = trusted_keys()?;
+                let revocations = license::release_revocations(&keys)?;
+                let verified = source.verify(&keys, &state)?;
+                let license = revocations.admit(verified)?;
+                let major = ENFORCEMENT.activation_major(&license);
+                let active = ActiveLicense::try_from((license, major))?;
+                if let Some(books) = books {
+                    Bindings(&state).bind(&active, books)?;
+                }
+                active.persist(&state)?;
+                let inventory = LicenseInventory::Active {
+                    first: Box::new(active.as_ref().clone()),
+                    additional: Vec::new(),
+                    warning: None,
+                };
+                let access = books.map(|_| match ENFORCEMENT {
+                    EnforcementPolicy::Free => LedgerLicenseStatus::Free,
+                    EnforcementPolicy::Enforced(_) => {
+                        LedgerLicenseStatus::Enforced(Entitlement::Active(active))
+                    }
+                });
+                Ok(LicenseReport {
+                    inventory: Ok(inventory),
+                    access,
+                })
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 struct Activations {
     licenses: Vec<UnrevokedLicense>,
-    first_failure: Option<LicenseError>,
+    first_failure: Option<Arc<LicenseError>>,
 }
 
-fn load_activations() -> Result<Activations, ProductError> {
-    let paths = license::activation_paths(&state_dir()?)?;
-    let mut activations = Activations::default();
-    if paths.is_empty() {
-        return Ok(activations);
+/// One set of disk reads for installation coverage and the selected books' write access.
+#[derive(Default)]
+struct ActivationSnapshot(Vec<(PathBuf, CheckedActivation)>);
+
+impl ActivationSnapshot {
+    fn load(state: &Path) -> Result<Self, ProductError> {
+        let paths = license::activation_paths(state)?;
+        if paths.is_empty() {
+            return Ok(Self::default());
+        }
+        let keys = trusted_keys()?;
+        let revocations = license::release_revocations(&keys)?;
+        let checked = paths
+            .into_iter()
+            .map(|path| {
+                let result = load_activation(&path, &keys, &revocations);
+                (path, result)
+            })
+            .collect();
+        Ok(Self(checked))
     }
-    let keys = trusted_keys()?;
-    let revocations = license::release_revocations(&keys)?;
-    for path in paths {
-        match license::load(&path, &keys).and_then(|license| {
-            license
-                .map(|license| revocations.admit(license))
-                .transpose()
-        }) {
-            Ok(Some(license))
-                if !activations
-                    .licenses
-                    .iter()
-                    .any(|item| item.id() == license.id()) =>
-            {
-                activations.licenses.push(license);
-            }
-            Ok(_) | Err(LicenseError::Revoked(_)) => {}
-            Err(error) => {
-                activations.first_failure.get_or_insert(error);
+
+    fn for_id(&self, state: &Path, id: &LicenseId) -> CheckedActivation {
+        let path = license::activation_path(state, id);
+        self.0
+            .iter()
+            .find(|(stored, _)| *stored == path)
+            .map_or(Ok(None), |(_, activation)| activation.clone())
+    }
+
+    fn installed(self) -> Result<Activations, ProductError> {
+        let mut activations = Activations::default();
+        for (_, result) in self.0 {
+            match result {
+                Ok(Some(license))
+                    if !activations
+                        .licenses
+                        .iter()
+                        .any(|item| item.id() == license.id()) =>
+                {
+                    activations.licenses.push(license);
+                }
+                Err(error) if !matches!(error.as_ref(), LicenseError::Revoked(_)) => {
+                    activations.first_failure.get_or_insert(error);
+                }
+                _ => {}
             }
         }
+        if activations.licenses.is_empty()
+            && let Some(error) = activations.first_failure
+        {
+            return Err(ProductError::License(error));
+        }
+        Ok(activations)
     }
-    if activations.licenses.is_empty()
-        && let Some(error) = activations.first_failure
-    {
-        return Err(error.into());
-    }
-    Ok(activations)
 }
 
 /// Load the authenticated licenses used for installation-wide update authorization.
 pub(crate) fn load_update_licenses() -> Result<Vec<UnrevokedLicense>, ProductError> {
-    Ok(load_activations()?.licenses)
+    Ok(ActivationSnapshot::load(&state_dir()?)?
+        .installed()?
+        .licenses)
 }
 
-fn license_service_origin() -> Result<String, ProductError> {
-    if let Ok(url) = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
-        && !url.is_empty()
-    {
-        return Ok(url);
-    }
-    option_env!("BEANKEEPER_LICENSE_SERVICE_URL")
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned)
-        .ok_or(ProductError::Configuration(
-            "set BEANKEEPER_LICENSE_SERVICE_URL at runtime, or build it in with the same variable, before redeeming a claim code",
-        ))
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
-fn redeem(file: &Path, storefront: Storefront) -> Result<Vec<u8>, ProductError> {
-    let service = license_service_origin()?;
-    let mut url = reqwest::Url::parse(&service)
-        .map_err(|_| ProductError::Configuration("invalid license service URL"))?;
-    let host = url
-        .host_str()
-        .ok_or(ProductError::Configuration("invalid license service URL"))?;
-    let loopback = is_loopback_host(host);
-    let https = url.scheme() == "https";
-    let http_loopback = url.scheme() == "http" && loopback;
-    if !(https || http_loopback)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(ProductError::Configuration(
-            "license service must be an HTTPS origin, or HTTP on loopback, without credentials",
-        ));
-    }
-    url.set_path("/api/v1/licenses/redeem");
-    let redemption = Redemption::from_file(file, storefront)?;
-    let mut client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(15));
-    if https {
-        client = client.https_only(true);
-    }
-    let client = client.build().map_err(|_| ProductError::Redemption)?;
-    let response = client
-        .post(url)
-        .json(&redemption.request())
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|_| ProductError::Redemption)?;
-    let mut bytes = Vec::new();
-    response
-        .take(MAX_LICENSE_INPUT as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_LICENSE_INPUT {
-        return Err(ProductError::Redemption);
-    }
-    // The issuer returns a plain-text token that activation verifies offline.
-    Ok(bytes)
-}
 /// Execute the explicitly selected license command without touching a ledger.
 ///
 /// # Errors
@@ -545,44 +404,37 @@ pub fn run_license(
     options: LicenseOptions,
     books_path: &Path,
     requirement: BooksRequirement,
-) -> Result<(), ProductError> {
-    match options.command {
-        None => {
-            if let Some(books) = selected_books(books_path, requirement)? {
-                println!("{}", LedgerAccess::from(books).status());
-            }
-            println!("{}", license_status()?);
-        }
+    json: bool,
+) -> Result<ExitCode, ProductError> {
+    let request = match options.command {
+        None => LicenseRequest::Status,
         Some(LicenseCommand::Trust { json }) => {
             if OFFICIAL_BUILD {
                 license::release_revocations(&trusted_keys()?)?;
             }
             write_embedded_trust(json)?;
+            return Ok(ExitCode::SUCCESS);
         }
         Some(LicenseCommand::Activate {
             file,
-            token,
+            token_stdin,
             code_file,
             storefront,
         }) => {
-            let books = selected_books(books_path, requirement.for_activation(ENFORCEMENT))?;
-            let source = LicenseSource::try_from((file, token, code_file, storefront))?;
-            // Resolve trust before redeeming a potentially single-use claim.
-            let keys = trusted_keys()?;
-            let revocations = license::release_revocations(&keys)?;
-            let bytes = source.read()?;
-            let license = revocations.admit(license::verify_offline(&bytes, &keys)?)?;
-            let major = ENFORCEMENT.activation_major(&license);
-            let active = ActiveLicense::try_from((license, major))?;
-            let state = state_dir()?;
-            if let Some(books) = books {
-                Bindings(&state).bind(&active, &books)?;
+            let source = ActivationInputs {
+                token_stdin,
+                file,
+                code_file,
+                storefront,
+                ..ActivationInputs::default()
             }
-            active.persist(&state)?;
-            println!("{}", describe(std::slice::from_ref(active.as_ref())));
+            .try_into()?;
+            LicenseRequest::Activate(source)
         }
-    }
-    Ok(())
+    };
+    let target = BooksSelection::try_from((Some(books_path), requirement))?;
+    let report = request.run(&target)?;
+    report.write_cli(json, &target)
 }
 /// Whether a license command requires its selected books to exist.
 #[derive(Clone, Copy)]
@@ -612,17 +464,58 @@ impl BooksRequirement {
     }
 }
 
-fn selected_books(
-    path: &Path,
+struct BooksSelection<'a> {
+    path: Cow<'a, Path>,
     requirement: BooksRequirement,
-) -> Result<Option<BooksPath>, ProductError> {
-    match BooksPath::try_from(path) {
-        Ok(books) => Ok(Some(books)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => match requirement {
-            BooksRequirement::Optional => Ok(None),
-            BooksRequirement::Required => Err(ProductError::BooksRequired),
-        },
-        Err(error) => Err(error.into()),
+}
+
+impl<'a> TryFrom<(Option<&'a Path>, BooksRequirement)> for BooksSelection<'a> {
+    type Error = ProductError;
+
+    fn try_from(
+        (fallback, requirement): (Option<&'a Path>, BooksRequirement),
+    ) -> Result<Self, Self::Error> {
+        let managed = match requirement {
+            BooksRequirement::Required => None,
+            BooksRequirement::Optional => {
+                crate::service::managed_books().map_err(|_| ProductError::BooksConfiguration)?
+            }
+        };
+        let path = match (managed, fallback) {
+            (Some(path), _) => Cow::Owned(path),
+            (None, Some(path)) => Cow::Borrowed(path),
+            (None, None) => Cow::Owned(
+                crate::service::default_books().map_err(|_| ProductError::BooksConfiguration)?,
+            ),
+        };
+        Ok(Self { path, requirement })
+    }
+}
+
+impl BooksSelection<'_> {
+    fn resolve(&self, request: &LicenseRequest) -> Result<Option<BooksPath>, ProductError> {
+        let requirement = match request {
+            LicenseRequest::Status => self.requirement,
+            LicenseRequest::Activate(_) => self.requirement.for_activation(ENFORCEMENT),
+        };
+        match BooksPath::try_from(self.path.as_ref()) {
+            Ok(books) => Ok(Some(books)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match requirement {
+                BooksRequirement::Optional => Ok(None),
+                BooksRequirement::Required => Err(ProductError::BooksRequired),
+            },
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn settings_url(&self) -> Option<String> {
+        use crate::{
+            server,
+            service::{self, LinkBooks},
+        };
+        service::link_address(LinkBooks::Explicit(&self.path), None)
+            .ok()
+            .map(|listener| format!("{}settings", server::local_url(listener.into())))
     }
 }
 
@@ -649,7 +542,7 @@ pub fn status_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe, embedded_license_trust, embedded_public_keys};
+    use super::{LicenseInventory, embedded_license_trust, embedded_public_keys};
     use crate::license::{TrustedKeys, VerifiedRevocations, verify_offline};
 
     #[test]
@@ -665,7 +558,12 @@ mod tests {
             include_bytes!("../tests/fixtures/revocations-empty.json"),
             &keys,
         )?;
-        let status = describe(&[revocations.admit(claims)?]);
+        let status = LicenseInventory::Active {
+            first: Box::new(revocations.admit(claims)?),
+            additional: Vec::new(),
+            warning: None,
+        }
+        .to_string();
         assert_eq!(
             status,
             "License status: active and valid.\nLicense lic_01h455vb4pex5vsknk084sn02q covers all 1.x releases forever."

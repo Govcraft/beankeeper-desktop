@@ -3,6 +3,7 @@
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use beankeeper_cli::{
@@ -31,7 +32,7 @@ impl EnforcementPolicy {
     }
 }
 
-enum Entitlement {
+pub(crate) enum Entitlement {
     Active(ActiveLicense),
     Missing,
     Revoked(LicenseId),
@@ -65,7 +66,7 @@ impl fmt::Display for Entitlement {
                 "These books are read-only because their Desktop license covers {major}.x releases."
             )?,
         }
-        f.write_str(" You can still read, export, back up, restore, recover your books, and undo eligible changes. Buy a license at https://beankeeper.app or use `bk --db BOOKS license activate FILE` to activate one for these books.")
+        f.write_str(" You can still read, export, back up, restore, recover your books, and undo eligible changes. Ask your agent to activate a license you already have, or visit https://beankeeper.app to buy one.")
     }
 }
 
@@ -98,6 +99,26 @@ impl From<BooksPath> for LedgerAccess {
     }
 }
 
+pub(crate) enum LedgerLicenseStatus {
+    Free,
+    Enforced(Entitlement),
+}
+
+impl LedgerLicenseStatus {
+    pub(crate) fn writable(&self) -> bool {
+        matches!(self, Self::Free | Self::Enforced(Entitlement::Active(_)))
+    }
+}
+
+impl fmt::Display for LedgerLicenseStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Free => f.write_str("This Desktop build allows writes without a license."),
+            Self::Enforced(entitlement) => entitlement.fmt(f),
+        }
+    }
+}
+
 impl LedgerAccess {
     pub(crate) fn protect(self, db: Db, target: LedgerTarget) -> Db {
         db.with_write_authorizer(target, self)
@@ -108,10 +129,30 @@ impl LedgerAccess {
             .map_err(|reason| CliError::WriteDenied { ledger, reason })
     }
 
-    pub(crate) fn status(&self) -> String {
+    pub(crate) fn status(&self) -> LedgerLicenseStatus {
         match self.policy {
-            EnforcementPolicy::Free => "This Desktop build allows writes without a license.".into(),
-            EnforcementPolicy::Enforced(major) => self.current_entitlement(major).to_string(),
+            EnforcementPolicy::Free => LedgerLicenseStatus::Free,
+            EnforcementPolicy::Enforced(major) => {
+                LedgerLicenseStatus::Enforced(self.current_entitlement(major))
+            }
+        }
+    }
+
+    pub(crate) fn status_from(
+        &self,
+        state: &Path,
+        load: impl FnMut(&LicenseId) -> CheckedActivation,
+    ) -> LedgerLicenseStatus {
+        match self.policy {
+            EnforcementPolicy::Free => LedgerLicenseStatus::Free,
+            EnforcementPolicy::Enforced(major) => {
+                let entitlement = Bindings(state)
+                    .for_books(&self.books)
+                    .map_or_else(Entitlement::Invalid, |matching| {
+                        resolve(matching, major, load)
+                    });
+                LedgerLicenseStatus::Enforced(entitlement)
+            }
         }
     }
 
@@ -151,7 +192,9 @@ impl LedgerAccess {
             return Ok(Entitlement::Missing);
         }
         let (keys, revocations) = trust()?;
-        Ok(resolve(state, matching, &keys, &revocations, major))
+        Ok(resolve(matching, major, |id| {
+            load_activation(&license::activation_path(state, id), &keys, &revocations)
+        }))
     }
 }
 
@@ -165,33 +208,45 @@ impl LedgerWriteAuthorizer for LedgerAccess {
     }
 }
 
-fn resolve(
-    state: &Path,
-    ids: Vec<LicenseId>,
+pub(crate) type CheckedActivation = Result<Option<UnrevokedLicense>, Arc<LicenseError>>;
+
+pub(crate) fn load_activation(
+    path: &Path,
     keys: &license::TrustedKeys,
     revocations: &license::VerifiedRevocations,
+) -> CheckedActivation {
+    license::load(path, keys)
+        .and_then(|license| {
+            license
+                .map(|license| revocations.admit(license))
+                .transpose()
+        })
+        .map_err(Arc::new)
+}
+
+fn resolve(
+    ids: Vec<LicenseId>,
     major: MajorVersion,
+    mut load: impl FnMut(&LicenseId) -> CheckedActivation,
 ) -> Entitlement {
     let mut refusal = Entitlement::Missing;
     for id in ids {
-        match license::load(&license::activation_path(state, &id), keys) {
-            Ok(Some(license)) if license.id() != &id => {
-                refusal = Entitlement::Invalid(LicenseError::InvalidClaims.into());
-            }
-            Ok(Some(license)) => {
-                let active = revocations
-                    .admit(license)
-                    .and_then(|license| (license, major).try_into());
-                refusal = match active {
-                    Ok(active) => return Entitlement::Active(active),
-                    Err(LicenseError::Revoked(id)) => Entitlement::Revoked(id),
-                    Err(LicenseError::WrongMajor(major)) => Entitlement::WrongMajor(major),
-                    Err(error) => Entitlement::Invalid(error.into()),
-                };
-            }
-            Ok(None) => {}
-            Err(error) => refusal = Entitlement::Invalid(error.into()),
-        }
+        refusal = match load(&id) {
+            Ok(Some(license)) if license.id() == &id => match (license, major).try_into() {
+                Ok(active) => return Entitlement::Active(active),
+                Err(LicenseError::WrongMajor(major)) => Entitlement::WrongMajor(major),
+                Err(error) => Entitlement::Invalid(error.into()),
+            },
+            Ok(None) => continue,
+            Err(error) => match error.as_ref() {
+                LicenseError::Revoked(revoked) if revoked == &id => Entitlement::Revoked(id),
+                LicenseError::Revoked(_) => {
+                    Entitlement::Invalid(LicenseError::InvalidClaims.into())
+                }
+                _ => Entitlement::Invalid(ProductError::License(error)),
+            },
+            Ok(Some(_)) => Entitlement::Invalid(LicenseError::InvalidClaims.into()),
+        };
     }
     refusal
 }
