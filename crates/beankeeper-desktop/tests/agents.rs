@@ -113,7 +113,7 @@ fn chatgpt_codex_uses_the_shared_profile_and_chat_does_not_register()
     let row = &chat["data"]["agents"][0];
     assert_eq!(row["error"]["code"], "AGENT_UNSUPPORTED");
     assert!(row["message"].as_str().is_some_and(|message| {
-        message.contains("install.md") && message.contains("agents connect chatgpt-codex")
+        message.contains("This computer") && message.contains("install.md")
     }));
     assert!(!config.exists());
 
@@ -123,12 +123,70 @@ fn chatgpt_codex_uses_the_shared_profile_and_chat_does_not_register()
     assert_eq!(row["agent"], "codex");
     assert_eq!(row["config"], config.to_string_lossy().as_ref());
     assert_eq!(row["state"], "configured");
+    assert!(
+        row["message"]
+            .as_str()
+            .is_some_and(|message| { message.contains("If this chat still lacks the tools") })
+    );
     let registered = fs::read(&config)?;
     let (success, again) = bk(path, &["agents", "connect", "codex", "--json"])?;
     assert!(success, "{again}");
     assert_eq!(again["data"]["agents"][0], *row);
     assert_eq!(fs::read(&config)?, registered);
     assert!(!config.with_extension("toml.beankeeper-backup").exists());
+    Ok(())
+}
+
+#[test]
+fn chatgpt_codex_preserves_the_servers_enabled_setting() -> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let path = home.path();
+    let config = path.join(".codex/config.toml");
+    let connect = ["agents", "connect", "chatgpt-codex", "--json"];
+    let doctor = ["agents", "doctor", "chatgpt-codex", "--json"];
+    let (success, result) = bk(path, &connect)?;
+    assert!(success, "{result}");
+    let original = fs::read_to_string(&config)?;
+    let with_setting = |setting: &str| {
+        original.replace(
+            "[mcp_servers.beankeeper-service]",
+            &format!("[mcp_servers.beankeeper-service]\nenabled = {setting} # my choice"),
+        )
+    };
+    let enabled = with_setting("true");
+    fs::write(&config, &enabled)?;
+    let (success, result) = bk(path, &connect)?;
+    assert!(success, "{result}");
+    let (success, result) = bk(path, &doctor)?;
+    assert!(!success, "the local service has not been installed");
+    let row = &result["data"]["agents"][0];
+    assert_eq!(row["state"], "configured");
+    assert!(
+        row["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("company_list"))
+    );
+    assert_eq!(fs::read_to_string(&config)?, enabled);
+
+    for (setting, code) in [
+        ("false", "AGENT_MCP_SERVER_DISABLED"),
+        (r#""true""#, "AGENT_CONFIG_CONFLICT"),
+    ] {
+        let modified = with_setting(setting);
+        fs::write(&config, &modified)?;
+        for args in [&connect, &doctor] {
+            let (success, result) = bk(path, args)?;
+            assert!(!success, "{result}");
+            let error = &result["data"]["agents"][0]["error"];
+            assert_eq!(error["code"], code, "{result}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| { message.contains("beankeeper-service") })
+            );
+            assert_eq!(fs::read_to_string(&config)?, modified);
+        }
+    }
     Ok(())
 }
 

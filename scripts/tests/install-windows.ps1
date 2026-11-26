@@ -15,7 +15,6 @@ $guideCommands = $guideAst.FindAll({ param($ast) $ast -is [System.Management.Aut
 foreach ($required in @(
     '& $bkSetup -RequireSignatures -RequireAgentSetup -NoService -InstallDir $bkDir',
     '& $bk service install --no-agents',
-    '& $bk agents connect --all --json',
     '& $bk service status --json'
 )) {
     if ($guideCommands.Extent.Text -notcontains $required) { throw "Missing install command in SKILL.md: $required" }

@@ -1,59 +1,42 @@
 # Use Beankeeper with local Codex
 
-1. In the ChatGPT desktop app, choose **Codex** in the ChatGPT menu. Under
-   **Work in**, choose **This computer**.
-2. Say **Install Beankeeper for me by following https://beankeeper.app/install.md.**
-   Codex runs the signed installer in your local session and registers the
-   connection. You can approve local execution if ChatGPT asks.
-3. If the current chat still lacks the tools, open **Settings → MCP servers**,
-   select **Restart**, and start a new local Codex chat. Type `/mcp` to see the
-   Beankeeper servers. Say **Set up my books** or **Create demo books**.
+1. In the ChatGPT desktop app, choose **Codex**, then **Work in → This computer**.
+2. Say **Install Beankeeper for me by following https://beankeeper.app/install.md**.
+   If ChatGPT asks for permission to run the installer on your computer, approve
+   the request in the app. Codex handles the installation and connection.
+3. Type \`/mcp\` to see whether **beankeeper** and **beankeeper-service** are
+   connected. If Codex says this chat still needs to load the connection,
+   choose **Restart** in **Settings → MCP servers**, then open a new Codex chat
+   on **This computer**.
+4. Say **Set up my books** or **Create demo books**. You can then ask Codex to
+   record a practice purchase, move it to a different category, undo the move,
+   and explain your spending in chat.
 
-The agent handles installation and connection from your local session. You
-can keep your terminal closed and leave the connection credentials in Beankeeper.
-[Choose a local Codex environment](https://learn.chatgpt.com/docs/environments/modes)
-· [MCP settings](https://learn.chatgpt.com/docs/extend/mcp)
+Your books and connection credentials stay on your computer. The agent can
+answer in chat and offer a Beankeeper Desktop link for details from your books.
+Practice books stay in chat.
+[OpenAI's guide to Codex environments](https://learn.chatgpt.com/docs/environments/modes) · [OpenAI's MCP settings guide](https://learn.chatgpt.com/docs/extend/mcp)
 
-## What the agent sets up
+## What the agent verifies
 
-`bk agents connect chatgpt-codex --json` uses the same adapter as
-`bk agents connect codex --json`. Both merge the two stdio server entries into
-`~/.codex/config.toml` (or the configured `CODEX_HOME`) and install the local
-Beankeeper skill. The desktop app’s local Codex, CLI, and IDE use the shared
-profile. The agent can repeat the command to repair setup. On older versions
-of `bk` it can use `codex` as the client name.
+Once the per-user service is running, the local agent runs
+\`bk agents connect chatgpt-codex --json\` and
+\`bk agents doctor chatgpt-codex --json\`. The \`codex\` client name uses the same
+adapter and works with older installed versions. Registration creates or
+updates \`~/.codex/config.toml\` (or the configured \`CODEX_HOME\`) and installs
+the local skill. It can be repeated safely and preserves a server's explicit
+\`enabled\` setting. A disabled connection is reported by name.
 
-`bk agents doctor chatgpt-codex --json` checks the profile and uses the managed
-credential for a read-only probe of Desktop. To verify the loaded session,
-the agent should call `company_list` in Codex and then `setup_status`. The
-ledger bridge supplies Beankeeper’s MCP instructions and serves setup, posting,
-categorization, audited undo, and reporting through the same local service
-used by other agents. The existing access grant controls which calls succeed.
-The lifecycle server can diagnose or start the local service when it is down.
-The separate `.mcpb` installer configures Claude Desktop.
-[Managed access and hosting](service.md) · [Claude Desktop extension](claude-desktop.md)
+Doctor verifies the shared profile and makes an authenticated read-only call
+through the local service. The agent then calls \`company_list\` through the
+current chat to check that Codex has loaded the tools. It calls \`setup_status\`
+to continue onboarding. The ledger and lifecycle connections use local stdio,
+and the ledger bridge discovers and authenticates to Desktop's loopback MCP
+endpoint using Beankeeper's managed credentials. Existing access grants
+control which actions succeed. [Managed access and hosting](service.md)
 
-## What other ChatGPT surfaces require
+## ChatGPT modes
 
-| Surface | Connection |
-| --- | --- |
-| **Codex on this computer** | OpenAI documents local stdio and Streamable HTTP and says Codex reads server `instructions` at initialization. Beankeeper uses stdio, which reaches Desktop’s authenticated loopback `/mcp` through the existing bridge. [Local MCP configuration](https://learn.chatgpt.com/docs/extend/mcp) |
-| **Regular Chat and Work in the desktop app** | The shared Codex configuration is documented for the Codex host only. OpenAI describes a desktop-only plugin path for threads that run locally. Submitting a plugin with a local stdio server requires OpenAI partner allowlisting. Beankeeper has no published ChatGPT plugin. [ChatGPT plugins](https://learn.chatgpt.com/docs/plugins) · [Desktop-only submissions](https://developers.openai.com/plugins/deploy/desktop-only) |
-| **ChatGPT web and hosted Chat or Work** | Use **Plugins → Add custom MCP server** with a reachable HTTPS URL or a Secure MCP Tunnel. ChatGPT accepts remote SSE or Streamable HTTP. A loopback URL such as `http://127.0.0.1:8750/mcp` is private to the owner’s machine, so ChatGPT cannot reach it directly. Workspace settings, including permissions to create and use MCP plugins and Lockdown, control access. [Add custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server) · [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt) · [Workspace plugin controls](https://learn.chatgpt.com/docs/enterprise/apps-and-connectors) |
-
-OpenAI’s custom-server flow accepts OAuth, anonymous access, or mixed OAuth and
-anonymous access. OAuth supports static client credentials, Client ID Metadata
-Documents (CIMD) with `none` or `private_key_jwt` client authentication, and
-Dynamic Client Registration (DCR). Beankeeper’s existing local agent credential
-does not implement that flow. ChatGPT also defaults to confirming plugin writes.
-[Custom server auth and write behavior](https://developers.openai.com/api/docs/guides/custom-mcp-server)
-· [OAuth details](https://developers.openai.com/plugins/build/auth)
-
-A Secure MCP Tunnel can carry traffic to the private server over an outbound
-connection while the ledger stays on the owner’s computer. It requires a
-Platform tunnel ID, a runtime API key, and tunnel and workspace permissions.
-The tunnel is a transport. User authorization still belongs to the MCP server.
-For Beankeeper, use local Codex. A future private web integration would need
-OAuth that maps to existing access grants and a way to provision and run the
-tunnel for the owner. Public plugin distribution has separate requirements.
-[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+Use local Codex in the desktop app when coming from regular Chat or ChatGPT
+web. ChatGPT Work on **This computer** still needs a signed-in connection
+check. The macOS and Windows first-run walkthroughs also remain pending.

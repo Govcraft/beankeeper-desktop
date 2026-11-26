@@ -76,6 +76,7 @@ enum AgentError {
     ClaudeProfileAmbiguous,
     Invalid(PathBuf),
     Conflict(PathBuf),
+    ServerDisabled(&'static str),
     RegistrationConflict {
         path: PathBuf,
         server: &'static str,
@@ -92,6 +93,7 @@ impl AgentError {
             Self::ClaudeProfileAmbiguous => "AGENT_CLAUDE_PROFILE_AMBIGUOUS",
             Self::Invalid(_) => "AGENT_INVALID_CONFIG",
             Self::Conflict(_) | Self::RegistrationConflict { .. } => "AGENT_CONFIG_CONFLICT",
+            Self::ServerDisabled(_) => "AGENT_MCP_SERVER_DISABLED",
             Self::Io(..) => "AGENT_CONFIG_IO",
         }
     }
@@ -121,6 +123,10 @@ impl fmt::Display for AgentError {
                 f,
                 "a different Beankeeper entry or skill already exists in {}; inspect it before retrying",
                 path.display()
+            ),
+            Self::ServerDisabled(server) => write!(
+                f,
+                "Codex has the {server} connection turned off. Reconnect it only if the owner asks."
             ),
             Self::RegistrationConflict { path, server, reason } => {
                 write!(f, "{}: the `{server}` entry {reason}", path.display())
@@ -527,7 +533,10 @@ fn check_agent(
             ClientStatus::new(
                 agent,
                 State::Configured,
-                "Beankeeper is registered. Restart the agent client to load it.",
+                match agent {
+                    Agent::Codex => "Beankeeper is registered in Codex. If this chat still lacks the tools, reload Codex and open a new local chat.",
+                    _ => "Beankeeper is registered. Restart the agent client to load it.",
+                },
             )
         }),
         Operation::Disconnect => adapter.change(binary, Change::Disconnect).map(|()| {
@@ -610,7 +619,12 @@ fn registration_status(
         ),
         Registration::Owned => (
             State::Configured,
-            "The managed MCP configuration is present.",
+            match agent {
+                Agent::Codex => {
+                    "The Codex profile is configured. Call company_list in the local chat to verify that Codex has loaded Beankeeper."
+                }
+                _ => "The managed MCP configuration is present.",
+            },
         ),
     };
     let incomplete = !matches!(state, State::Configured);

@@ -37,7 +37,13 @@ pub(super) enum ConfigFormat {
     Json,
     Copilot,
     VsCode,
-    Toml,
+    Toml(TomlClient),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TomlClient {
+    Codex,
+    GrokBuild,
 }
 
 pub(super) struct Adapter {
@@ -217,7 +223,7 @@ impl Agent {
     pub(super) fn unsupported_message(self) -> &'static str {
         match self {
             Self::ChatGpt => {
-                "Regular ChatGPT chat has no Beankeeper connection. In the ChatGPT desktop app, switch to Codex and ask it to install Beankeeper from https://beankeeper.app/install.md. To register an existing install, run bk agents connect chatgpt-codex."
+                "Open the ChatGPT desktop app, choose Codex, and choose This computer under Work in. Say ‘Install Beankeeper for me by following https://beankeeper.app/install.md’. From that local session, the agent can register an existing install with bk agents connect chatgpt-codex."
             }
             _ => {
                 "No supported local MCP configuration is available. Use an agent that can connect to the local Beankeeper service."
@@ -251,7 +257,7 @@ impl Agent {
             ),
             Self::Codex => (
                 paths.codex.join("config.toml"),
-                ConfigFormat::Toml,
+                ConfigFormat::Toml(TomlClient::Codex),
                 Some(skill(&paths.home.join(".agents"))),
                 paths.codex.clone(),
                 Some("codex"),
@@ -299,7 +305,7 @@ impl Agent {
             }
             Self::GrokBuild => (
                 paths.grok.join("config.toml"),
-                ConfigFormat::Toml,
+                ConfigFormat::Toml(TomlClient::GrokBuild),
                 Some(skill(&paths.grok)),
                 paths.grok.clone(),
                 Some("grok"),

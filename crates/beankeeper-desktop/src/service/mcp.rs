@@ -26,7 +26,7 @@ impl ServerHandler for Lifecycle {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("beankeeper-service", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(format!(
-            "This connection manages the local per-user service. {}",
+            "This connection manages Beankeeper on the owner's computer. If the ledger tools +             are missing, call service_status. If the service is running, check the ledger +             connection in the current chat before suggesting a reload. Explain any service +             failure in plain words and handle the repair locally. Keep credentials private. {}",
             self.instructions
         ));
         info

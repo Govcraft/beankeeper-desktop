@@ -113,7 +113,7 @@ if (-not $Published) {
 }
 
 try {
-    New-Item -ItemType Directory -Force -Path $codexDirectory, $localDirectory, $roamingDirectory | Out-Null
+    New-Item -ItemType Directory -Force -Path $userDirectory, $localDirectory, $roamingDirectory | Out-Null
     if (-not $Published) {
         New-Item -ItemType Directory -Path $fixtures | Out-Null
         $archivePath = Join-Path $fixtures $archive
@@ -155,7 +155,12 @@ try {
     if (-not (Test-Path -LiteralPath $books) -or -not (Test-Path -LiteralPath $recovery)) {
         throw 'First-run setup did not create the isolated books and recovery kit.'
     }
-    $doctorText = & $binary agents doctor codex --json
+    if (Test-Path -LiteralPath (Join-Path $codexDirectory 'config.toml')) {
+        throw 'The fixture must start Codex registration without an existing profile.'
+    }
+    $null = & $binary agents connect chatgpt-codex --json
+    if ($LASTEXITCODE -ne 0) { throw 'Could not register Beankeeper in a fresh Codex profile.' }
+    $doctorText = & $binary agents doctor chatgpt-codex --json
     if ($LASTEXITCODE -ne 0) { throw 'The installed Codex connection did not pass its MCP check.' }
     $doctor = $doctorText | ConvertFrom-Json
     if ($doctor.data.agents[0].state -ne 'configured' -or $doctor.data.service.state -ne 'ready') {

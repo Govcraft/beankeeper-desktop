@@ -488,12 +488,83 @@ fn assert_agent_reaches_service(
     }
     let companies = ledger.tool("company_list", &json!({}))?;
     assert_ne!(companies["isError"], true, "{companies}");
+    let setup = ledger.tool("setup_status", &json!({}))?;
+    assert_ne!(setup["isError"], true, "{setup}");
+    assert_eq!(
+        demo_payload(&setup)?["agent_access"]["write_mode"],
+        "direct"
+    );
+    assert_codex_demo_workflow(&mut ledger)?;
+    assert_eq!(
+        demo_payload(&ledger.tool("company_list", &json!({}))?)?,
+        demo_payload(&companies)?
+    );
+    let link = ledger.tool(
+        "ui_get_link",
+        &json!({"view_id":"income-statement","state":{
+            "from":"2026-11-01","to":"2026-11-30","currency":"USD"
+        }}),
+    )?;
+    assert_eq!(
+        demo_payload(&link)?["path"],
+        "/reports/income-statement?from=2026-11-01&to=2026-11-30&currency=USD"
+    );
     let mut lifecycle = McpPipe::start(&mut registered_stdio(
         agent_command(),
         &servers["beankeeper-service"],
     )?)?;
     let service = lifecycle.tool("service_status", &json!({}))?;
     assert_eq!(service["structuredContent"]["mcp_endpoint"], *endpoint);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_codex_demo_workflow(ledger: &mut McpPipe) -> TestResult {
+    let demo = ledger.tool("demo_start", &json!({}))?;
+    assert_eq!(demo_payload(&demo)?["state"], "active", "{demo}");
+    let mut tool = |name, args: Value| {
+        let response = ledger.tool(name, &args)?;
+        assert_ne!(response["isError"], true, "{name}: {response}");
+        demo_payload(&response)
+    };
+    let posted = tool(
+        "txn_post",
+        json!({
+            "company":"personal", "reference":"codex-first-run", "description":"Practice purchase",
+            "date":"2026-11-20", "currency":"USD",
+            "debits":[{"account":"5200","amount":"12.50"}],
+            "credits":[{"account":"1000","amount":"12.50"}]
+        }),
+    )?;
+    assert_eq!(posted["created"], true, "{posted}");
+    let moved = tool(
+        "txn_recategorize",
+        json!({
+            "company":"personal", "reference":"codex-first-run", "posting_reference":"codex-category",
+            "from_account":"5200", "to_account":"5100"
+        }),
+    )?;
+    assert_eq!(moved["original_id"], posted["id"]);
+    assert_eq!(moved["amount"], 1250);
+    let receipt = moved["receipt_id"]
+        .as_i64()
+        .ok_or("missing category receipt")?;
+    let undo = tool(
+        "audit_undo",
+        json!({"company":"personal","receipt":receipt}),
+    )?;
+    assert_eq!(undo["undo_of"], receipt);
+    assert_eq!(undo["kind"], "reversed");
+    let summary = tool(
+        "financial_summary",
+        json!({"company":"personal","to":"2026-11-30"}),
+    )?;
+    assert!(
+        summary["data"]["comparison"]["series"].is_array(),
+        "{summary}"
+    );
+    let removed = tool("demo_remove", json!({}))?;
+    assert_eq!(removed["state"], "removed");
     Ok(())
 }
 

@@ -87,14 +87,17 @@ run them from an authorized shell in the owner's logged-in OS session.
   [book setup tools](#guide-the-owner-through-book-setup) for real books or the
   [demo interview](#tailor-a-demo-in-chat) for practice books.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
-- **ChatGPT desktop app in local Codex mode.** Choose **Codex** and
-  **This computer**. Follow the steps below from that local session.
+- **ChatGPT desktop app in local Codex mode.** Choose **Codex**, then
+  **Work in → This computer**. The owner can say **Install Beankeeper for me by
+  following https://beankeeper.app/install.md**. Run the steps below from that
+  session. Register Codex explicitly even if it has no existing profile.
   [ChatGPT connection guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/chatgpt.md)
 - **Claude Code, the local Codex CLI, and Grok Build.** Follow the steps below when
   running on the owner's machine.
-- **Regular ChatGPT chat, Work, or ChatGPT web.** Direct the owner to
-  **Codex** and **This computer** in the ChatGPT desktop app. Give them the
-  same install prompt to use there.
+- **Regular ChatGPT chat or ChatGPT web.** Give the owner the install prompt
+  to use in local Codex in the ChatGPT desktop app.
+- **ChatGPT Work.** Use local Codex for this setup. The Work connection still
+  needs to be verified.
 - **Grok Bot with approved local execution.** Run setup, then connect through
   Grok Build or another supported local client. Grok Bot's Command MCP runs
   on its cloud computer.
@@ -115,8 +118,8 @@ Use the installed binary when it supports `bk service install --help` and
 continue with `setup_status`. If `installed` is true and `running` is false,
 run `bk service start` and check again. If `installed` is false, run
 `bk service install --no-agents` with the installed binary. For a running
-service with no agent connection, run `bk agents connect --all --json` and
-reload the client. If `bk` is missing or lacks the setup commands, use the
+service with no agent connection, [register and verify the client](#register-and-verify-the-client).
+If `bk` is missing or lacks the setup commands, use the
 signed installation commands for this operating system and processor below.
 If a supported command fails, report and repair that step before continuing.
 
@@ -142,7 +145,6 @@ detects Linux versus macOS and x86-64 versus Arm64.
     BK_REQUIRE_SIGNATURES=1 BK_REQUIRE_AGENT_SETUP=1 BK_INSTALL="$bk_bin" BK_NO_SERVICE=1 \
         sh "$bk_download/install.sh"
     "$bk_bin/bk" service install --no-agents
-    "$bk_bin/bk" agents connect --all --json
     "$bk_bin/bk" service status --json
 )
 ```
@@ -163,8 +165,6 @@ for x64 Windows before downloading the release.
         $bk = Join-Path $bkDir 'bk.exe'
         & $bk service install --no-agents
         if ($LASTEXITCODE -ne 0) { throw 'Beankeeper service installation failed' }
-        & $bk agents connect --all --json
-        if ($LASTEXITCODE -ne 0) { throw 'Beankeeper agent registration failed' }
         & $bk service status --json
         if ($LASTEXITCODE -ne 0) { throw 'Could not read Beankeeper service status' }
     } finally {
@@ -181,22 +181,36 @@ unavailable cosign, or a checksum mismatch. If the service or registration
 fails, report the status and the specific step. Repair that step before
 resuming installation.
 
-In local Codex, run `bk agents connect codex --json` and
-`bk agents doctor codex --json` from the owner's local session once the
-service is running. Explicit registration also works before a Codex config
-file exists. In the ChatGPT desktop app, have the owner select **Settings →
-MCP servers → Restart** and open a new Codex chat on **This computer** if the
-current chat still lacks the tools. Ask them to say **Set up my books** there.
+### Register and verify the client
+
+Once the service is running, use the installed executable's absolute path if
+needed. In local Codex, run `bk agents connect chatgpt-codex --json` and
+`bk agents doctor chatgpt-codex --json`. If an older installed binary doesn't
+recognize `chatgpt-codex`, use `codex` for both commands. For the other local
+shell clients above, use `bk agents connect --all --json` and
+`bk agents doctor --json`.
+
+A successful doctor result verifies the file and local service. To verify the
+current chat, call `company_list` through its MCP tools. An empty list is normal
+for new books. If the tools are still missing in the ChatGPT desktop app after
+doctor succeeds, say “Beankeeper is installed. This chat needs to reload the
+connection. Choose **Restart** in **Settings → MCP servers**, then open a new
+**Codex** chat on **This computer**.” The owner can type `/mcp` to see
+`beankeeper` and `beankeeper-service`. Ask the owner to say **Set up my books**
+or **Create demo books**, then call `setup_status` in the connected chat.
+For another local client, reload it if tools are still missing after doctor
+succeeds.
+
+If doctor fails, use its per-client or service error to repair the specific
+step locally. If it reports `AGENT_MCP_SERVER_DISABLED`, explain that the
+connection is turned off and respect that setting. If the owner asks to
+reconnect, enable the named server before retrying doctor. Keep terminal
+commands and connection credentials with the agent.
 
 Explain where the private recovery kit was created on first installation. Ask
 the owner to open the kit directly and keep an offline copy. Only the owner
-handles the key. Use the installed location or restart the agent client when it
-needs to reload its connection. If MCP tools are temporarily unavailable,
-`bk agents doctor --json` checks the registrations and makes an authenticated
-read-only MCP call. Confirm with `company_list` in the connected client, then
-call `setup_status` to begin conversational onboarding. Tell
-the owner that the books are encrypted locally, give the exact books path from
-`bk service status --json`, and explain that `bk agents disconnect` and
+handles the key. Tell the owner that the books are encrypted locally, give the
+exact books path from `bk service status --json`, and explain that `bk agents disconnect` and
 `bk service uninstall` remove the connection and background service while
 preserving the books. The binary can then be removed from its install directory.
 
