@@ -2,7 +2,7 @@
 use crate::{
     entitlement::{
         Bindings, CheckedActivation, ENFORCEMENT, Entitlement, LedgerAccess, LedgerLicenseStatus,
-        OFFICIAL_BUILD, load_activation,
+        OFFICIAL_BUILD,
     },
     instance::BooksPath,
     license::{self, ActiveLicense, LicenseError, LicenseId, TrustedKeys, UnrevokedLicense},
@@ -22,6 +22,7 @@ use std::{
 
 mod activation;
 pub(crate) mod mcp;
+pub(crate) mod removal;
 mod report;
 pub(crate) mod returns;
 
@@ -146,6 +147,11 @@ pub struct LicenseOptions {
 /// Local license commands, including offline activation and online redemption.
 #[derive(Subcommand)]
 pub enum LicenseCommand {
+    /// Remove a license from this computer without a return or refund.
+    Remove {
+        /// Installed license to remove.
+        license_id: LicenseId,
+    },
     /// Request a license return and refund without changing your books.
     Return {
         /// Select an installed license when more than one is present.
@@ -338,6 +344,7 @@ impl LicenseRequest {
                     first: Box::new(active.as_ref().clone()),
                     additional: Vec::new(),
                     warning: None,
+                    revoked: Vec::new(),
                 };
                 let access = books.map(|_| match ENFORCEMENT {
                     EnforcementPolicy::Free => LedgerLicenseStatus::Free,
@@ -358,11 +365,14 @@ impl LicenseRequest {
 struct Activations {
     licenses: Vec<UnrevokedLicense>,
     first_failure: Option<Arc<LicenseError>>,
+    revoked: Vec<license::VerifiedLicense>,
 }
 
 /// One set of disk reads for installation coverage and the selected books' write access.
+type CheckedStanding = Result<Option<license::LicenseStanding>, Arc<LicenseError>>;
+
 #[derive(Default)]
-struct ActivationSnapshot(Vec<(PathBuf, CheckedActivation)>);
+struct ActivationSnapshot(Vec<(PathBuf, CheckedStanding)>);
 
 impl ActivationSnapshot {
     fn load(state: &Path) -> Result<Self, ProductError> {
@@ -375,7 +385,9 @@ impl ActivationSnapshot {
         let checked = paths
             .into_iter()
             .map(|path| {
-                let result = load_activation(&path, &keys, &revocations);
+                let result = license::load(&path, &keys)
+                    .map(|license| license.map(|license| revocations.standing(license)))
+                    .map_err(Arc::new);
                 (path, result)
             })
             .collect();
@@ -387,14 +399,24 @@ impl ActivationSnapshot {
         self.0
             .iter()
             .find(|(stored, _)| *stored == path)
-            .map_or(Ok(None), |(_, activation)| activation.clone())
+            .map_or(Ok(None), |(_, activation)| {
+                activation.clone().and_then(|license| {
+                    license
+                        .map(UnrevokedLicense::try_from)
+                        .transpose()
+                        .map_err(Arc::new)
+                })
+            })
     }
 
     fn installed(self) -> Result<Activations, ProductError> {
         let mut activations = Activations::default();
         for (_, result) in self.0 {
             match result {
-                Ok(Some(license))
+                Ok(Some(license::LicenseStanding::Revoked(license))) => {
+                    activations.revoked.push(license);
+                }
+                Ok(Some(license::LicenseStanding::Valid(license)))
                     if !activations
                         .licenses
                         .iter()
@@ -436,6 +458,16 @@ pub fn run_license(
 ) -> Result<ExitCode, ProductError> {
     let request = match options.command {
         None => LicenseRequest::Status,
+        Some(LicenseCommand::Remove { license_id }) => {
+            let target = BooksSelection::try_from((Some(books_path), requirement))?;
+            let response = removal::remove(license_id, &target)?;
+            if json {
+                println!("{}", serde_json::json!(response));
+            } else {
+                println!("{}", response.message());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
         Some(LicenseCommand::Return { license_id, yes }) => {
             return run_return(license_id, yes.into(), json);
         }
@@ -605,7 +637,10 @@ pub fn status_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LicenseInventory, embedded_license_trust, embedded_public_keys};
+    use super::{
+        ActivationSnapshot, LicenseInventory, LicenseReport, embedded_license_trust,
+        embedded_public_keys,
+    };
     use crate::license::{TrustedKeys, VerifiedRevocations, verify_offline};
 
     #[test]
@@ -625,11 +660,67 @@ mod tests {
             first: Box::new(revocations.admit(claims)?),
             additional: Vec::new(),
             warning: None,
+            revoked: Vec::new(),
         }
         .to_string();
         assert_eq!(
             status,
             "License status: active and valid.\nLicense lic_01h455vb4pex5vsknk084sn02q covers all 1.x releases forever."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signed_revoked_inventory_is_visible_and_cannot_grant_write_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let keys =
+            TrustedKeys::from_json(include_bytes!("../tests/fixtures/license-public-keys.json"))?;
+        let revoked = VerifiedRevocations::verify(
+            include_bytes!("../tests/fixtures/revocations.json"),
+            &keys,
+        )?;
+        let first = verify_offline(
+            include_bytes!("../tests/fixtures/license-v4.public.txt"),
+            &keys,
+        )?;
+        let second = verify_offline(
+            include_bytes!("../tests/fixtures/license-major-2-v4.public.txt"),
+            &keys,
+        )?;
+        let snapshot = ActivationSnapshot(vec![
+            ("first".into(), Ok(Some(revoked.standing(first)))),
+            ("second".into(), Ok(Some(revoked.standing(second)))),
+        ]);
+        let inventory: LicenseInventory = snapshot.installed()?.into();
+        let report = LicenseReport {
+            inventory: Ok(inventory),
+            access: None,
+        };
+        let response = serde_json::to_value(report.response(None))?;
+        assert_eq!(response["status"], "active");
+        assert_eq!(response["licenses"][0]["standing"], "valid");
+        assert_eq!(response["licenses"][1]["standing"], "revoked");
+        assert!(
+            response["message"]
+                .as_str()
+                .ok_or("message")?
+                .contains("was revoked")
+        );
+        let only = verify_offline(
+            include_bytes!("../tests/fixtures/license-v4.public.txt"),
+            &keys,
+        )?;
+        let inventory: LicenseInventory =
+            ActivationSnapshot(vec![("first".into(), Ok(Some(revoked.standing(only))))])
+                .installed()?
+                .into();
+        let report = LicenseReport {
+            inventory: Ok(inventory),
+            access: None,
+        };
+        assert_eq!(
+            serde_json::to_value(report.response(None))?["status"],
+            "revoked"
         );
         Ok(())
     }

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Remove local licenses through CLI and MCP without a refund or changes to books, and show revoked licenses in status.
+
 ## [1.0.2] - 2026-11-26
 
 - Report stale Claude extensions through CLI and MCP and open signed upgrades with in-process verification, trust-rotation recovery, and restart guidance.

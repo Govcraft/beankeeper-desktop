@@ -554,3 +554,31 @@ async fn cli_and_mcp_undo_receipts_on_the_same_read_only_ledger() -> TestResult 
     server.abort();
     Ok(())
 }
+
+#[test]
+fn removing_only_license_keeps_books_intact_and_enforces_read_only() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    fs::write(&path, "unchanged books")?;
+    let access = enforced(&path, dir.path(), CLEAN)?;
+    let active = active_fixture(&license::TrustedKeys::from_json(KEYS)?)?;
+    active.persist(dir.path())?;
+    Bindings(dir.path()).bind(&active, &access.books)?;
+    assert!(access.status().writable());
+    let keys = license::TrustedKeys::from_json(KEYS)?;
+    let other = license::verify_offline(
+        include_bytes!("../../tests/fixtures/license-major-2-v4.public.txt"),
+        &keys,
+    )?;
+    let other = license::VerifiedRevocations::verify(CLEAN, &keys)?.admit(other)?;
+    let other = ActiveLicense::try_from((other, MajorVersion::try_from(2)?))?;
+    other.persist(dir.path())?;
+    Bindings(dir.path()).bind(&other, &access.books)?;
+    crate::product::removal::remove_at(dir.path(), other.id().clone())?;
+    assert!(access.status().writable());
+    assert!(license::activation_path(dir.path(), active.id()).exists());
+    crate::product::removal::remove_at(dir.path(), active.id().clone())?;
+    assert!(!access.status().writable());
+    assert_eq!(fs::read_to_string(path)?, "unchanged books");
+    Ok(())
+}
