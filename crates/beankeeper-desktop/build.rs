@@ -121,16 +121,19 @@ fn embed_revocations(manifest: &Path, out: &Path, policy: EnforcementPolicy) -> 
     let path = packaging.join("revocations.json");
     let watched = if path.exists() { &path } else { &packaging };
     println!("cargo:rerun-if-changed={}", watched.display());
-    let enforced = matches!(policy, EnforcementPolicy::Enforced(_));
+    // Only enforcing builds embed the issuer-signed snapshot. Free builds (rc, dev,
+    // tests) embed nothing, so tests that trust fixture keys never verify it.
+    if !matches!(policy, EnforcementPolicy::Enforced(_)) {
+        return std::fs::write(out.join("revocations.json"), []);
+    }
     let bytes = match std::fs::read(path) {
-        Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 && (!bytes.is_empty() || !enforced) => bytes,
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024 => bytes,
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid size for packaging/revocations.json",
             ));
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !enforced => Vec::new(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(io::Error::new(
                 error.kind(),
