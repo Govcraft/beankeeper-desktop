@@ -94,6 +94,26 @@ pub enum ServiceCommand {
     Run,
 }
 
+/// Secret-free service-manager failure categories, independent of localized messages.
+#[derive(Debug)]
+pub enum ManagerFailure {
+    /// The selected session socket could not be reached.
+    Connection,
+    /// The OS denied access to the selected socket or command.
+    PermissionDenied,
+    /// The manager returned an unsuccessful operation status.
+    Operation,
+}
+impl fmt::Display for ManagerFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Connection => "Cannot connect to the OS service manager. The agent should use the owner's active session bus, then retry the same operation.",
+            Self::PermissionDenied => "Access to the OS service manager was denied. The agent should restore access to the owner's session socket and retry.",
+            Self::Operation => "The OS service manager could not complete the unit operation. The agent should inspect the private service log and manager status, then retry.",
+        })
+    }
+}
+
 /// Service lifecycle failures with stable machine-readable codes.
 #[derive(Debug)]
 pub enum ServiceError {
@@ -102,7 +122,7 @@ pub enum ServiceError {
     /// Invalid or conflicting service configuration.
     Configuration(&'static str),
     /// An OS manager command failed. Secret-bearing output is never included.
-    Manager(&'static str),
+    Manager(ManagerFailure),
     /// This Linux process cannot locate the owner's session bus.
     SessionEnvUnavailable,
     /// No managed background service is installed.
@@ -174,8 +194,9 @@ impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "service I/O failed: {error}"),
-            Self::Configuration(message) | Self::Manager(message) => f.write_str(message),
-            Self::SessionEnvUnavailable => f.write_str("Cannot find your Linux session bus. Run Beankeeper as the owner from an active login session, or pass that session's XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS to your terminal or agent."),
+            Self::Configuration(message) => f.write_str(message),
+            Self::Manager(error) => error.fmt(f),
+            Self::SessionEnvUnavailable => f.write_str("Cannot find your Linux session bus. The agent should use the owner's active login session and its DBUS_SESSION_BUS_ADDRESS. When that address works, leave XDG_RUNTIME_DIR unset for the service-manager child. If no bus address is available, the agent can use the owner's XDG_RUNTIME_DIR with its systemd/private socket. Retry the same operation; it picks up where it stopped."),
             Self::NotInstalled => f.write_str("Beankeeper is not installed as a background service. Run bk service install."),
             Self::NotRunning => f.write_str("Beankeeper is stopped. Run bk service start."),
             Self::UnknownTool => f.write_str("List the service lifecycle tools to find the supported operation names."),

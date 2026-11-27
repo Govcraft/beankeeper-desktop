@@ -7,7 +7,8 @@ use std::{
 };
 
 use super::{
-    Config, Paths, ServiceError, private_write, remove_if_exists, session::UserSessionEnv,
+    Config, ManagerFailure, Paths, ServiceError, private_write, remove_if_exists,
+    session::UserSessionEnv,
 };
 use crate::private_file::PrivateFile;
 
@@ -139,7 +140,7 @@ pub(super) fn uninstall(paths: &Paths, session: &UserSessionEnv) -> Result<(), S
 fn systemctl(session: &UserSessionEnv, args: &[&str]) -> Result<(), ServiceError> {
     checked(Program::Systemctl(session), args)
 }
-fn linux_artifact(paths: &Paths) -> std::path::PathBuf {
+pub(super) fn linux_artifact(paths: &Paths) -> std::path::PathBuf {
     paths.state.join("systemd").join(UNIT)
 }
 fn domain() -> Result<String, ServiceError> {
@@ -173,28 +174,58 @@ fn manager_command(program: Program<'_>) -> Command {
 }
 
 fn checked(program: Program<'_>, args: &[&str]) -> Result<(), ServiceError> {
-    if success(program, args)? {
+    let result = run_manager(program, args)?;
+    if result.status.success() {
         Ok(())
     } else {
-        Err(ServiceError::Manager(
-            "OS service manager refused the operation; ensure a logged-in user session (Linux requires a systemd user bus), then retry",
-        ))
+        Err(manager_failure(program))
     }
 }
-fn success(program: Program<'_>, args: &[&str]) -> Result<bool, ServiceError> {
-    Ok(manager_command(program)
+fn manager_failure(program: Program<'_>) -> ServiceError {
+    let failure = match program {
+        Program::Systemctl(session) => session
+            .connection_failure()
+            .unwrap_or(ManagerFailure::Operation),
+        _ => ManagerFailure::Operation,
+    };
+    ServiceError::Manager(failure)
+}
+fn run_manager(program: Program<'_>, args: &[&str]) -> Result<std::process::Output, ServiceError> {
+    let result = manager_command(program)
         .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?
-        .success())
+        .output()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                ServiceError::Manager(ManagerFailure::PermissionDenied)
+            } else {
+                ServiceError::Io(error)
+            }
+        })?;
+    if !result.status.success()
+        && let Program::Systemctl(session) = program
+        && session.connection_failure().is_some()
+        && let Some(fallback) = session.fallback()
+    {
+        // Both transports are OS-user scoped. Retry once, without inspecting
+        // localized stderr or exposing secret-bearing command output.
+        let output = manager_command(Program::Systemctl(&fallback))
+            .args(args)
+            .output()?;
+        return if output.status.success() {
+            Ok(output)
+        } else {
+            Err(manager_failure(Program::Systemctl(&fallback)))
+        };
+    }
+    Ok(result)
+}
+fn success(program: Program<'_>, args: &[&str]) -> Result<bool, ServiceError> {
+    Ok(run_manager(program, args)?.status.success())
 }
 fn output(program: Program<'_>, args: &[&str]) -> Result<String, ServiceError> {
-    let output = manager_command(program).args(args).output()?;
+    let output = run_manager(program, args)?;
     if !output.status.success() {
-        return Err(ServiceError::Manager(
-            "cannot query the OS service manager; ensure your user session is available",
-        ));
+        return Err(manager_failure(program));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
@@ -202,9 +233,7 @@ fn powershell(paths: &Paths, operation: &str) -> Result<(), ServiceError> {
     if powershell_success(paths, operation)? {
         Ok(())
     } else {
-        Err(ServiceError::Manager(
-            "Task Scheduler refused the operation; run as the logged-in desktop user and check Task Scheduler history",
-        ))
+        Err(ServiceError::Manager(ManagerFailure::Operation))
     }
 }
 fn powershell_success(paths: &Paths, operation: &str) -> Result<bool, ServiceError> {
@@ -275,6 +304,30 @@ fn environment(paths: &Paths) -> Vec<(&'static str, &Path)> {
     ]
 }
 
+/// systemd output specifiers do not support word quoting.
+struct SystemdLog(String);
+impl TryFrom<&Path> for SystemdLog {
+    type Error = ServiceError;
+    fn try_from(path: &Path) -> Result<Self, Self::Error> {
+        if !path.is_absolute() { return Err(ServiceError::Configuration("systemd log paths must be absolute")); }
+        let path = text(path)?;
+        if path
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '\'' | '"'))
+        {
+            return Err(ServiceError::Configuration(
+                "systemd log paths cannot contain whitespace or quotes; select BEANKEEPER_SERVICE_LOG_DIR without those characters",
+            ));
+        }
+        Ok(Self(format!("append:{}", path.replace('%', "%%"))))
+    }
+}
+impl std::fmt::Display for SystemdLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceError> {
     // systemd restricts characters in the first executable token, even when
     // quoted. env accepts the owner's full path as an argument and execs it
@@ -294,7 +347,7 @@ pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceE
                 .replace('%', "%%")
         );
     }
-    let log = systemd_word(&format!("append:{}", paths.log().display()))?.replace("$$", "$");
+    let log = SystemdLog::try_from(paths.log().as_path())?;
     Ok(format!(
         "[Unit]\nDescription=Beankeeper Desktop local agent service\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {executable} service run\n{env}Restart=on-failure\nRestartSec=2\nTimeoutStopSec=20\nUMask=0077\nStandardOutput={log}\nStandardError={log}\n\n[Install]\nWantedBy=default.target\n"
     ))
@@ -417,11 +470,12 @@ mod tests {
         let executable = root.path().join("bk");
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let logs = tempfile::tempdir()?;
         let paths = Paths {
             home: root.path().into(),
             data: root.path().join("data"),
             state: root.path().join("state"),
-            logs: root.path().join("logs"),
+            logs: logs.path().into(),
             definition: root.path().join(UNIT),
         };
         let config = Config {
@@ -431,14 +485,57 @@ mod tests {
         };
         std::fs::write(&paths.definition, systemd(&paths, &config)?)?;
         let result = Command::new("systemd-analyze")
-            .args(["verify", "--man=no"])
+            .env("XDG_RUNTIME_DIR", root.path())
+            .env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .args(["--user", "verify", "--man=no"])
             .arg(&paths.definition)
             .output()?;
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("Failed to parse"));
         assert!(
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn log_specifier_is_unquoted_and_rejects_unsupported_paths() -> TestResult {
+        assert_eq!(
+            SystemdLog::try_from(Path::new("/logs/100%/$money/service.log"))?.to_string(),
+            "append:/logs/100%%/$money/service.log"
+        );
+        for path in [
+            "/logs/has space/log",
+            "/logs/has\ttab/log",
+            "/logs/has'quote/log",
+            "/logs/has\"quote/log",
+            "/logs/has\nnewline",
+        ] {
+            assert!(matches!(
+                SystemdLog::try_from(Path::new(path)),
+                Err(ServiceError::Configuration(_))
+            ));
+        }
+        let paths = Paths {
+            home: "/owner".into(),
+            data: "/data".into(),
+            state: "/state".into(),
+            logs: "/logs/100%".into(),
+            definition: "/unit".into(),
+        };
+        let config = Config {
+            executable: "/bin/bk".into(),
+            books: "/data/books.db".into(),
+            port: 8750,
+        };
+        let unit = systemd(&paths, &config)?;
+        for directive in ["StandardOutput", "StandardError"] {
+            assert!(unit.contains(&format!("{directive}=append:/logs/100%%/service.log\n")));
+            assert!(!unit.contains(&format!("{directive}=\"")));
+        }
         Ok(())
     }
 

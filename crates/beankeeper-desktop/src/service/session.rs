@@ -19,7 +19,16 @@ const RUNTIME: &str = "XDG_RUNTIME_DIR";
 const BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 
 /// The runtime directory to add to a child, if the caller did not supply one.
-pub(super) struct UserSessionEnv(#[cfg(target_os = "linux")] Option<PathBuf>);
+pub(super) struct UserSessionEnv(
+    #[cfg(target_os = "linux")] SessionTransport,
+    #[cfg(target_os = "linux")] Option<PathBuf>,
+);
+
+#[cfg(target_os = "linux")]
+enum SessionTransport {
+    Bus(OsString),
+    PrivateSocket(PathBuf),
+}
 
 #[cfg(target_os = "linux")]
 enum RuntimeDirectory {
@@ -63,7 +72,7 @@ impl RuntimeEvidence {
             .ok()
             .filter(fs::Metadata::is_dir)
             .map(|directory| directory.uid());
-        let socket_owner = fs::symlink_metadata(path.join("bus"))
+        let socket_owner = fs::symlink_metadata(path.join("systemd/private"))
             .ok()
             .filter(|socket| socket.file_type().is_socket())
             .map(|socket| socket.uid());
@@ -80,28 +89,85 @@ impl UserSessionEnv {
     pub(super) fn discover() -> Result<Self, ServiceError> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(session) = Self::inherit_bus(env::var_os(BUS).as_deref()) {
-                return Ok(session);
-            }
-            let uid = rustix::process::geteuid().as_raw();
-            Self::try_from(RuntimeEvidence::inspect(env::var_os(RUNTIME), uid))
+            Self::resolve(
+                env::var_os(BUS).as_deref(),
+                env::var_os(RUNTIME),
+                rustix::process::geteuid().as_raw(),
+            )
         }
         #[cfg(not(target_os = "linux"))]
         Ok(Self())
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) fn resolve(
+        bus: Option<&OsStr>,
+        runtime: Option<OsString>,
+        uid: u32,
+    ) -> Result<Self, ServiceError> {
+        let private = Self::try_from(RuntimeEvidence::inspect(runtime, uid));
+        if let Some(mut session) = Self::inherit_bus(bus) {
+            session.1 = private.ok().and_then(|session| match session.0 {
+                SessionTransport::PrivateSocket(path) => Some(path),
+                SessionTransport::Bus(_) => None,
+            });
+            return Ok(session);
+        }
+        private
+    }
+
+    #[cfg(target_os = "linux")]
     fn inherit_bus(address: Option<&OsStr>) -> Option<Self> {
         address
             .filter(|address| !address.is_empty())
-            .map(|_| Self(None))
+            .map(|address| Self(SessionTransport::Bus(address.into()), None))
+    }
+
+    pub(super) fn fallback(&self) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            self.1
+                .as_ref()
+                .map(|runtime| Self(SessionTransport::PrivateSocket(runtime.clone()), None))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    pub(super) fn connection_failure(&self) -> Option<super::ManagerFailure> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::net::UnixStream;
+            let path = match &self.0 {
+                SessionTransport::Bus(address) => PathBuf::from(
+                    address
+                        .to_str()?
+                        .strip_prefix("unix:path=")?
+                        .split(',')
+                        .next()?,
+                ),
+                SessionTransport::PrivateSocket(runtime) => runtime.join("systemd/private"),
+            };
+            UnixStream::connect(path)
+                .err()
+                .map(|error| match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => super::ManagerFailure::PermissionDenied,
+                    _ => super::ManagerFailure::Connection,
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     pub(super) fn apply(&self, command: &mut Command) {
         #[cfg(target_os = "linux")]
-        if let Some(runtime) = &self.0 {
-            // systemd resolves the bus socket from XDG_RUNTIME_DIR.
-            command.env(RUNTIME, runtime);
+        match &self.0 {
+            SessionTransport::Bus(address) => {
+                command.env(BUS, address).env_remove(RUNTIME);
+            }
+            SessionTransport::PrivateSocket(runtime) => {
+                command.env(RUNTIME, runtime).env_remove(BUS);
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = command;
@@ -119,10 +185,10 @@ impl TryFrom<RuntimeEvidence> for UserSessionEnv {
         {
             return Err(ServiceError::SessionEnvUnavailable);
         }
-        Ok(match evidence.directory {
-            RuntimeDirectory::Inherited(_) => Self(None),
-            RuntimeDirectory::Fallback(path) => Self(Some(path)),
-        })
+        Ok(Self(
+            SessionTransport::PrivateSocket(evidence.directory.as_ref().into()),
+            None,
+        ))
     }
 }
 
@@ -151,22 +217,38 @@ mod tests {
             session.apply(&mut command);
             assert_eq!(
                 command.get_envs().collect::<Vec<_>>(),
-                [(OsStr::new(RUNTIME), Some(OsStr::new("/run/user/1234")))]
+                [
+                    (OsStr::new(BUS), None),
+                    (OsStr::new(RUNTIME), Some(OsStr::new("/run/user/1234")))
+                ]
             );
         }
         Ok(())
     }
 
     #[test]
-    fn existing_session_variables_are_left_inherited() -> Result<(), ServiceError> {
+    fn explicit_bus_and_private_socket_are_mutually_exclusive() -> Result<(), ServiceError> {
         let bus = UserSessionEnv::inherit_bus(Some(OsStr::new("unix:path=/custom/bus")))
             .ok_or(ServiceError::SessionEnvUnavailable)?;
         let runtime = UserSessionEnv::try_from(evidence("/custom/session", true))?;
-        for session in [bus, runtime] {
-            let mut command = Command::new("systemctl");
-            session.apply(&mut command);
-            assert_eq!(command.get_envs().len(), 0);
-        }
+        let mut command = Command::new("systemctl");
+        bus.apply(&mut command);
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [
+                (OsStr::new(BUS), Some(OsStr::new("unix:path=/custom/bus"))),
+                (OsStr::new(RUNTIME), None)
+            ]
+        );
+        let mut command = Command::new("systemctl");
+        runtime.apply(&mut command);
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [
+                (OsStr::new(BUS), None),
+                (OsStr::new(RUNTIME), Some(OsStr::new("/custom/session")))
+            ]
+        );
         assert!(UserSessionEnv::inherit_bus(None).is_none());
         assert!(UserSessionEnv::inherit_bus(Some(OsStr::new(""))).is_none());
         Ok(())
@@ -203,7 +285,8 @@ mod tests {
     #[test]
     fn runtime_evidence_rejects_regular_files_and_symlinks_as_buses() -> std::io::Result<()> {
         let runtime = tempfile::tempdir()?;
-        let bus = runtime.path().join("bus");
+        std::fs::create_dir(runtime.path().join("systemd"))?;
+        let bus = runtime.path().join("systemd/private");
         let evidence = || {
             RuntimeEvidence::inspect(
                 Some(runtime.path().as_os_str().to_owned()),
