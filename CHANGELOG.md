@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Point the README at the current install pages and correct public license and contribution facts.
 - Launch Claude directly for Linux extension installation and ship a Claude Code/local Cowork plugin with prepared marketplace content.
 
 - Fetch and verify a temporary cosign automatically when signed installation needs it.
