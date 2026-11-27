@@ -26,6 +26,9 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "linux")]
+mod launcher;
+
 pub(crate) const TOOL: &str = "agents_extension";
 pub(crate) const ARGUMENTS_ERROR: &str = "AGENT_EXTENSION_ARGUMENTS";
 
@@ -42,6 +45,9 @@ impl Options {
         if self.path_only {
             return Ok(Handoff::Prepared);
         }
+        #[cfg(target_os = "linux")]
+        let launcher =
+            launcher::ClaudeLauncher::try_from(launcher::LauncherEnvironment::default())?;
         let locations = Locations::discover()
             .filter(|locations| locations.home.is_absolute())
             .ok_or(AgentError::Home)?;
@@ -59,9 +65,11 @@ impl Options {
         };
         let _lock = mutation_lock()?;
         handoff(&adapter, known, || {
-            bundle
-                .open()
-                .map_err(|_| ExtensionError::Launch(bundle.path().into()))
+            #[cfg(target_os = "linux")]
+            let result = launcher.open(bundle.path());
+            #[cfg(not(target_os = "linux"))]
+            let result = bundle.open();
+            result.map_err(|_| ExtensionError::Launch(bundle.path().into()))
         })
     }
 }
@@ -141,6 +149,8 @@ enum ExtensionError {
     Release(UpdateError),
     Config(AgentError),
     Launch(PathBuf),
+    #[cfg(target_os = "linux")]
+    ClaudeNotFound,
 }
 
 impl ExtensionError {
@@ -157,6 +167,8 @@ impl ExtensionError {
             ) => "AGENT_EXTENSION_INVALID_RELEASE",
             Self::Config(error) => error.code(),
             Self::Launch(_) => "AGENT_EXTENSION_LAUNCH",
+            #[cfg(target_os = "linux")]
+            Self::ClaudeNotFound => "AGENT_EXTENSION_CLAUDE_NOT_FOUND",
         }
     }
 }
@@ -164,6 +176,8 @@ impl ExtensionError {
 impl fmt::Display for ExtensionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::ClaudeNotFound => f.write_str("Beankeeper could not find Claude Desktop. Install Claude Desktop, then ask your agent to open the extension again."),
             Self::Arguments => f.write_str("Use path_only with a boolean value, or omit it."),
             Self::State => {
                 f.write_str("Beankeeper could not locate the local Desktop state folder.")

@@ -76,6 +76,7 @@ pub(crate) struct PreparedBundle {
 }
 
 impl PreparedBundle {
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn open(&self) -> std::io::Result<()> {
         open::that_detached(&self.path)
     }

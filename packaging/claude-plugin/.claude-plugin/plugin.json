@@ -1,0 +1,10 @@
+{
+  "name": "beankeeper",
+  "displayName": "Beankeeper",
+  "description": "Ask your agent to set up your books, record changes, and explain your money.",
+  "author": {
+    "name": "Govcraft",
+    "url": "https://github.com/Govcraft"
+  },
+  "license": "SEE LICENSE IN LICENSE.md"
+}

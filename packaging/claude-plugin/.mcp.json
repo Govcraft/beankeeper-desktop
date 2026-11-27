@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "beankeeper": {
+      "command": "bk",
+      "args": [
+        "mcp",
+        "extension"
+      ]
+    }
+  }
+}

@@ -215,6 +215,8 @@ jobs:
         run: python scripts/release.py mcpb-macos
       - name: Verify and stage committed verifier bootstrap metadata and installers
         run: python scripts/release.py bootstrap-installers
+      - name: Package the Claude plugin and prepare the marketplace
+        run: python scripts/release.py claude-plugin
       - name: Hash all final archives and installers
         run: python scripts/release.py checksums
       - name: Generate signed-update metadata

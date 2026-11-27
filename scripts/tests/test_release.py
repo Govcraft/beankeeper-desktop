@@ -31,6 +31,44 @@ class PackagingTests(unittest.TestCase):
         self.output = self.root / "dist"
         self.output.mkdir()
 
+    def test_claude_plugin_layout_and_marketplace_match(self):
+        marketplace = self.root / "marketplace"
+        release.claude_plugin(self.output, "1.2.0-rc.4", marketplace)
+        with zipfile.ZipFile(self.output / "claude-plugin.zip") as archive:
+            self.assertEqual(set(archive.namelist()), {
+                ".claude-plugin/plugin.json", ".mcp.json", "skills/beankeeper/SKILL.md",
+                "README.md", "LICENSE.md",
+            })
+            manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
+            self.assertEqual(manifest["name"], "beankeeper")
+            self.assertEqual(manifest["version"], "1.2.0-rc.4")
+            for field in ("displayName", "description", "author", "license"):
+                self.assertTrue(manifest[field])
+            self.assertEqual(json.loads(archive.read(".mcp.json")), {
+                "mcpServers": {"beankeeper": {"command": "bk", "args": ["mcp", "extension"]}}
+            })
+            self.assertEqual(archive.read("skills/beankeeper/SKILL.md"), (ROOT / "SKILL.md").read_bytes())
+            catalog = json.loads((marketplace / ".claude-plugin/marketplace.json").read_text())
+            self.assertEqual(catalog["name"], "govcraft-beankeeper")
+            self.assertEqual(catalog["owner"]["name"], "Govcraft")
+            entry = catalog["plugins"][0]
+            for name in archive.namelist():
+                self.assertEqual((marketplace / entry["source"] / name).read_bytes(), archive.read(name))
+        release.checksums(self.output)
+        self.assertIn("claude-plugin.zip", (self.output / "checksums-sha256.txt").read_text())
+
+    def test_claude_plugin_rejects_invalid_marketplace_source(self):
+        fixture = self.root / "source"
+        shutil.copytree(ROOT / "packaging", fixture / "packaging")
+        shutil.copy2(ROOT / "SKILL.md", fixture / "SKILL.md")
+        catalog = fixture / "packaging/claude-marketplace/.claude-plugin/marketplace.json"
+        data = json.loads(catalog.read_text())
+        data["plugins"][0]["source"] = "../outside"
+        catalog.write_text(json.dumps(data))
+        with patch.object(release, "ROOT", fixture), self.assertRaises(ValueError):
+            release.claude_plugin(self.output, "1.2.0", self.root / "marketplace")
+        self.assertFalse((self.output / "claude-plugin.zip").exists())
+
     def test_bootstrap_generator_hashes_official_bytes_and_embeds_all_platforms(self):
         tag = "v3.0.0"
         payloads = {asset: (asset + " binary").encode() for asset in release.COSIGN_ASSETS.values()}

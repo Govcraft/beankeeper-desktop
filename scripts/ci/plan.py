@@ -104,6 +104,8 @@ RULES: tuple[tuple[str, Checks, str], ...] = (
         Checks(service=True, packaging=REPRESENTATIVE_TARGETS),
         "native credential store setup",
     ),
+    ("packaging/claude-plugin/", packaging(REPRESENTATIVE_TARGETS), "Claude plugin"),
+    ("packaging/claude-marketplace/", packaging(REPRESENTATIVE_TARGETS), "Claude marketplace"),
     ("packaging/claude/", packaging(REPRESENTATIVE_TARGETS), "Claude extension bundle"),
     ("install.sh", packaging(POSIX_TARGETS), "POSIX installer"),
     (

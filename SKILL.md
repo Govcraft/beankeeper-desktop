@@ -316,6 +316,16 @@ in Claude Desktop, then restart Claude Desktop or toggle the extension when it d
 Use `path_only: true` in MCP or `--path-only`
 on the CLI to get the verified file without opening it or changing Claude's
 settings. If verification fails, explain the named error in plain words.
+On Linux the handoff launches Claude directly, without relying on file
+associations. For `AGENT_EXTENSION_CLAUDE_NOT_FOUND`, explain that Beankeeper
+could not find Claude Desktop and ask the owner to install it with its graphical
+installer, then retry the handoff. Do not send them to a terminal.
+
+The `claude-plugin.zip` release asset packages this guide and the installed
+`bk mcp extension` connection for Claude Code and local Cowork. Chat ignores
+the plugin's local server, so it still needs the `.mcpb` extension. If the
+plugin cannot find `bk`, check the installed executable and the host's PATH
+as the agent, or involve support. Do not ask the owner to enter paths or commands.
 
 For Claude Code, run `bk agents connect claude-code --json`. The command can
 adopt entries with the managed command and arguments even if they specify stdio

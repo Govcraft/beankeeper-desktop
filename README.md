@@ -566,3 +566,7 @@ See the [license/update command reference](docs/license-updates.md),
 [release verification contract](docs/RELEASE.md#signed-update-feed-and-self-update).
 Production public keys must be provisioned separately; the published fixture key
 is confined to tests and is never a default trust key.
+
+For Claude Code and local Cowork, the signed release also includes
+`claude-plugin.zip`, using the installed Desktop executable. Claude app chat
+continues to use `.mcpb`. See the [Claude connection guide](docs/claude-desktop.md).
