@@ -304,10 +304,17 @@ fn environment(paths: &Paths) -> Vec<(&'static str, &Path)> {
     ]
 }
 
-/// systemd output specifiers do not support word quoting.
-struct SystemdLog(String);
-impl TryFrom<&Path> for SystemdLog {
+/// A path validated for systemd's unquoted append output syntax.
+struct SafeLogPath(String);
+
+enum SystemdLogTarget {
+    File(SafeLogPath),
+    Journal,
+}
+
+impl TryFrom<&Path> for SafeLogPath {
     type Error = ServiceError;
+
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
         let path = text(path)?;
         if path
@@ -315,15 +322,66 @@ impl TryFrom<&Path> for SystemdLog {
             .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '\'' | '"'))
         {
             return Err(ServiceError::Configuration(
-                "systemd log paths cannot contain whitespace or quotes; select BEANKEEPER_SERVICE_LOG_DIR without those characters",
+                "the log folder name cannot be used for systemd file logging",
             ));
         }
         Ok(Self(format!("append:{}", path.replace('%', "%%"))))
     }
 }
-impl std::fmt::Display for SystemdLog {
+
+impl From<&Path> for SystemdLogTarget {
+    fn from(path: &Path) -> Self {
+        match SafeLogPath::try_from(path) {
+            Ok(path) => Self::File(path),
+            Err(_) => Self::Journal,
+        }
+    }
+}
+
+impl std::fmt::Display for SystemdLogTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::File(SafeLogPath(path)) => {
+                write!(f, "StandardOutput={path}\nStandardError={path}\n")
+            }
+            Self::Journal => Ok(()),
+        }
+    }
+}
+
+/// Where the native manager sends service diagnostics.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogDestination {
+    /// The private service log file.
+    File,
+    /// The system journal because the folder cannot use systemd file output.
+    Journal,
+}
+
+impl From<&Paths> for LogDestination {
+    fn from(paths: &Paths) -> Self {
+        if cfg!(target_os = "linux")
+            && matches!(
+                SystemdLogTarget::from(paths.log().as_path()),
+                SystemdLogTarget::Journal
+            )
+        {
+            Self::Journal
+        } else {
+            Self::File
+        }
+    }
+}
+
+impl LogDestination {
+    pub(super) fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::File => None,
+            Self::Journal => Some(
+                "Service logs go to the system journal because the log folder name cannot be used for file logging (for example, it has spaces or quotes).",
+            ),
+        }
     }
 }
 
@@ -346,9 +404,9 @@ pub(super) fn systemd(paths: &Paths, config: &Config) -> Result<String, ServiceE
                 .replace('%', "%%")
         );
     }
-    let log = SystemdLog::try_from(paths.log().as_path())?;
+    let log = SystemdLogTarget::from(paths.log().as_path());
     Ok(format!(
-        "[Unit]\nDescription=Beankeeper Desktop local agent service\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {executable} service run\n{env}Restart=on-failure\nRestartSec=2\nTimeoutStopSec=20\nUMask=0077\nStandardOutput={log}\nStandardError={log}\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Beankeeper Desktop local agent service\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {executable} service run\n{env}Restart=on-failure\nRestartSec=2\nTimeoutStopSec=20\nUMask=0077\n{log}\n[Install]\nWantedBy=default.target\n"
     ))
 }
 
@@ -501,10 +559,10 @@ mod tests {
     }
 
     #[test]
-    fn log_specifier_is_unquoted_and_rejects_unsupported_paths() -> TestResult {
+    fn log_target_uses_unquoted_files_or_falls_back_to_journal() -> TestResult {
         assert_eq!(
-            SystemdLog::try_from(Path::new("/logs/100%/$money/service.log"))?.to_string(),
-            "append:/logs/100%%/$money/service.log"
+            SystemdLogTarget::from(Path::new("/logs/100%/$money/service.log")).to_string(),
+            "StandardOutput=append:/logs/100%%/$money/service.log\nStandardError=append:/logs/100%%/$money/service.log\n"
         );
         for path in [
             "/logs/has space/log",
@@ -514,10 +572,18 @@ mod tests {
             "/logs/has\nnewline",
         ] {
             assert!(matches!(
-                SystemdLog::try_from(Path::new(path)),
-                Err(ServiceError::Configuration(_))
+                SystemdLogTarget::from(Path::new(path)),
+                SystemdLogTarget::Journal
             ));
         }
+        assert!(matches!(
+            SystemdLogTarget::from(Path::new("/logs/café/log")),
+            SystemdLogTarget::File(_)
+        ));
+        assert!(matches!(
+            SystemdLogTarget::from(Path::new("/logs/café 's owner’s/log")),
+            SystemdLogTarget::Journal
+        ));
         let paths = Paths {
             home: "/owner".into(),
             data: "/data".into(),
@@ -535,6 +601,23 @@ mod tests {
         for directive in ["StandardOutput", "StandardError"] {
             assert!(unit.contains(&format!("{directive}=append:{log}\n")));
             assert!(!unit.contains(&format!("{directive}=\"")));
+        }
+        let paths = Paths {
+            logs: "/logs/café 's owner’s".into(),
+            ..paths
+        };
+        let unit = systemd(&paths, &config)?;
+        assert!(!unit.contains("StandardOutput="));
+        assert!(!unit.contains("StandardError="));
+        #[cfg(target_os = "linux")]
+        {
+            let destination = LogDestination::from(&paths);
+            assert_eq!(serde_json::to_value(destination)?, "journal");
+            assert!(
+                destination
+                    .notice()
+                    .is_some_and(|notice| notice.contains("system journal"))
+            );
         }
         Ok(())
     }

@@ -154,9 +154,22 @@ impl From<&crate::agents::ConnectOptions> for ResumeCommand {
         Self::from(options.selected())
     }
 }
-impl Default for ResumeCommand {
-    fn default() -> Self {
-        Self(Resume::Cli("bk service status --json".into()))
+impl From<crate::service::operation::ServiceOperation> for ResumeCommand {
+    fn from(operation: crate::service::operation::ServiceOperation) -> Self {
+        use crate::service::operation::ServiceOperation;
+        match operation {
+            ServiceOperation::Install(options) => Self::from(options),
+            ServiceOperation::Start => Self(Resume::Cli("bk service start --json".into())),
+            ServiceOperation::Stop => Self(Resume::Cli("bk service stop --json".into())),
+            ServiceOperation::Uninstall => Self(Resume::Cli("bk service uninstall --json".into())),
+            ServiceOperation::Open => Self(Resume::Cli("bk service open --json".into())),
+            ServiceOperation::InstallExtension => {
+                Self(Resume::Cli("bk service install-extension --json".into()))
+            }
+            ServiceOperation::AccessSet(_) | ServiceOperation::Status => {
+                Self(Resume::Cli("bk service status --json".into()))
+            }
+        }
     }
 }
 impl fmt::Display for ResumeCommand {

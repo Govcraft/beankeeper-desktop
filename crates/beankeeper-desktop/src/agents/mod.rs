@@ -581,7 +581,11 @@ pub(crate) fn connect_call(
     let ok = output.ok;
     let mut message = Vec::new();
     let mut errors = Vec::new();
-    let _ = write_text(&output, &mut message, &mut errors);
+    if let Err(error) = write_text(&output, &mut message, &mut errors) {
+        return rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+            "Could not render agent connection result: {error}"
+        ))]);
+    }
     message.extend(errors);
     let value = match serde_json::to_value(&output) {
         Ok(value) => value,

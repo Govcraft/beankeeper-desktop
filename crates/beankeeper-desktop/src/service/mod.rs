@@ -40,6 +40,8 @@ use operation::ServiceOperation;
 pub(crate) use operation::{ACCESS_TOOL, OPEN_TOOL, access_tool, open_tool};
 use session::UserSessionEnv;
 
+pub use manager::LogDestination;
+
 use crate::folders::{Directory, FolderPlan, ResumeCommand, WriteDenied, WriteDeniedDetails};
 
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
@@ -440,6 +442,8 @@ pub struct Status {
     pub books: PathBuf,
     /// Private server diagnostics.
     pub log: PathBuf,
+    /// Native destination selected for service diagnostics.
+    pub log_destination: LogDestination,
     /// Operating system service registration.
     pub service_definition: PathBuf,
     /// PID of the managed server, absent when stopped.
@@ -502,6 +506,7 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         pid: None,
         books,
         log: paths.log(),
+        log_destination: manager::LogDestination::from(paths),
         service_definition: paths.definition.clone(),
         error_code: None,
         warning: None,
@@ -540,6 +545,10 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
             result.message = error.to_string();
         }
         Err(error) => return Err(error),
+    }
+    if let Some(notice) = result.log_destination.notice() {
+        result.message.push(' ');
+        result.message.push_str(notice);
     }
     result.warning = instance::default_port_warning(&paths.state, &result.books, address);
     Ok(result)
@@ -760,7 +769,7 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         ServiceOperation::Install(options) => {
             ResumeCommand::from((options, explicit_db.then_some(cli.db.as_path())))
         }
-        _ => ResumeCommand::default(),
+        _ => ResumeCommand::from(operation),
     };
     let reply = match execute(operation, Some((cli, explicit_db)), None) {
         Ok(reply) => reply,
