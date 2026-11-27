@@ -4,6 +4,7 @@
 
 - Point the README at the current install pages and correct public license and contribution facts.
 - Keep Linux service installation working with spaces or quotes in log folders by falling back to the system journal and reporting the destination through CLI/MCP.
+- Align the linked Claude setup guide with current installation steps and remove a private issuer link from the public license reference.
 
 - Launch Claude directly for Linux extension installation and ship a Claude Code/local Cowork plugin with prepared marketplace content.
 

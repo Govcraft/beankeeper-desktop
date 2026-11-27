@@ -1,11 +1,14 @@
 # Connect Beankeeper to Claude Desktop
 
-1. When **Get it for the Claude app** is available, download Beankeeper from
-   [beankeeper.app](https://beankeeper.app/).
-2. Double-click the downloaded file and click **Install** in the Claude app.
+1. Download the extension for your computer from the
+   [installation guide](https://beankeeper.app/get.md).
+2. On macOS or Windows, double-click the downloaded file. On Linux, right-click
+   it in Files and choose **Open With → Claude**. Dragging it into a chat only
+   attaches it. Click **Install** in Claude and restart if asked.
    [Anthropic’s extension installation instructions](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
-3. Say **Set up my books** in Claude. To try fictional transactions first,
-   say **Create demo books**.
+3. In a new chat, say **Set up my books** in Claude. To try fictional transactions
+   first, say **Create demo books**.
+4. After setup, quit and reopen Claude, then start a new chat to use your books.
 
 Claude can set up your books and accounts, post opening balances, and import
 a CSV, OFX or QFX statement you share in chat. It reports each change, and you
@@ -26,8 +29,9 @@ Code's connections for ledger access and background service controls.
 On your first setup request, the extension creates encrypted books, saves the
 passphrase in your computer’s credential store, and starts Beankeeper in the
 background under your account. It saves a private recovery kit beside the
-books. Setup continues in the same chat. Other supported apps detected during
-setup can load their new connections the next time you open them.
+books. After setup, quit and reopen Claude and start a new chat. Other supported
+apps detected during setup can load their new connections the next time you
+open them.
 [Service storage and recovery](service.md#platform-behavior-and-files)
 
 ## Install or upgrade from Beankeeper

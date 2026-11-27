@@ -2,7 +2,7 @@
 
 A Desktop license is a single PASETO v4.public token. Desktop verifies it
 offline using an independently provisioned Ed25519 public key. Agent
-authentication uses separate tokens. [Issuer contract](https://github.com/Govcraft/beankeeper-license/issues/12)
+authentication uses separate tokens.
 
 ## Token and issuer keys
 
