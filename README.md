@@ -60,8 +60,11 @@ On a Mac or Windows, double-click the file. On Linux, right-click it and choose
 Open With > Claude. Dragging the file into a chat only attaches it.
 
 Click **Install** in the preview, and restart Claude if it asks. In a new chat,
-say **Set up my books** or **Set up demo books**. After setup, quit and reopen
-Claude, then start a new chat. The bookkeeping tools are ready there.
+say **Set up my books** or **Set up demo books**. Real-books setup creates
+encrypted books and starts the 30-day trial. Demo books are free and do not
+start the trial; pre-setup demo discovery in this extension arrives with #221.
+After setup, quit and reopen Claude, then start a new chat. The bookkeeping
+tools are ready there.
 [Skills over MCP](https://skills.extensions.modelcontextprotocol.io/) lets
 compatible clients load Beankeeper's setup, correction, and reporting guide
 directly from the extension or the `beankeeper` stdio connection. The guide
@@ -357,9 +360,11 @@ commands and tab design](docs/navigation.md) for arguments, examples and tests.
 
 ## Try it with demo books
 
-Ask your connected agent, “Show me what Beankeeper can do with sample books.”
+Demo books are free and do not start the trial. The 30-day trial starts only when the owner sets up their real books. Call `setup` only for real books. If `demo_start` is not listed before setup, do not set up real books just to try a demo; pre-setup discovery arrives with #221.
+
+Ask your connected agent, “Show me what Beankeeper can do with demo books.”
 You can start with a quick demo or answer a few questions in chat to get
-fictional books shaped around your work, account types, and currencies. Try
+demo books shaped around your work, account types, and currencies. Try
 reports and practice bookkeeping in the encrypted demo. Ask your agent to
 discard it when you’re done. [Agent demo guide](SKILL.md#try-it-with-demo-books)
 

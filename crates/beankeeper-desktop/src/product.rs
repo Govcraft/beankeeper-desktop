@@ -735,7 +735,7 @@ fn remove_trials(
 }
 
 /// Best-effort shared setup path: inability to obtain a trial never prevents setup.
-pub(crate) fn setup_trial(books: &Path) -> String {
+pub(crate) fn setup_trial(books: &crate::setup::OwnerBooks<'_>) -> String {
     match state_dir() {
         Ok(state) => setup_trial_at(books, &state),
         Err(error) => error.to_string(),
@@ -743,9 +743,9 @@ pub(crate) fn setup_trial(books: &Path) -> String {
 }
 
 /// Setup uses its explicit installation state, including in isolated service tests.
-pub(crate) fn setup_trial_at(books: &Path, state: &Path) -> String {
+pub(crate) fn setup_trial_at(books: &crate::setup::OwnerBooks<'_>, state: &Path) -> String {
     let target = BooksSelection {
-        path: Cow::Borrowed(books),
+        path: Cow::Borrowed(books.as_ref()),
         requirement: BooksRequirement::Optional,
     };
     let books = match target.resolve(&LicenseRequest::Trial) {
