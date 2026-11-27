@@ -38,6 +38,7 @@ class PackagingTests(unittest.TestCase):
 
         def download(url, timeout):
             self.assertEqual(timeout, 60)
+            url = url.full_url if isinstance(url, release.urllib.request.Request) else url
             urls.append(url)
             if url.endswith("/latest"):
                 return io.BytesIO(json.dumps({"tag_name": tag}).encode())
@@ -65,9 +66,12 @@ class PackagingTests(unittest.TestCase):
         self.assertLess(workflow.index("release.py bootstrap-installers"), workflow.index("release.py checksums"))
 
     def test_bootstrap_generator_does_not_publish_partial_metadata(self):
-        with patch.object(release.urllib.request, "urlopen", side_effect=[
-            io.BytesIO(b'{"tag_name":"v3.0.0"}'), OSError("network failure"),
-        ]):
+        def fail_download(url, timeout):
+            if isinstance(url, release.urllib.request.Request):
+                return io.BytesIO(b'{"tag_name":"v3.0.0"}')
+            raise OSError("network failure")
+
+        with patch.object(release.urllib.request, "urlopen", side_effect=fail_download):
             with self.assertRaises(OSError):
                 release.bootstrap_installers(self.output)
         self.assertEqual(list(self.output.iterdir()), [])
@@ -76,6 +80,42 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.render_bootstrap_installers(self.output, tag, hashes)
         self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_committed_bootstrap_is_checked_offline_and_staged(self):
+        with patch.object(release.urllib.request, "urlopen", side_effect=AssertionError("network")):
+            release.check_bootstrap_installers(self.output)
+        for name in ("install.sh", "install.ps1", "cosign-bootstrap.json"):
+            self.assertEqual((ROOT / name).read_bytes(), (self.output / name).read_bytes())
+
+    def test_bootstrap_check_rejects_drift_and_placeholders(self):
+        source = self.root / "source"
+        source.mkdir()
+        for name in ("install.sh", "install.ps1", "cosign-bootstrap.json"):
+            shutil.copy2(ROOT / name, source / name)
+        variables = [("install.sh", "COSIGN_VERSION="),
+                     ("install.ps1", "$CosignVersion = "),
+                     ("install.ps1", "$CosignWindowsAmd64 = ")]
+        variables.extend(("install.sh", f"COSIGN_{key}=")
+                         for key in release.COSIGN_ASSETS if key != "WINDOWS_AMD64")
+        for name, variable in variables:
+            original = (source / name).read_text()
+            for value in ("v0.0.0", "@COSIGN_VERSION@"):
+                script = release.re.sub(
+                    rf"(?m)^({release.re.escape(variable)})'[^']*'$",
+                    lambda match: f"{match[1]}'{value}'", original)
+                (source / name).write_text(script)
+                with patch.object(release, "ROOT", source):
+                    with self.assertRaises(ValueError):
+                        release.check_bootstrap_installers()
+            (source / name).write_text(original)
+
+    def test_bootstrap_selection_authenticates_api_request(self):
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+            with patch.object(release.urllib.request, "urlopen", side_effect=OSError) as download:
+                with self.assertRaises(OSError):
+                    release.bootstrap_installers(self.output)
+        request = download.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
 
     def test_release_workflow_checks_stable_tags_in_preflight(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()

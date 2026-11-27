@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import os
 from pathlib import Path, PurePosixPath
@@ -395,20 +396,29 @@ COSIGN_ASSETS = {
 
 def bootstrap_installers(output):
     """Generate installers and an audit record from the latest official cosign bytes."""
-    with urllib.request.urlopen("https://api.github.com/repos/sigstore/cosign/releases/latest", timeout=60) as source:
+    headers = {"Accept": "application/vnd.github+json"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        "https://api.github.com/repos/sigstore/cosign/releases/latest", headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as source:
         tag = strict_json(source.read())["tag_name"]
     if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
         raise ValueError("expected a stable official cosign release")
-    hashes = {}
-    for key, asset in COSIGN_ASSETS.items():
+    def hash_asset(item):
+        key, asset = item
         url = f"https://github.com/sigstore/cosign/releases/download/{tag}/{asset}"
+        print(f"Hashing {tag}/{asset}", flush=True)
         with urllib.request.urlopen(url, timeout=60) as source:
-            hashes[key] = hashlib.file_digest(source, "sha256").hexdigest()
+            return key, hashlib.file_digest(source, "sha256").hexdigest()
+
+    with ThreadPoolExecutor(max_workers=len(COSIGN_ASSETS)) as executor:
+        hashes = dict(executor.map(hash_asset, COSIGN_ASSETS.items()))
     render_bootstrap_installers(output, tag, hashes)
 
 
 def render_bootstrap_installers(output, tag, hashes):
-    """Render templates only after the complete bootstrap metadata validates."""
+    """Rewrite generated assignments only after all bootstrap metadata validates."""
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) or set(hashes) != set(COSIGN_ASSETS):
         raise ValueError("invalid cosign bootstrap metadata")
     if any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in hashes.values()):
@@ -416,8 +426,16 @@ def render_bootstrap_installers(output, tag, hashes):
     rendered = {}
     for name in ("install.sh", "install.ps1"):
         script = (ROOT / name).read_text(encoding="utf-8")
-        for key, value in {"VERSION": tag, **hashes}.items():
-            script = script.replace(f"@COSIGN_{key}@", value)
+        values = {"VERSION": tag, **hashes}
+        variables = ({"VERSION": "$CosignVersion", "WINDOWS_AMD64": "$CosignWindowsAmd64"}
+                     if name.endswith("ps1") else {
+                         key: f"COSIGN_{key}" for key in values if key != "WINDOWS_AMD64"})
+        for key, variable in variables.items():
+            separator = " = " if name.endswith("ps1") else "="
+            pattern = rf"(?m)^({re.escape(variable + separator)})'[^']*'$"
+            script, count = re.subn(pattern, lambda match: f"{match[1]}'{values[key]}'", script)
+            if count != 1:
+                raise ValueError(f"expected one generated {variable} assignment in {name}")
         if "@COSIGN_" in script:
             raise ValueError("unresolved cosign bootstrap placeholder")
         rendered[name] = script
@@ -428,6 +446,25 @@ def render_bootstrap_installers(output, tag, hashes):
         "version": tag,
         "sha256": {COSIGN_ASSETS[key]: value for key, value in hashes.items()},
     }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def check_bootstrap_installers(output=None):
+    """Verify committed source installers offline, then optionally stage them."""
+    metadata = strict_json((ROOT / "cosign-bootstrap.json").read_bytes())
+    hashes = metadata["sha256"]
+    if set(hashes) != set(COSIGN_ASSETS.values()):
+        raise ValueError("invalid cosign bootstrap assets")
+    with tempfile.TemporaryDirectory() as temporary:
+        rendered = Path(temporary)
+        render_bootstrap_installers(rendered, metadata["version"], {
+            key: hashes[asset] for key, asset in COSIGN_ASSETS.items()})
+        for name in ("install.sh", "install.ps1", "cosign-bootstrap.json"):
+            if (ROOT / name).read_text(encoding="utf-8") != (rendered / name).read_text(encoding="utf-8"):
+                raise ValueError(f"{name} differs from cosign-bootstrap.json; run bootstrap-installers --write")
+        if output is not None:
+            output.mkdir(parents=True, exist_ok=True)
+            for name in ("install.sh", "install.ps1", "cosign-bootstrap.json"):
+                shutil.copy2(ROOT / name, output / name)
 
 
 def checksums(output):
@@ -493,7 +530,8 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["bootstrap-installers", "version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("command", choices=["check-bootstrap-installers", "bootstrap-installers", "version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("--write", action="store_true", help="refresh committed installers from the latest official cosign release")
     parser.add_argument("--tag")
     parser.add_argument(
         "--check-changelog", action="store_true",
@@ -505,7 +543,13 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("dist"))
     args = parser.parse_args()
     if args.command == "bootstrap-installers":
-        bootstrap_installers(args.output)
+        if args.write:
+            bootstrap_installers(ROOT)
+        else:
+            check_bootstrap_installers(args.output)
+        return
+    if args.command == "check-bootstrap-installers":
+        check_bootstrap_installers()
         return
     if args.command == "license-env":
         write_license_env()

@@ -1,9 +1,12 @@
 name: Installer verifier bootstrap
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
   pull_request:
     paths:
+      - 'cosign-bootstrap.json'
       - 'install.sh'
       - 'install.ps1'
       - 'scripts/release.py'
@@ -33,13 +36,15 @@ jobs:
       # POSIX tests construct a private PATH without cosign or jq. Windows tests
       # hide cosign discovery and exercise Get-FileHash with actual fixture bytes.
       - run: python -B -m unittest discover -s scripts/tests -p test_install.py -v
+      - name: Verify committed installer values offline
+        run: python scripts/release.py check-bootstrap-installers
       - name: Check generated bootstrap metadata
         working-directory: scripts/tests
         run: >-
           python -B -m unittest -v
           test_release.PackagingTests.test_bootstrap_generator_hashes_official_bytes_and_embeds_all_platforms
           test_release.PackagingTests.test_bootstrap_generator_does_not_publish_partial_metadata
-      - name: Generate release installers with current official verifier hashes
+      - name: Verify and stage committed release installers
         run: python scripts/release.py bootstrap-installers --output "${{ runner.temp }}/bk-bootstrap"
       - name: Install the latest signed release without cosign or jq on PATH
         if: runner.os != 'Windows'

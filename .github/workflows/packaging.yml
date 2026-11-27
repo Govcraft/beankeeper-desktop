@@ -213,7 +213,7 @@ jobs:
       - name: Bundle a universal Claude extension for macOS
         if: runner.os == 'macOS'
         run: python scripts/release.py mcpb-macos
-      - name: Generate temporary verifier bootstrap metadata and installers
+      - name: Verify and stage committed verifier bootstrap metadata and installers
         run: python scripts/release.py bootstrap-installers
       - name: Hash all final archives and installers
         run: python scripts/release.py checksums

@@ -334,10 +334,16 @@ Only after verification does the client extract the exact regular executable
 member and replace its binary. See the [command reference](license-updates.md)
 for opt-out, caching, trust provisioning and private license storage.
 
-The release collector runs `python scripts/release.py bootstrap-installers` before
-hashing and signing assets. It selects the latest official stable Sigstore cosign
-release, hashes all five platform binaries over HTTPS, and renders `install.sh`
-and `install.ps1` with those hashes. `cosign-bootstrap.json` records the version
-and hashes for inspection. Publish these generated installers, never the source
-templates; do not hand-edit bootstrap values. Bootstrap download or hash failures
-stop installation without bypassing Sigstore verification.
+In the release PR, run `python scripts/release.py bootstrap-installers --write`.
+This is the only step that selects the latest official stable Sigstore cosign
+release and hashes all five platform binaries over HTTPS. It authenticates the
+GitHub API request with `GITHUB_TOKEN` when available. Commit both complete source
+installers and `cosign-bootstrap.json`; never hand-edit their generated values.
+The site mirrors the complete installers directly from the tagged source.
+
+CI runs `python scripts/release.py check-bootstrap-installers` offline to reject
+placeholders or values that differ from the committed metadata. The release
+collector runs `python scripts/release.py bootstrap-installers` to perform the same
+check and copy the committed files into `dist` before hashing and signing assets.
+Neither command selects or downloads a verifier. Bootstrap download or hash
+failures during installation stop without bypassing Sigstore verification.
