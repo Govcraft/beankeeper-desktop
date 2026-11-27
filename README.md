@@ -6,7 +6,8 @@ ask about your finances, it runs reports and answers in plain words with data
 it can chart.
 
 Beankeeper Desktop is the paid, self-hosted layer. It runs as a local service
-with signed updates and offline licensing.
+with signed updates and offline licensing. The product site is
+[beankeeper.app](https://beankeeper.app/).
 
 Ask your agent what changed since you last looked or ask it to undo its
 work in chat. The ledger records the correction and keeps the original
@@ -16,7 +17,8 @@ history. Receipt links are available if you want to see the details.
 Source-available. See [LICENSE.md](LICENSE.md); this repository is not published
 as a crate. Ledger, schema and accounting changes belong in
 [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
-See the [contribution guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/CONTRIBUTING.md) for feedback and contribution policies.
+This repository is closed to outside code contributions. Issues and feedback are
+welcome; see the [contribution guide](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/CONTRIBUTING.md).
 
 ## Release packages
 
@@ -30,9 +32,15 @@ temporary, hash-verified copy automatically when it is absent from PATH.
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 
-From an agent that can run commands on your computer, ask:
+To install the app, open [beankeeper.app/get.md](https://beankeeper.app/get.md),
+or ask an agent:
 
-> Set up Beankeeper from https://beankeeper.app/install.md
+> Install Beankeeper for me by following https://beankeeper.app/get.md
+
+In the ChatGPT desktop app, start a Work task (or open Codex) and paste that
+same line. A regular ChatGPT chat can't run programs on your computer, so this
+has to start from the desktop app. Coding agents that can run a shell then
+follow the steps at [beankeeper.app/install/agent.md](https://beankeeper.app/install/agent.md).
 
 The agent uses your existing installation when it supports setup. For a new
 install, it downloads the latest release for your platform and verifies both signatures
@@ -46,10 +54,14 @@ Ask in chat any time to see or change those instructions.
 
 ## Claude Desktop extension
 
-When **Get it for the Claude app** is available on beankeeper.app, download
-the Beankeeper extension, double-click it, and click **Install** in Claude.
-Then say **Set up my books** or **Create demo books**. Claude sets up encrypted
-books on your computer and continues in the same chat.
+Download the Beankeeper extension (a `.mcpb` file) from
+[beankeeper.app/get.md](https://beankeeper.app/get.md), then open it with Claude.
+On a Mac or Windows, double-click the file. On Linux, right-click it and choose
+Open With > Claude. Dragging the file into a chat only attaches it.
+
+Click **Install** in the preview, and restart Claude if it asks. In a new chat,
+say **Set up my books** or **Set up demo books**. After setup, quit and reopen
+Claude, then start a new chat. The bookkeeping tools are ready there.
 [Skills over MCP](https://skills.extensions.modelcontextprotocol.io/) lets
 compatible clients load Beankeeper's setup, correction, and reporting guide
 directly from the extension or the `beankeeper` stdio connection. The guide
@@ -124,10 +136,11 @@ Run `bk agents connect claude-code` to register or refresh the Claude Code
 connection and skill. Existing entries with the managed command and arguments
 can include `"type": "stdio"` and an empty `env`.
 
-In the ChatGPT desktop app, choose **Codex**, then **Work in → This computer**.
-Say **Install Beankeeper for me by following https://beankeeper.app/install.md**.
-Codex handles the local install and connection. See how to check the connection
-and start your books in [Use Beankeeper with local Codex](docs/chatgpt.md).
+In the ChatGPT desktop app, start a Work task (or open Codex) and say
+**Install Beankeeper for me by following https://beankeeper.app/get.md**.
+The agent handles the local install and connection. See how to check the
+connection and start your books in
+[Use Beankeeper with the ChatGPT desktop app](docs/chatgpt.md).
 
 If Beankeeper is already available, ask your agent to install or upgrade the
 Claude Desktop extension, or run `bk agents extension`. Verification runs
@@ -462,12 +475,14 @@ tests the latest upstream commit on each pull request, push to `main`, and daily
 ## License and updates
 
 Beankeeper Desktop 1.0 costs **$79 one time** per license and covers every 1.x
-release for perpetual use. Each license covers one set of books on one computer
-at a time. Bookkeepers need a license for each client's books, even on the same
-computer. If you return your license in the app within 60 days of purchase, the
-original seller automatically issues a full refund, including purchases through
-authorized resellers. The Texas-governed agreement keeps Desktop source-available
-and the Beankeeper ledger and core agent tools open source.
+release for perpetual use. Each license covers one set of books (one ledger) on
+one computer at a time. That ledger can hold as many companies as you need, with
+linked cross-company transactions. If you keep books for more than one client,
+each client's ledger needs its own license, even on the same computer. If you
+return your license in the app within 60 days of purchase, the original seller
+automatically issues a full refund, including purchases through authorized
+resellers. The Texas-governed agreement keeps Desktop source-available and the
+Beankeeper ledger and core agent tools open source.
 [Beankeeper Desktop license agreement](LICENSE.md)
 
 Under the agreement, read-only mode for books without an active license applies
@@ -528,7 +543,7 @@ change, the next check refreshes the cache immediately; caches from older builds
 without a recorded version are also refreshed. Settings ignores these stale
 results without contacting the feed. Stable builds check the latest stable
 release. RC builds select the highest stable or `-rc.N` version among the 100
-most recent GitHub release records, so checks also work before the first stable release.
+most recent GitHub release records.
 Both manifest and signature are fetched from the selected tag. `bk serve`
 checks in the background, and paired browsers can read the cached result at **License and updates** (`/settings`).
 Both show a readable UTC last-attempt time and explain incomplete checks,
@@ -538,8 +553,7 @@ Requests contain only the Desktop version and OS, with no ledger information.
 `bk self-update` requires an active license covering the major version in the
 signed manifest. Any matching license on this installation is sufficient. It
 uses in-process Sigstore verification and checks
-the archive checksum before replacing the executable. Use the signed installer
-to update to a 0.x preview. Restart the server after installing.
+the archive checksum before replacing the executable. After installing a new release with the signed installer from [beankeeper.app](https://beankeeper.app/) or `bk self-update`, restart the service.
 
 
 To activate a locally issued license (no storefront), build with the issuer
@@ -558,7 +572,7 @@ cargo build -p beankeeper-desktop
 ```
 
 The license service issues the token through its operator CLI or admin API.
-See the [issuer contract](https://github.com/Govcraft/beankeeper-license/issues/12)
+See the [offline license contract](docs/license-format.md)
 for the token format.
 
 See the [license/update command reference](docs/license-updates.md),
