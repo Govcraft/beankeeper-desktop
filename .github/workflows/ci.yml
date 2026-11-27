@@ -122,6 +122,10 @@ jobs:
       # include_str!, directly from the checked-in UI sources.
       - name: Build embedded UI and test workspace
         run: cargo nextest run --workspace --locked
+      - name: Verify generated systemd unit with the native user-unit parser
+        run: |
+          command -v systemd-analyze
+          cargo test --workspace --locked generated_systemd_unit_passes_the_native_parser_when_available
       - name: Documentation tests
         run: cargo test --workspace --locked --doc
 

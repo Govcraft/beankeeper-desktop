@@ -59,7 +59,12 @@ impl TryFrom<(Vec<Directory>, String)> for FolderPlan {
     fn try_from((directories, resume): (Vec<Directory>, String)) -> Result<Self, Self::Error> {
         let directories: std::collections::BTreeSet<_> = directories.into_iter().collect();
         for directory in &directories {
-            if !directory.as_ref().is_absolute() || directory.as_ref().is_file() {
+            if !directory.as_ref().is_absolute()
+                || directory
+                    .as_ref()
+                    .metadata()
+                    .is_ok_and(|metadata| !metadata.is_dir())
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(

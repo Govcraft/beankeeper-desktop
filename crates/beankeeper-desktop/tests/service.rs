@@ -3543,3 +3543,226 @@ fn agents_connect_plan_has_cli_mcp_parity() -> TestResult {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+struct SandboxInstall {
+    root: tempfile::TempDir,
+}
+
+#[cfg(target_os = "linux")]
+impl SandboxInstall {
+    fn new() -> TestResult<Self> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let fixture = Self {
+            root: tempfile::tempdir()?,
+        };
+        let root = fixture.root.path();
+        for dir in ["home", "bin", "blocked", "state/systemd"] {
+            fs::create_dir_all(root.join(dir))?;
+        }
+        write_stub_manager(&root.join("bin"))?;
+        fs::write(
+            root.join("bin/systemctl"),
+            r#"#!/bin/sh
+if [ "$2" = "$BK_FAIL_STEP" ] && [ -f "$BK_FAIL_ONCE" ]; then
+    /usr/bin/rm "$BK_FAIL_ONCE"
+    exit 1
+fi
+case "$2" in
+    show) printf 'on-failure\n';;
+    link) /usr/bin/mkdir -p "$XDG_CONFIG_HOME/systemd/user"
+          /usr/bin/ln -sf "$4" "$XDG_CONFIG_HOME/systemd/user/beankeeper-desktop.service";;
+esac
+exit 0
+"#,
+        )?;
+        fs::set_permissions(
+            root.join("bin/systemctl"),
+            fs::Permissions::from_mode(0o755),
+        )?;
+        Ok(fixture)
+    }
+    fn command(
+        &self,
+        issuer: &std::path::Path,
+        address: std::net::SocketAddr,
+    ) -> std::process::Command {
+        let root = self.root.path();
+        let mut command = isolated(root);
+        command
+            .env("HOME", root.join("home"))
+            .env("USERPROFILE", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("home/.config"))
+            .env("BEANKEEPER_SERVICE_DATA_DIR", root.join("blocked/data"))
+            .env("PATH", root.join("bin"))
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/missing-test-bus")
+            .env("XDG_RUNTIME_DIR", root.join("missing-fixture-runtime"))
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", issuer)
+            .env(
+                "BEANKEEPER_LICENSE_SERVICE_URL",
+                format!("http://{address}"),
+            );
+        command
+    }
+    fn block(&self, step: &str) -> TestResult<Option<std::path::PathBuf>> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = self.root.path();
+        let path = match step {
+            "directories" => root.join("blocked"),
+            "unit" => root.join("state/systemd"),
+            "registration" => root.join("home/.config/Claude"),
+            _ => return Ok(None),
+        };
+        fs::create_dir_all(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        Ok(Some(path))
+    }
+    fn break_unit_if_written(&self) -> TestResult {
+        use std::fs;
+        let root = self.root.path();
+        let artifact = root.join("state/systemd/beankeeper-desktop.service");
+        if artifact.is_file() {
+            let broken = fs::read_to_string(&artifact)?
+                .replace("StandardOutput=append:", "StandardOutput=\"append:");
+            fs::write(&artifact, broken)?;
+        }
+        Ok(())
+    }
+    fn run_with_host(
+        &self,
+        issuer: &std::path::Path,
+        address: std::net::SocketAddr,
+    ) -> TestResult<(std::process::Output, common::Server)> {
+        let descriptor = self.root.path().join("state/service.json");
+        let mut host = self.command(issuer, address);
+        host.args(["service", "run"]);
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !descriptor.is_file() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            common::Server::launch(host).map_err(|error| error.to_string())
+        });
+        let mut child = self
+            .command(issuer, address)
+            .args(["service", "install", "--file-store", "--json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let host = match worker.join().map_err(|_| "fixture host panicked")? {
+            Ok(host) => host,
+            Err(error) => {
+                let _ = child.kill();
+                let output = child.wait_with_output()?;
+                return Err(format!(
+                    "{error}; install output: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .into());
+            }
+        };
+        Ok((child.wait_with_output()?, host))
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn interrupted_install_steps_resume_without_second_books_or_trial() -> TestResult {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::SigningKey;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    if rustix::process::geteuid().as_raw() == 0 {
+        return Ok(());
+    }
+    let issuer = tempfile::tempdir()?;
+    let keys = issuer.path().join("issuer.json");
+    fs::write(
+        &keys,
+        serde_json::to_vec(
+            &json!({"trial-test": URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&[42;32]).verifying_key().to_bytes())}),
+        )?,
+    )?;
+    let now = chrono::Utc::now();
+    let token = sign_trial_test_claims(
+        &json!({"jti":"lic_01h455vb4pex5vsknk084sn02q","iat":now.to_rfc3339(),"product":"beankeeper-desktop","purchaser_ref":"fixture","storefront":"trial","eligible_major":1,"exp":(now + chrono::TimeDelta::days(30)).to_rfc3339()}),
+    )?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let (seen, received) = mpsc::channel();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = std::thread::spawn(move || serve_trial_test_mock(listener, seen, stopped, token));
+    for step in [
+        "clean",
+        "directories",
+        "registration",
+        "unit",
+        "link",
+        "daemon-reload",
+        "enable",
+        "start",
+    ] {
+        let fixture = SandboxInstall::new()?;
+        let root = fixture.root.path();
+        let books = root.join("blocked/data/books.db");
+        let mut before = None;
+        if step != "clean" {
+            let blocked = fixture.block(step)?;
+            let once = root.join("fail-once");
+            fs::write(&once, [])?;
+            let output = fixture
+                .command(&keys, address)
+                .env("BK_FAIL_STEP", step)
+                .env("BK_FAIL_ONCE", &once)
+                .args(["service", "install", "--file-store", "--json"])
+                .output()?;
+            if let Some(path) = blocked {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            assert!(!output.status.success(), "{step} unexpectedly succeeded");
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(report["ok"], false, "{step}: {report}");
+            if books.exists() {
+                before = Some(fs::read(books.with_extension("agent-token"))?);
+            }
+        }
+        fixture.break_unit_if_written()?;
+        let (output, host) = fixture.run_with_host(&keys, address)?;
+        assert!(
+            output.status.success(),
+            "{step}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(status["running"], true, "{step}: {status}");
+        assert_eq!(status["agent_access"]["write_mode"], "direct");
+        if let Some(before) = before {
+            assert_eq!(
+                before,
+                fs::read(books.with_extension("agent-token"))?,
+                "{step}"
+            );
+        }
+        assert_eq!(
+            fs::read_dir(books.parent().ok_or("books parent")?)?
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "db"))
+                .count(),
+            1
+        );
+        assert!(books.with_extension("recovery.txt").is_file());
+        received.recv_timeout(Duration::from_secs(5))?;
+        assert!(
+            received.try_recv().is_err(),
+            "{step} requested a second trial"
+        );
+        let unit = fs::read_to_string(root.join("state/systemd/beankeeper-desktop.service"))?;
+        assert!(unit.contains("StandardOutput=append:"));
+        drop(host);
+    }
+    let _ = stop.send(());
+    server.join().map_err(|_| "trial server panicked")??;
+    Ok(())
+}

@@ -584,3 +584,5 @@ is confined to tests and is never a default trust key.
 For Claude Code and local Cowork, the signed release also includes
 `claude-plugin.zip`, using the installed Desktop executable. Claude app chat
 continues to use `.mcpb`. See the [Claude connection guide](docs/claude-desktop.md).
+
+Sandboxed agents can preview folder grants with `bk service install --plan --json` and `bk agents connect --all --plan --json`; see [service setup](docs/service.md) for CLI/MCP retry details.

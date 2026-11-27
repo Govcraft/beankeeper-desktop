@@ -289,6 +289,10 @@ fn run_service_with_native_store(
     if matches!(storage, ServiceSecretStorage::PrivateFile) && !cli.db.try_exists()? {
         options.secret_store_file = Some(cli.db.with_extension("passphrase"));
     }
+    let pending = PendingBootstrap::load(&cli.db)?;
+    if let Some(file) = pending.and_then(|pending| pending.secret_store_file) {
+        options.secret_store_file = Some(file);
+    }
     let store = configured_store(&cli.db, &options)?;
     run_with_store(
         cli,
@@ -379,13 +383,11 @@ impl Provisioning {
     }
 }
 
-fn run_with_store(
+fn prepare_setup(
     cli: &mut Cli,
     options: &SetupOptions,
-    store: &dyn SecretStore,
-    registration: ClientRegistration<'_>,
     storage: Option<ServiceSecretStorage>,
-) -> Result<(), SetupError> {
+) -> Result<(SetupMode, PathBuf), SetupError> {
     crate::server::validate_bind(options.bind, false)?;
     if options.bind.port() == 0 {
         return Err(SetupError::Invalid("setup requires a nonzero --bind port"));
@@ -396,7 +398,6 @@ fn run_with_store(
         ));
     }
     let mode = SetupMode::for_ledger(&cli.db, options.force)?;
-    let provisioning = Provisioning::from((options.preset, registration, mode));
     let home = options
         .config_home
         .clone()
@@ -417,6 +418,18 @@ fn run_with_store(
     ) {
         require_unused_store_marker(&cli.db)?;
     }
+    Ok((mode, home))
+}
+
+fn run_with_store(
+    cli: &mut Cli,
+    options: &SetupOptions,
+    store: &dyn SecretStore,
+    registration: ClientRegistration<'_>,
+    storage: Option<ServiceSecretStorage>,
+) -> Result<(), SetupError> {
+    let (mode, home) = prepare_setup(cli, options, storage)?;
+    let provisioning = Provisioning::from((options.preset, registration, mode));
     let token_file = cli.db.with_extension("agent-token");
     let owner_file = cli.db.with_extension("owner-token");
     let kit = options
@@ -429,6 +442,7 @@ fn run_with_store(
         prepare_client_configs(registration, &home, &executable, &cli.db, &token_file, &url)?;
     // Validate output collisions before creating a ledger or storing credentials.
     if matches!(mode, SetupMode::Fresh)
+        && !(storage.is_some() && PendingBootstrap::load(&cli.db)?.is_some())
         && [token_file.as_path(), owner_file.as_path(), kit.as_path()]
             .iter()
             .any(|path| path.exists())
@@ -452,7 +466,13 @@ fn run_with_store(
     if kit.exists() {
         PrivateFile::open(&kit)?;
     }
-    let (secret, automatic_file) = store_ledger_secret(cli, store, storage, mode)?;
+    let (secret, automatic_file) = bootstrap_secret(
+        cli,
+        store,
+        storage,
+        mode,
+        options.secret_store_file.as_deref(),
+    )?;
     if !kit.exists() {
         private_create(
             &kit,
@@ -492,7 +512,11 @@ fn run_with_store(
             paths.kit.display(),
         );
     }
-    finish_setup(cli, options, &paths, configs, &secret, &temporary, mode)
+    finish_setup(cli, options, &paths, configs, &secret, &temporary, mode)?;
+    if storage.is_some() {
+        PendingBootstrap::finish(&cli.db)?;
+    }
+    Ok(())
 }
 
 fn require_unused_store_marker(ledger: &Path) -> Result<(), SetupError> {
@@ -527,6 +551,89 @@ fn prepare_client_configs(
         ClientRegistration::Skip => None,
     };
     Ok(plan)
+}
+
+/// A private durable record proves that a managed fresh setup reached secret
+/// storage. It contains only the store location, never the secret itself.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "PendingBootstrapData")]
+struct PendingBootstrap {
+    secret_store_file: Option<PathBuf>,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingBootstrapData {
+    secret_store_file: Option<PathBuf>,
+}
+impl TryFrom<PendingBootstrapData> for PendingBootstrap {
+    type Error = SetupError;
+    fn try_from(data: PendingBootstrapData) -> Result<Self, Self::Error> {
+        if data
+            .secret_store_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(SetupError::Invalid(
+                "unfinished setup requires an absolute secret-store path",
+            ));
+        }
+        Ok(Self {
+            secret_store_file: data.secret_store_file,
+        })
+    }
+}
+impl PendingBootstrap {
+    fn path(books: &Path) -> PathBuf {
+        books.with_extension("setup-pending.json")
+    }
+    fn load(books: &Path) -> Result<Option<Self>, SetupError> {
+        match crate::service::read_private(&Self::path(books)) {
+            Ok(pending) => Ok(Some(pending)),
+            Err(crate::service::ServiceError::Io(error))
+                if error.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(SetupError::service_file(error)),
+        }
+    }
+    fn save(&self, books: &Path) -> Result<(), SetupError> {
+        crate::service::private_json(&Self::path(books), self).map_err(SetupError::service_file)
+    }
+    fn finish(books: &Path) -> io::Result<()> {
+        match fs::remove_file(Self::path(books)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
+fn bootstrap_secret(
+    cli: &Cli,
+    store: &dyn SecretStore,
+    storage: Option<ServiceSecretStorage>,
+    mode: SetupMode,
+    explicit_file: Option<&Path>,
+) -> Result<(SecretString, Option<PathBuf>), SetupError> {
+    if storage.is_some()
+        && matches!(mode, SetupMode::Fresh)
+        && let Some(pending) = PendingBootstrap::load(&cli.db)?
+    {
+        let secret = store.load(&cli.db)?.ok_or(SetupError::Invalid(
+            "unfinished setup's stored passphrase is unavailable; restore it before retrying",
+        ))?;
+        return Ok((secret, pending.secret_store_file));
+    }
+    let (secret, automatic) = store_ledger_secret(cli, store, storage, mode)?;
+    if storage.is_some() && matches!(mode, SetupMode::Fresh) {
+        PendingBootstrap {
+            secret_store_file: explicit_file
+                .map(Path::to_path_buf)
+                .or_else(|| automatic.clone()),
+        }
+        .save(&cli.db)?;
+    }
+    Ok((secret, automatic))
 }
 
 fn store_ledger_secret(
@@ -1342,6 +1449,99 @@ mod tests {
             Ok(Preset::Bookkeeper)
         );
         assert_eq!(policy_events()?, [Some(owner.jti().to_owned())]);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_managed_bootstrap_reuses_secret_and_kit_after_books_failure()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let books = root.path().join("books.db");
+        let passphrase = books.with_extension("passphrase");
+        let store = FileSecretStore::new(passphrase.clone());
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "bk",
+            "--db",
+            books.to_str().ok_or("books path")?,
+            "mcp",
+            "serve",
+        ])?;
+        let storage = Some(ServiceSecretStorage::PrivateFile);
+        let (first, _) =
+            bootstrap_secret(&cli, &store, storage, SetupMode::Fresh, Some(&passphrase))?;
+        let kit = books.with_extension("recovery.txt");
+        private_create(
+            &kit,
+            recovery_kit(
+                &books,
+                &books.with_extension("owner-token"),
+                first.expose_secret(),
+            )
+            .as_bytes(),
+        )?;
+        let before = fs::read(&kit)?;
+        #[cfg(unix)]
+        if rustix::process::geteuid().as_raw() != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o500))?;
+            let failed = initialize_ledger(&cli, &first, false);
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
+            assert!(failed.is_err());
+        }
+        let (retry, _) =
+            bootstrap_secret(&cli, &store, storage, SetupMode::Fresh, Some(&passphrase))?;
+        assert_eq!(first.expose_secret(), retry.expose_secret());
+        let mut cli = cli;
+        run_service_with_native_store(
+            &mut cli,
+            root.path(),
+            (std::net::Ipv4Addr::LOCALHOST, 8750).into(),
+            ClientRegistration::Skip,
+            ServiceSecretStorage::PrivateFile,
+            &store,
+        )?;
+        assert!(books.is_file());
+        assert_eq!(before, fs::read(&kit)?);
+        assert!(!PendingBootstrap::path(&books).exists());
+        assert_eq!(
+            store.load(&books)?.ok_or("stored secret")?.expose_secret(),
+            first.expose_secret()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_native_fallback_recovers_its_file_store_before_books_exist()
+    -> Result<(), Box<dyn Error>> {
+        use clap::Parser;
+        let root = tempfile::tempdir()?;
+        keychain::restrict_directory(root.path())?;
+        let books = root.path().join("books.db");
+        let mut cli = Cli::try_parse_from([
+            "bk",
+            "--db",
+            books.to_str().ok_or("books path")?,
+            "mcp",
+            "serve",
+        ])?;
+        let unavailable = UnavailableStore(keychain::KeyringFailure::NoProvider);
+        let storage = ServiceSecretStorage::NativeWithFileFallback;
+        let (secret, _) =
+            bootstrap_secret(&cli, &unavailable, Some(storage), SetupMode::Fresh, None)?;
+        run_service_with_native_store(
+            &mut cli,
+            root.path(),
+            (std::net::Ipv4Addr::LOCALHOST, 8750).into(),
+            ClientRegistration::Skip,
+            storage,
+            &unavailable,
+        )?;
+        let stored = FileSecretStore::new(books.with_extension("passphrase"))
+            .load(&books)?
+            .ok_or("missing fallback")?;
+        assert_eq!(secret.expose_secret(), stored.expose_secret());
+        assert!(books.is_file());
         Ok(())
     }
 

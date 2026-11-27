@@ -288,3 +288,9 @@ A failed or interrupted provisioning attempt never overwrites recovery material.
 Preserve the private artifacts and follow the setup recovery procedure if a
 credential or client configuration needs repair. Uninstall only removes hosting;
 it is not an account reset or a book deletion command.
+
+Sandboxed agents: first call `bk service install --plan --json` and `bk agents connect --all --plan --json`, request the returned folders (never individual files), and on `*_WRITE_DENIED` grant `parent` and re-run `resume` without stopping. These plans create no files and do not contact the service manager or keyring. Each `directories` entry has a directory `path` and its nearest existing directory `parent`. CLI failures use an `ok: false` envelope with `error.code`, `path`, `parent`, `kind`, and the command to `resume`.
+
+The local lifecycle MCP tools expose the same operations: `service_install` accepts `plan`, `file_store`, and `no_agents`; `agents_connect` accepts `plan`, `all`, and an optional `agent`. Select either `all` or `agent`. Plans use the same discovered destinations as the writes, including overrides and extension-managed clients. Setup retries preserve books, recovery material, stored credentials and an existing trial.
+
+On Linux, the manager child uses `DBUS_SESSION_BUS_ADDRESS` first, with `XDG_RUNTIME_DIR` removed. If that transport is unreachable, it retries once through the validated, owner-owned `$XDG_RUNTIME_DIR/systemd/private` socket (defaulting to `/run/user/<uid>`). Diagnostics distinguish socket connection failures, OS permission failures, and failed unit operations without parsing localized messages. Use a service log directory without whitespace or quotes; systemd output specifiers cannot quote those paths. Reinstallation rewrites previously quoted log redirects.
