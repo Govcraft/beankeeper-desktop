@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-- Stop naming complimentary grants in return messages, license-update docs, and the shipped skill.
-- Start an email-free 30-day trial automatically through setup, CLI and MCP, report expiry and days left, and preserve access to books after expiry.
+## [1.0.3] - 2026-11-26
 
+- Use plainer wording in return messages, license-update docs, and the shipped skill.
+- Start an email-free 30-day trial automatically through setup, CLI and MCP, report expiry and days left, and preserve access to books after expiry.
 - Remove local licenses through CLI and MCP without a refund or changes to books, and show revoked licenses in status.
 - Expose cached Desktop update status through CLI and MCP with release notes and nonblocking agent guidance.
+- Refresh the embedded issuer-signed revocation snapshot.
 
 ## [1.0.2] - 2026-11-26
 
