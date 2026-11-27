@@ -352,3 +352,19 @@ collector runs `python scripts/release.py bootstrap-installers` to perform the s
 check and copy the committed files into `dist` before hashing and signing assets.
 Neither command selects or downloads a verifier. Bootstrap download or hash
 failures during installation stop without bypassing Sigstore verification.
+
+### Claude plugin and marketplace
+
+`python scripts/release.py claude-plugin` builds `dist/claude-plugin.zip` and
+validates the catalog in `packaging/claude-marketplace/`. It generates a complete
+publishing tree in `staging/claude-marketplace/`, including `plugins/beankeeper/`.
+The collect job builds the plugin before checksumming, signing, and attesting
+release assets. The plugin version comes from the workspace release version;
+no source manifest version is maintained separately. The guide is copied from
+root `SKILL.md`, and the plugin references installed `bk` via PATH, with no
+`bin/` directory or bundled binary. `.mcpb` remains the chat extension artifact.
+
+The PM publishes the generated marketplace tree to
+Govcraft/beankeeper-claude-plugins in a follow-up. This tooling creates no
+GitHub repositories. Retain the generated tree locally when preparing that
+publication; only `claude-plugin.zip` is a signed release asset.

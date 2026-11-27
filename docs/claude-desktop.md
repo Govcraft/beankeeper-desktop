@@ -44,8 +44,13 @@ books or starting the local service.
 Beankeeper verifies the newest published release for your computer in-process,
 without requiring a separate `cosign` installation.
 It verifies the Sigstore signatures on the checksums and extension, then requires
-the extension's SHA-256 to match the signed checksum. After your operating
-system opens the verified file, select **Install** in Claude Desktop, then restart
+the extension's SHA-256 to match the signed checksum. On Linux, Beankeeper
+launches Claude directly through its XDG desktop entry
+with `gio launch`, falling back to `claude-desktop` on the executable search
+path. It does not depend on the `.mcpb` MIME association. If Claude is not
+found, the agent reports `AGENT_EXTENSION_CLAUDE_NOT_FOUND` and asks you to
+install or open Claude Desktop. On macOS and Windows, the operating system
+opens the verified file. Select **Install** in Claude Desktop, then restart
 Claude Desktop or toggle the extension off and on to load the new version.
 
 When opening the extension, Beankeeper removes its managed stdio entries from
@@ -121,3 +126,21 @@ are required from the owner. `bk agents doctor` also reads the native keyring
 when the service is unavailable, without writing a credential; failures include a named code, an owner message,
 and a separate sanitized `technical_detail` field in its JSON `data.keyring`
 result. Backend error text and credential bytes are never included.
+
+## Claude Code and local Cowork plugin
+
+Download `claude-plugin.zip` from the signed Desktop release and upload it at
+**Customize > Plugins > Add > Upload plugin**. Install Beankeeper Desktop with
+its graphical installer first. The plugin carries the same guide as the chat
+extension and runs the installed `bk mcp extension`. The host must find `bk`
+on its executable search path; ask your agent or support to check the host's
+environment if it cannot connect. The plugin contains no executable.
+
+The local MCP server loads in Claude Code and Cowork sessions running on your
+computer. Chat ignores it, so keep using `.mcpb` for Claude app chat. Uploading
+the plugin alone does not connect chat to your local books.
+[Plugin structure](https://claude.com/docs/plugins/build) and
+[platform support](https://claude.com/docs/plugins/platform-support).
+
+The marketplace publishing tree is prepared in this repository. Publishing
+Govcraft/beankeeper-claude-plugins is a PM follow-up.

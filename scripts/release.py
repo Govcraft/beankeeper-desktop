@@ -385,6 +385,42 @@ def write_mcp_bundle(binary, release_version, platform, output):
             archive.writestr(zip_entry(path, 0o644), source.read_bytes())
 
 
+def claude_plugin(output, release_version, marketplace):
+    """Build the portable plugin and complete, ready-to-publish marketplace tree."""
+    if not valid_version(release_version):
+        raise ValueError("invalid plugin release version")
+    source = ROOT / "packaging/claude-plugin"
+    manifest = strict_json((source / ".claude-plugin/plugin.json").read_bytes())
+    manifest["version"] = release_version
+    mcp = strict_json((source / ".mcp.json").read_bytes())
+    expected = {"mcpServers": {"beankeeper": {"command": "bk", "args": ["mcp", "extension"]}}}
+    if manifest["name"] != "beankeeper" or mcp != expected:
+        raise ValueError("plugin must connect to the installed bk mcp extension")
+    catalog_source = ROOT / "packaging/claude-marketplace"
+    catalog = strict_json((catalog_source / ".claude-plugin/marketplace.json").read_bytes())
+    entries = catalog["plugins"]
+    if len(entries) != 1 or entries[0]["name"] != manifest["name"] or entries[0]["source"] != "./plugins/beankeeper":
+        raise ValueError("marketplace must point to the generated Beankeeper plugin")
+    files = {
+        ".claude-plugin/plugin.json": (json.dumps(manifest, indent=2) + "\n").encode(),
+        ".mcp.json": (json.dumps(mcp, indent=2) + "\n").encode(),
+        "skills/beankeeper/SKILL.md": (ROOT / "SKILL.md").read_bytes(),
+        "README.md": (source / "README.md").read_bytes(),
+        "LICENSE.md": (ROOT / "LICENSE.md").read_bytes(),
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    if marketplace.exists():
+        shutil.rmtree(marketplace)
+    shutil.copytree(catalog_source, marketplace)
+    plugin = marketplace / "plugins/beankeeper"
+    with zipfile.ZipFile(output / "claude-plugin.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+            destination = plugin / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+
+
 COSIGN_ASSETS = {
     "LINUX_AMD64": "cosign-linux-amd64",
     "LINUX_ARM64": "cosign-linux-arm64",
@@ -530,7 +566,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["check-bootstrap-installers", "bootstrap-installers", "version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("command", choices=["check-bootstrap-installers", "bootstrap-installers", "version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "claude-plugin", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--write", action="store_true", help="refresh committed installers from the latest official cosign release")
     parser.add_argument("--tag")
     parser.add_argument(
@@ -574,6 +610,8 @@ def main():
         print(release_version)
     elif args.command == "update-manifest":
         update_manifest(args.output, release_version)
+    elif args.command == "claude-plugin":
+        claude_plugin(args.output, release_version, args.work / "claude-marketplace")
     elif args.command == "checksums":
         checksums(args.output)
     elif args.command == "mcpb-macos":

@@ -1,0 +1,13 @@
+{
+  "name": "govcraft-beankeeper",
+  "owner": {
+    "name": "Govcraft"
+  },
+  "plugins": [
+    {
+      "name": "beankeeper",
+      "source": "./plugins/beankeeper",
+      "description": "Local Beankeeper tools and guide for Claude Code and local Cowork."
+    }
+  ]
+}
