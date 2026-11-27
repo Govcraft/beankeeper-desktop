@@ -107,6 +107,11 @@ RULES: tuple[tuple[str, Checks, str], ...] = (
     ("packaging/claude/", packaging(REPRESENTATIVE_TARGETS), "Claude extension bundle"),
     ("install.sh", packaging(POSIX_TARGETS), "POSIX installer"),
     (
+        "cosign-bootstrap.json",
+        packaging(ALL_TARGETS),
+        "installer verifier bootstrap metadata and offline consistency checks",
+    ),
+    (
         "scripts/tests/skill-install-posix.py",
         packaging(POSIX_TARGETS),
         "POSIX install guide test",
