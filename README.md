@@ -468,9 +468,9 @@ cargo +1.91.0 check --workspace --all-targets --locked
 ```
 
 CI runs fmt, clippy with warnings denied, tests including the embedded UI build,
-and a separate Rust 1.91 check. `Cargo.lock` records the same upstream revision
-for the library and CLI. The `upstream-main` job refreshes both crates and
-tests the latest upstream commit on each pull request, push to `main`, and daily.
+and a separate Rust 1.91 check. `Cargo.lock` records the same released
+`beankeeper-cli-vX.Y.Z` tag for the library and CLI. A scheduled workflow opens
+a pull request when a newer core release is published.
 
 ## License and updates
 

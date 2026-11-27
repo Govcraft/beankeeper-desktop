@@ -1,0 +1,84 @@
+name: Bump core release
+
+on:
+  schedule:
+    - cron: '37 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match scripts/ci/cache.py CARGO_ENV: caches are built with these.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  bump:
+    name: Open a PR for the latest CLI tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+      - uses: ./.github/actions/rust-setup
+        with:
+          family: dev-linux
+      - name: Detect a newer beankeeper-cli release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current="$(python3 scripts/ci/bump_core_release.py current)"
+          latest="$(gh release view --repo Govcraft/beankeeper --json tagName --jq .tag_name)"
+          printf 'current=%s latest=%s\n' "$current" "$latest"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Update the pin and lockfile
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/bump_core_release.py apply --tag "$LATEST"
+          cargo update -p beankeeper -p beankeeper-cli
+      - name: Open the bump pull request
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.detect.outputs.latest }}
+          CURRENT: ${{ steps.detect.outputs.current }}
+        run: |
+          set -euo pipefail
+          branch="chore/core-$LATEST"
+          git fetch origin
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Branch $branch already exists on origin."
+            exit 0
+          fi
+          git checkout -B "$branch"
+          git add crates/beankeeper-desktop/Cargo.toml Cargo.lock CHANGELOG.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: pin core to ${LATEST}"
+          git push origin "$branch"
+          gh pr create --title "chore: pin core to ${LATEST}" --body "$(cat <<EOF
+          Closes #230
+
+          Tenets: 6 (your books live with you: Desktop should ship the same released core that install.sh and AUR install).
+
+          Bump \`beankeeper\` and \`beankeeper-cli\` from \`${CURRENT}\` to \`${LATEST}\` and refresh \`Cargo.lock\`. No Desktop version bump.
+
+          This pull request was opened by the \`bump-core-release\` workflow.
+          EOF
+          )"

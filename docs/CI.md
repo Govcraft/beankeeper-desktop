@@ -24,7 +24,7 @@ See the [release PR flow](RELEASE.md#preparing-a-release-pr).
 | Change | Checks |
 | --- | --- |
 | `docs/`, `README.md`, `CHANGELOG.md` | planning job only |
-| `crates/`, `ui/`, `Cargo.lock` | stable, MSRV, latest Beankeeper main and native service checks |
+| `crates/`, `ui/`, `Cargo.lock` | stable, MSRV, and native service checks |
 | `install.ps1`, `packaging/windows.iss` | Windows packaging only |
 | `scripts/tests/service-lifecycle.py` | service checks and one package per OS |
 | `scripts/release.py`, `build.rs` | every release target |

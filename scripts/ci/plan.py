@@ -161,6 +161,11 @@ RULES: tuple[tuple[str, Checks, str], ...] = (
     ("scripts/ci/", CI_TOOLING, "CI planning, gate and cache identity"),
     (".github/actions/", CI_TOOLING, "shared CI action"),
     (".github/workflows/ci.yml", CI_TOOLING, "CI workflow"),
+    (
+        ".github/workflows/bump-core-release.yml",
+        CI_TOOLING,
+        "core release bump workflow",
+    ),
 )
 
 
