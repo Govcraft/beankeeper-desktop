@@ -189,10 +189,10 @@ function Test-SignaturesRequired {
         if ($Name -ne 'cosign') { throw "Unexpected executable check: $Name" }
     }
     try { Test-ReleaseSignatures 'unused' 'archive.zip' $directory '0.2.0-rc.10' } catch {
-        if ($_.Exception.Message -notlike '*cosign is required*') { throw }
+        if ($_.Exception.Message -notlike 'Could not securely prepare release verification; retry the installer.') { throw }
         return
     }
-    throw 'Expected installation to require cosign'
+    throw 'Expected installation to reject missing bootstrap metadata'
 }
 
 Test-SignaturesRequired

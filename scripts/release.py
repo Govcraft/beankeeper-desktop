@@ -15,6 +15,7 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
+import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -383,9 +384,55 @@ def write_mcp_bundle(binary, release_version, platform, output):
             archive.writestr(zip_entry(path, 0o644), source.read_bytes())
 
 
+COSIGN_ASSETS = {
+    "LINUX_AMD64": "cosign-linux-amd64",
+    "LINUX_ARM64": "cosign-linux-arm64",
+    "DARWIN_AMD64": "cosign-darwin-amd64",
+    "DARWIN_ARM64": "cosign-darwin-arm64",
+    "WINDOWS_AMD64": "cosign-windows-amd64.exe",
+}
+
+
+def bootstrap_installers(output):
+    """Generate installers and an audit record from the latest official cosign bytes."""
+    with urllib.request.urlopen("https://api.github.com/repos/sigstore/cosign/releases/latest", timeout=60) as source:
+        tag = strict_json(source.read())["tag_name"]
+    if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+        raise ValueError("expected a stable official cosign release")
+    hashes = {}
+    for key, asset in COSIGN_ASSETS.items():
+        url = f"https://github.com/sigstore/cosign/releases/download/{tag}/{asset}"
+        with urllib.request.urlopen(url, timeout=60) as source:
+            hashes[key] = hashlib.file_digest(source, "sha256").hexdigest()
+    render_bootstrap_installers(output, tag, hashes)
+
+
+def render_bootstrap_installers(output, tag, hashes):
+    """Render templates only after the complete bootstrap metadata validates."""
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) or set(hashes) != set(COSIGN_ASSETS):
+        raise ValueError("invalid cosign bootstrap metadata")
+    if any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in hashes.values()):
+        raise ValueError("invalid cosign bootstrap SHA-256")
+    rendered = {}
+    for name in ("install.sh", "install.ps1"):
+        script = (ROOT / name).read_text(encoding="utf-8")
+        for key, value in {"VERSION": tag, **hashes}.items():
+            script = script.replace(f"@COSIGN_{key}@", value)
+        if "@COSIGN_" in script:
+            raise ValueError("unresolved cosign bootstrap placeholder")
+        rendered[name] = script
+    output.mkdir(parents=True, exist_ok=True)
+    for name, script in rendered.items():
+        (output / name).write_text(script, encoding="utf-8")
+    (output / "cosign-bootstrap.json").write_text(json.dumps({
+        "version": tag,
+        "sha256": {COSIGN_ASSETS[key]: value for key, value in hashes.items()},
+    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def checksums(output):
     assets = sorted(path for path in output.iterdir()
-                    if path.name.endswith((".tar.gz", ".deb", ".pkg", ".zip", ".exe", ".mcpb")))
+                    if path.name.endswith((".tar.gz", ".deb", ".pkg", ".zip", ".exe", ".mcpb", ".sh", ".ps1", "cosign-bootstrap.json")))
     if not assets:
         raise ValueError("no release assets found")
     lines = []
@@ -446,7 +493,7 @@ def write_license_env():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
+    parser.add_argument("command", choices=["bootstrap-installers", "version", "revocations", "stage", "installer", "archive", "mcpb", "mcpb-macos", "checksums", "update-manifest", "license-env", "linux-abi"])
     parser.add_argument("--tag")
     parser.add_argument(
         "--check-changelog", action="store_true",
@@ -457,6 +504,9 @@ def main():
     parser.add_argument("--work", type=Path, default=Path("staging"))
     parser.add_argument("--output", type=Path, default=Path("dist"))
     args = parser.parse_args()
+    if args.command == "bootstrap-installers":
+        bootstrap_installers(args.output)
+        return
     if args.command == "license-env":
         write_license_env()
         return

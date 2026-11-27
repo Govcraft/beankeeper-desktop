@@ -21,6 +21,12 @@ INSTALL_DIR="${BK_INSTALL:-$HOME/.local/bin}"
 NO_SERVICE="${BK_NO_SERVICE:-0}"
 NO_AGENTS="${BK_NO_AGENTS:-0}"
 REQUIRE_AGENT_SETUP="${BK_REQUIRE_AGENT_SETUP:-0}"
+# Filled by scripts/release.py for published installers; never hand-edit hashes.
+COSIGN_VERSION='@COSIGN_VERSION@'
+COSIGN_LINUX_AMD64='@COSIGN_LINUX_AMD64@'
+COSIGN_LINUX_ARM64='@COSIGN_LINUX_ARM64@'
+COSIGN_DARWIN_AMD64='@COSIGN_DARWIN_AMD64@'
+COSIGN_DARWIN_ARM64='@COSIGN_DARWIN_ARM64@'
 VERSION_PATTERN='^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][0-9]+)?$'
 
 main() {
@@ -297,8 +303,7 @@ download_and_install() {
 verify_signatures() {
     ref="refs/tags/beankeeper-desktop-v${VERSION}"
     IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@${ref}"
-    command -v cosign >/dev/null 2>&1 ||
-        fatal "cosign is required to verify this release; install it from a trusted package source and retry"
+    prepare_cosign
 
     for ARTIFACT in "$ARCHIVE" checksums-sha256.txt; do
         info "verifying Sigstore bundle for ${ARTIFACT}..."
@@ -310,13 +315,35 @@ verify_signatures() {
         else
             fatal "could not download Sigstore bundle for ${ARTIFACT}"
         fi
-        cosign verify-blob \
+        "$COSIGN" verify-blob \
             --bundle "${BK_TEMP_DIR}/${ARTIFACT}.sigstore" \
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${BK_TEMP_DIR}/${ARTIFACT}" \
             || fatal "Sigstore verification failed for ${ARTIFACT}"
     done
+}
+
+# Nothing downloaded here can execute until its release-generated hash matches.
+prepare_cosign() {
+    COSIGN="$(command -v cosign || true)"
+    [ -z "$COSIGN" ] || return 0
+    case "$OS:$ARCH_TARGET" in
+        Linux:x86_64) cosign_asset=cosign-linux-amd64; cosign_hash="$COSIGN_LINUX_AMD64" ;;
+        Linux:aarch64) cosign_asset=cosign-linux-arm64; cosign_hash="$COSIGN_LINUX_ARM64" ;;
+        Darwin:x86_64) cosign_asset=cosign-darwin-amd64; cosign_hash="$COSIGN_DARWIN_AMD64" ;;
+        Darwin:aarch64) cosign_asset=cosign-darwin-arm64; cosign_hash="$COSIGN_DARWIN_ARM64" ;;
+    esac
+    COSIGN="${BK_TEMP_DIR}/cosign"
+    if ! (
+        printf '%s\n' "$cosign_hash" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$' &&
+        download "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/${cosign_asset}" -o "$COSIGN" &&
+        [ "$(compute_sha256 "$COSIGN")" = "$cosign_hash" ] &&
+        chmod 700 "$COSIGN"
+    ) >/dev/null 2>&1; then
+        printf '%s\n' "Could not securely prepare release verification; retry the installer." >&2
+        exit 1
+    fi
 }
 
 compute_sha256() {

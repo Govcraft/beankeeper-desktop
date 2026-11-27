@@ -31,6 +31,52 @@ class PackagingTests(unittest.TestCase):
         self.output = self.root / "dist"
         self.output.mkdir()
 
+    def test_bootstrap_generator_hashes_official_bytes_and_embeds_all_platforms(self):
+        tag = "v3.0.0"
+        payloads = {asset: (asset + " binary").encode() for asset in release.COSIGN_ASSETS.values()}
+        urls = []
+
+        def download(url, timeout):
+            self.assertEqual(timeout, 60)
+            urls.append(url)
+            if url.endswith("/latest"):
+                return io.BytesIO(json.dumps({"tag_name": tag}).encode())
+            self.assertTrue(url.startswith(f"https://github.com/sigstore/cosign/releases/download/{tag}/"))
+            return io.BytesIO(payloads[url.rsplit("/", 1)[1]])
+
+        with patch.object(release.urllib.request, "urlopen", side_effect=download):
+            release.bootstrap_installers(self.output)
+        self.assertEqual(len(urls), 6)
+        metadata = json.loads((self.output / "cosign-bootstrap.json").read_text())
+        self.assertEqual(metadata, {"version": tag, "sha256": {
+            asset: hashlib.sha256(payload).hexdigest() for asset, payload in payloads.items()
+        }})
+        for name in ("install.sh", "install.ps1"):
+            script = (self.output / name).read_text()
+            self.assertIn(tag, script)
+            self.assertNotIn("@COSIGN_", script)
+            keys = ["WINDOWS_AMD64"] if name.endswith("ps1") else [
+                key for key in release.COSIGN_ASSETS if key != "WINDOWS_AMD64"]
+            for key in keys:
+                self.assertIn(metadata["sha256"][release.COSIGN_ASSETS[key]], script)
+        release.checksums(self.output)
+        self.assertEqual(len((self.output / "checksums-sha256.txt").read_text().splitlines()), 3)
+        workflow = (ROOT / ".github/workflows/packaging.yml").read_text()
+        self.assertLess(workflow.index("release.py bootstrap-installers"), workflow.index("release.py checksums"))
+
+    def test_bootstrap_generator_does_not_publish_partial_metadata(self):
+        with patch.object(release.urllib.request, "urlopen", side_effect=[
+            io.BytesIO(b'{"tag_name":"v3.0.0"}'), OSError("network failure"),
+        ]):
+            with self.assertRaises(OSError):
+                release.bootstrap_installers(self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+        for tag, hashes in (("../../bad", {}), ("v3.0.0", {}),
+                            ("v3.0.0", {key: "invalid" for key in release.COSIGN_ASSETS})):
+            with self.assertRaises(ValueError):
+                release.render_bootstrap_installers(self.output, tag, hashes)
+        self.assertEqual(list(self.output.iterdir()), [])
+
     def test_release_workflow_checks_stable_tags_in_preflight(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         preflight, packaging = workflow.split("\n  packaging:", 1)

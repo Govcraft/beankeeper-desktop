@@ -241,7 +241,8 @@ time to establish reputation. Do not disable OS security checks automatically.
 ## Checksum-verifying command-line installers
 
 The shell installer supports Linux and macOS. The PowerShell installer
-supports x64 Windows with PowerShell 5.1 or later. Install `cosign` first.
+supports x64 Windows with PowerShell 5.1 or later. No cosign installation is needed: published installers fetch a temporary verifier
+when it is absent from PATH and remove it afterward.
 
 ```sh
 curl -fsSLO https://beankeeper.app/download/latest/install.sh
@@ -332,3 +333,11 @@ redirect installation to another repository, workflow, executable path or OS.
 Only after verification does the client extract the exact regular executable
 member and replace its binary. See the [command reference](license-updates.md)
 for opt-out, caching, trust provisioning and private license storage.
+
+The release collector runs `python scripts/release.py bootstrap-installers` before
+hashing and signing assets. It selects the latest official stable Sigstore cosign
+release, hashes all five platform binaries over HTTPS, and renders `install.sh`
+and `install.ps1` with those hashes. `cosign-bootstrap.json` records the version
+and hashes for inspection. Publish these generated installers, never the source
+templates; do not hand-edit bootstrap values. Bootstrap download or hash failures
+stop installation without bypassing Sigstore verification.

@@ -123,11 +123,12 @@ If `bk` is missing or lacks the setup commands, use the
 signed installation commands for this operating system and processor below.
 If a supported command fails, report and repair that step before continuing.
 
-Use [Sigstore's cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/)
-if `cosign` is missing. Install it through the owner's trusted package channel
-or stop and explain what is missing. Guided setup reads the latest release
-version from beankeeper.app and checks that the verified binary provides
-managed service and agent registration commands.
+The published installer handles release verification automatically. When
+`cosign` is missing, it fetches the official verifier into its temporary
+directory, checks its release-generated SHA-256 before running it, and removes
+it afterward. Guided setup reads the latest release version from beankeeper.app
+and checks that the verified binary provides managed service and agent
+registration commands.
 
 ### Linux and macOS
 
@@ -177,7 +178,7 @@ Both installers require SHA-256 and Sigstore verification of the release
 archive and checksum list, using the exact Govcraft release workflow and tag
 and GitHub Actions OIDC issuer. If verification fails, stop before executing the
 downloaded binary. Explain what failed, such as a missing signed release,
-unavailable cosign, or a checksum mismatch. If the service or registration
+a verifier bootstrap failure, or a checksum mismatch. If the service or registration
 fails, report the status and the specific step. Repair that step before
 resuming installation.
 
