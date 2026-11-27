@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fetch and verify a temporary cosign automatically when signed installation needs it.
+- Explain locked or missing keyrings in plain words, expose safe agent diagnostics, and verify Linux extension bundle architecture.
 
 - Keep trial notices specific to their books so a second set cannot show a bound-elsewhere warning on the licensed books.
 

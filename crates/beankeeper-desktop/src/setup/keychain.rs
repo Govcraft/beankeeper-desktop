@@ -104,6 +104,10 @@ pub enum KeychainError {
     Io(io::Error),
     /// Native secure storage is unavailable or locked.
     Unavailable,
+    /// Native storage refused access, usually because it is locked.
+    Locked,
+    /// No native credential provider could be reached.
+    NoProvider,
     /// A ledger path cannot be represented by the native credential API.
     InvalidLedgerPath,
     /// Empty credentials are never accepted.
@@ -118,6 +122,8 @@ impl fmt::Display for KeychainError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "credential file operation failed: {error}"),
+            Self::Locked => formatter.write_str("Beankeeper needs your computer's keyring to be unlocked. Sign out of your computer and back in, then say 'Set up my books' again."),
+            Self::NoProvider => formatter.write_str("Beankeeper couldn’t reach your computer’s password safe. On Ubuntu or Debian, I can help install the gnome-keyring package or enable an existing Secret Service provider, then retry setting up your books."),
             Self::Unavailable => formatter.write_str(
                 "OS keychain is unavailable or locked; unlock your login keychain or Secret Service, or recover the ledger with your recorded passphrase",
             ),
@@ -141,6 +147,17 @@ impl Error for KeychainError {
 impl From<io::Error> for KeychainError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<keyring::Error> for KeychainError {
+    fn from(error: keyring::Error) -> Self {
+        // Never retain backend text: malformed credential errors can contain secrets.
+        match error {
+            keyring::Error::NoStorageAccess(_) => Self::Locked,
+            keyring::Error::NoDefaultStore | keyring::Error::PlatformFailure(_) => Self::NoProvider,
+            _ => Self::Unavailable,
+        }
     }
 }
 
@@ -187,7 +204,7 @@ pub fn canonical_ledger(ledger: &Path) -> Result<PathBuf, KeychainError> {
 fn entry(ledger: &Path) -> Result<keyring::Entry, KeychainError> {
     let path = canonical_ledger(ledger)?;
     let account = path.to_str().ok_or(KeychainError::InvalidLedgerPath)?;
-    keyring::Entry::new(SERVICE, account).map_err(|_| KeychainError::Unavailable)
+    keyring::Entry::new(SERVICE, account).map_err(KeychainError::from)
 }
 
 fn validate_passphrase(passphrase: &SecretString) -> Result<(), KeychainError> {
@@ -203,7 +220,7 @@ impl SecretStore for OsKeychain {
         validate_passphrase(passphrase)?;
         entry(ledger)?
             .set_password(passphrase.expose_secret())
-            .map_err(|_| KeychainError::Unavailable)
+            .map_err(KeychainError::from)
     }
 
     fn load(&self, ledger: &Path) -> Result<Option<SecretString>, KeychainError> {
@@ -223,7 +240,7 @@ fn decode_native_password(
             Ok(Some(password))
         }
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err(KeychainError::Unavailable),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -473,6 +490,34 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(target)?, "must-survive");
         Ok(())
+    }
+
+    #[test]
+    fn native_failures_are_typed_and_backend_secrets_are_discarded() {
+        let locked = KeychainError::from(keyring::Error::NoStorageAccess(Box::new(
+            io::Error::other("private-secret"),
+        )));
+        assert!(matches!(locked, KeychainError::Locked));
+        let setup = crate::setup::SetupError::from(locked);
+        assert!(matches!(
+            setup,
+            crate::setup::SetupError::KeyringLocked { .. }
+        ));
+        assert!(setup.to_string().contains("Sign out"));
+        assert!(!format!("{setup:?}").contains("private-secret"));
+        for error in [
+            keyring::Error::NoDefaultStore,
+            keyring::Error::PlatformFailure(Box::new(io::Error::other("private-secret"))),
+        ] {
+            let setup = crate::setup::SetupError::from(KeychainError::from(error));
+            assert!(matches!(
+                setup,
+                crate::setup::SetupError::NoKeyringProvider { .. }
+            ));
+            assert!(setup.to_string().contains("gnome-keyring"));
+            assert!(setup.technical_detail().is_some());
+            assert!(!format!("{setup:?}").contains("private-secret"));
+        }
     }
 
     #[test]

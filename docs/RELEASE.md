@@ -53,7 +53,12 @@ download. Use the universal Mac asset for Apple Silicon and Intel and
 `bk-VERSION-x86_64-pc-windows-msvc.mcpb` for Windows x64. Linux has separate
 x64 and arm64 bundles for compatible Claude Desktop builds with a systemd user
 session, glibc 2.35 or newer, and a native Secret Service. Confirm Linux client
-availability before offering the Linux download. Windows ARM64 has no native
+availability before offering the Linux download. These Linux `.mcpb` files target
+Claude Desktop’s Linux beta on Ubuntu 22.04+ and Debian 12+ (x64 or arm64).
+Install by opening the file, dragging it onto the Claude window, or choosing
+Settings > Extensions > Advanced settings > Install Extension…. The owner
+performs the manual end-to-end Linux check; packaging tests use temporary ELF
+fixtures to verify the manifest, architecture, and `mcp extension` arguments. Windows ARM64 has no native
 bundle.
 
 Resolve the newest signed release with the universal Mac bundle and the

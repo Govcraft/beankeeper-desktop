@@ -130,6 +130,10 @@ pub enum SetupError {
     Ledger(CliError),
     /// An OS credential operation failed.
     Keychain(keychain::KeychainError),
+    /// The password safe refused access.
+    KeyringLocked { detail: &'static str },
+    /// No native password safe provider could be reached.
+    NoKeyringProvider { detail: &'static str },
     /// Existing configuration cannot be safely merged.
     Config(config::ConfigError),
     /// Inputs or existing state need user attention.
@@ -144,9 +148,21 @@ impl fmt::Display for SetupError {
             Self::Io(error) => write!(f, "setup file operation failed: {error}"),
             Self::Ledger(error) => write!(f, "{error}"),
             Self::Keychain(error) => write!(f, "{error}"),
+            Self::KeyringLocked { .. } => write!(f, "{}", keychain::KeychainError::Locked),
+            Self::NoKeyringProvider { .. } => write!(f, "{}", keychain::KeychainError::NoProvider),
             Self::Config(error) => write!(f, "{error}"),
             Self::Invalid(message) => f.write_str(message),
             Self::Desktop(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl SetupError {
+    /// Sanitized technical classification for agent diagnostics.
+    #[must_use]
+    pub const fn technical_detail(&self) -> Option<&'static str> {
+        match self {
+            Self::KeyringLocked { detail } | Self::NoKeyringProvider { detail } => Some(detail),
+            _ => None,
         }
     }
 }
@@ -163,7 +179,15 @@ impl From<CliError> for SetupError {
 }
 impl From<keychain::KeychainError> for SetupError {
     fn from(value: keychain::KeychainError) -> Self {
-        Self::Keychain(value)
+        match value {
+            keychain::KeychainError::Locked => Self::KeyringLocked {
+                detail: "keyring::Error::NoStorageAccess",
+            },
+            keychain::KeychainError::NoProvider => Self::NoKeyringProvider {
+                detail: "Native credential provider is absent or unreachable (NoDefaultStore or PlatformFailure).",
+            },
+            other => Self::Keychain(other),
+        }
     }
 }
 impl From<config::ConfigError> for SetupError {
@@ -515,7 +539,11 @@ fn store_ledger_secret(
     let automatic_file = match (store.store(&cli.db, &secret), storage, mode) {
         (Ok(()), _, _) => None,
         (
-            Err(keychain::KeychainError::Unavailable),
+            Err(
+                keychain::KeychainError::Unavailable
+                | keychain::KeychainError::Locked
+                | keychain::KeychainError::NoProvider,
+            ),
             Some(ServiceSecretStorage::NativeWithFileFallback),
             SetupMode::Fresh,
         ) => {
@@ -523,15 +551,6 @@ fn store_ledger_secret(
             FileSecretStore::new(fallback.clone()).store(&cli.db, &secret)?;
             eprintln!("OS secret store unavailable; using a private credential file.");
             Some(fallback)
-        }
-        (
-            Err(keychain::KeychainError::Unavailable),
-            Some(ServiceSecretStorage::NativeRequired),
-            SetupMode::Fresh,
-        ) => {
-            return Err(SetupError::Invalid(
-                "extension setup requires the OS keychain; unlock your login keychain or Secret Service and retry",
-            ));
         }
         (Err(error), _, _) => return Err(error.into()),
     };
@@ -1118,17 +1137,23 @@ impl Drop for PendingServer {
 mod tests {
     use super::*;
 
-    struct UnavailableStore;
+    struct UnavailableStore(keychain::KeychainError);
     impl SecretStore for UnavailableStore {
         fn store(
             &self,
             _ledger: &Path,
             _secret: &SecretString,
         ) -> Result<(), keychain::KeychainError> {
-            Err(keychain::KeychainError::Unavailable)
+            Err(match self.0 {
+                keychain::KeychainError::Locked => keychain::KeychainError::Locked,
+                _ => keychain::KeychainError::NoProvider,
+            })
         }
         fn load(&self, _ledger: &Path) -> Result<Option<SecretString>, keychain::KeychainError> {
-            Err(keychain::KeychainError::Unavailable)
+            Err(match self.0 {
+                keychain::KeychainError::Locked => keychain::KeychainError::Locked,
+                _ => keychain::KeychainError::NoProvider,
+            })
         }
     }
 
@@ -1136,24 +1161,31 @@ mod tests {
     fn extension_setup_with_unavailable_keychain_creates_no_ledger_or_credential()
     -> Result<(), Box<dyn Error>> {
         use clap::Parser;
-        let root = tempfile::tempdir()?;
-        keychain::restrict_directory(root.path())?;
-        let books = root.path().join("books.db");
-        let mut cli =
-            Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
-        let result = run_service_with_native_store(
-            &mut cli,
-            root.path(),
-            "127.0.0.1:8750".parse()?,
-            ClientRegistration::Skip,
-            ServiceSecretStorage::NativeRequired,
-            &UnavailableStore,
-        );
-        assert!(matches!(
-            result,
-            Err(SetupError::Invalid(message)) if message.contains("unlock your login keychain or Secret Service")
-        ));
-        assert!(fs::read_dir(root.path())?.next().is_none());
+        for failure in [
+            keychain::KeychainError::Locked,
+            keychain::KeychainError::NoProvider,
+        ] {
+            let locked = matches!(failure, keychain::KeychainError::Locked);
+            let root = tempfile::tempdir()?;
+            keychain::restrict_directory(root.path())?;
+            let books = root.path().join("books.db");
+            let mut cli =
+                Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;
+            let result = run_service_with_native_store(
+                &mut cli,
+                root.path(),
+                "127.0.0.1:8750".parse()?,
+                ClientRegistration::Skip,
+                ServiceSecretStorage::NativeRequired,
+                &UnavailableStore(failure),
+            );
+            if locked {
+                assert!(matches!(result, Err(SetupError::KeyringLocked { .. })));
+            } else {
+                assert!(matches!(result, Err(SetupError::NoKeyringProvider { .. })));
+            }
+            assert!(fs::read_dir(root.path())?.next().is_none());
+        }
         Ok(())
     }
 
@@ -1175,7 +1207,7 @@ mod tests {
             "127.0.0.1:8750".parse()?,
             ClientRegistration::Skip,
             ServiceSecretStorage::NativeRequired,
-            &UnavailableStore,
+            &UnavailableStore(keychain::KeychainError::NoProvider),
         );
         assert!(matches!(
             result,
@@ -1205,7 +1237,7 @@ mod tests {
                 previous_executable: &std::env::current_exe()?,
             },
             ServiceSecretStorage::NativeWithFileFallback,
-            &UnavailableStore,
+            &UnavailableStore(keychain::KeychainError::NoProvider),
         )?;
         let marker: serde_json::Value =
             serde_json::from_slice(&fs::read(books.with_extension("desktop.json"))?)?;
@@ -1242,7 +1274,7 @@ mod tests {
             "127.0.0.1:8750".parse()?,
             ClientRegistration::Skip,
             ServiceSecretStorage::NativeRequired,
-            &UnavailableStore,
+            &UnavailableStore(keychain::KeychainError::NoProvider),
         )?;
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(
