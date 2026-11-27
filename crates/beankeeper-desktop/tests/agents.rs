@@ -371,3 +371,86 @@ fn enabled_claude_extension_and_managed_code_connections_report_overlap()
     }
     Ok(())
 }
+
+#[test]
+fn connect_plan_uses_real_adapter_destinations_without_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    for client in [".claude", ".codex", ".gemini", ".cursor", "fixture-grok"] {
+        fs::create_dir(home.path().join(client))?;
+    }
+    let before = fs::read_dir(home.path())?.count();
+    let (ok, output) = bk(
+        home.path(),
+        &["agents", "connect", "--all", "--plan", "--json"],
+    )?;
+    assert!(ok, "{output}");
+    let directories = output["data"]["plan"]["directories"]
+        .as_array()
+        .ok_or("missing folders")?;
+    for expected in [
+        ".codex",
+        ".agents/skills/beankeeper-desktop",
+        ".claude/skills/beankeeper-desktop",
+        ".gemini",
+        "fixture-grok",
+    ] {
+        assert!(directories.iter().any(|entry| entry["path"] == home.path().join(expected).to_string_lossy().as_ref()), "missing {expected}: {output}");
+    }
+    assert!(
+        directories
+            .iter()
+            .any(|entry| entry["path"] == home.path().to_string_lossy().as_ref())
+    );
+    for entry in directories {
+        assert!(Path::new(entry["parent"].as_str().ok_or("missing parent")?).is_dir());
+        assert!(
+            !entry["path"]
+                .as_str()
+                .ok_or("missing path")?
+                .ends_with("SKILL.md")
+        );
+    }
+    assert_eq!(before, fs::read_dir(home.path())?.count());
+    assert!(!home.path().join("state").exists());
+    assert!(!home.path().join(".codex/config.toml").exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn connect_denied_folder_reports_resume_then_retry_is_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().as_raw() == 0 {
+        return Ok(());
+    }
+    let home = tempfile::tempdir()?;
+    let blocked = home.path().join("blocked");
+    fs::create_dir(&blocked)?;
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500))?;
+    let command = || {
+        let mut command = bk_command(home.path());
+        command.env("CODEX_HOME", blocked.join("codex"));
+        command.args(["agents", "connect", "codex", "--json"]);
+        command
+    };
+    let first = command().output()?;
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;
+    let output: Value = serde_json::from_slice(&first.stdout)?;
+    assert!(!first.status.success());
+    let error = &output["data"]["agents"][0]["error"];
+    assert_eq!(error["code"], "AGENT_CONFIG_WRITE_DENIED");
+    assert_eq!(
+        error["path"],
+        blocked.join("codex").to_string_lossy().as_ref()
+    );
+    assert_eq!(error["parent"], blocked.to_string_lossy().as_ref());
+    assert_eq!(error["resume"], "bk agents connect codex --json");
+    assert_eq!(output["error"], *error);
+    assert!(command().output()?.status.success());
+    let config = fs::read(blocked.join("codex/config.toml"))?;
+    assert!(command().output()?.status.success());
+    assert_eq!(config, fs::read(blocked.join("codex/config.toml"))?);
+    Ok(())
+}

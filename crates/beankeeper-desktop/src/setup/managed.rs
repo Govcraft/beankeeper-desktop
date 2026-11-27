@@ -63,8 +63,7 @@ fn load(books: &Path) -> Result<Option<State>, SetupError> {
 }
 
 fn save(books: &Path, state: &State) -> Result<(), SetupError> {
-    private_json(&marker(books), state)
-        .map_err(|_| SetupError::Invalid("cannot save private agent access state"))
+    private_json(&marker(books), state).map_err(SetupError::service_file)
 }
 
 pub(super) fn record(books: &Path, token: MagicTypeId, origin: Origin) -> Result<(), SetupError> {
@@ -236,7 +235,7 @@ pub(crate) fn reconcile(db: &Db, books: &Path, change: AccessChange) -> Result<(
         return Err(error);
     }
     private_write(&token_file, replacement.token().expose_secret().as_bytes())
-        .map_err(|_| SetupError::Invalid("cannot replace the private managed agent credential"))?;
+        .map_err(SetupError::service_file)?;
     revoke(db, &actor, &old)?;
     record(books, replacement.token_jti, origin)
 }

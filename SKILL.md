@@ -1084,3 +1084,5 @@ bookkeeping, repeat the notice on each call, or ask the owner to use a terminal
 or handle tokens. Offer the returned release notes link only as optional detail.
 When the owner asks for a fresh check, use the separate `update_check` tool
 (`bk update-check` on the CLI); its existing daily retry limit still applies.
+
+For sandboxed setup, use `bk service install --plan --json` and `bk agents connect --all --plan --json` (MCP: `service_install` and `agents_connect` with `plan: true`), request the returned folders, never single files, and on `*_WRITE_DENIED` grant `parent` and re-run `resume` without stopping.

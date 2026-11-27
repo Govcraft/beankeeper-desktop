@@ -3,7 +3,11 @@
 ## [Unreleased]
 
 - Point the README at the current install pages and correct public license and contribution facts.
+- Keep Linux service installation working with spaces or quotes in log folders by falling back to the system journal and reporting the destination through CLI/MCP.
+
 - Launch Claude directly for Linux extension installation and ship a Claude Code/local Cowork plugin with prepared marketplace content.
+
+- Give sandboxed agents read-only folder plans and resumable write-denied errors through CLI/MCP, prefer the Linux session bus, and repair systemd log redirects.
 
 - Fetch and verify a temporary cosign automatically when signed installation needs it.
 - Explain locked or missing keyrings in plain words, expose safe agent diagnostics, and verify Linux extension bundle architecture.

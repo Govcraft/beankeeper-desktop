@@ -139,8 +139,9 @@ pub fn prepare_service_configs(
     }
     let command = text(executable)?;
     let previous = text(previous)?;
+    let [desktop, claude, codex] = service_config_paths(home);
     let mut files = Vec::new();
-    for path in [desktop_path(home), home.join(".claude.json")] {
+    for path in [desktop, claude] {
         let mut contents = read_optional(&path)?;
         for (name, args) in service_entries() {
             let mut document: Value = if contents.trim().is_empty() {
@@ -164,7 +165,7 @@ pub fn prepare_service_configs(
         }
         files.push((path, contents.into_bytes()));
     }
-    let path = home.join(".codex/config.toml");
+    let path = codex;
     let mut contents = read_optional(&path)?;
     for (name, args) in service_entries() {
         let mut document: DocumentMut = contents
@@ -182,6 +183,14 @@ pub fn prepare_service_configs(
     }
     files.push((path, contents.into_bytes()));
     Ok(ConfigPlan(files))
+}
+
+pub(crate) fn service_config_paths(home: &Path) -> [PathBuf; 3] {
+    [
+        desktop_path(home),
+        home.join(".claude.json"),
+        home.join(".codex/config.toml"),
+    ]
 }
 
 fn service_entries() -> [(&'static str, Vec<String>); 2] {

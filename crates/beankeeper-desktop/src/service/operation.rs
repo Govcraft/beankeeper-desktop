@@ -14,15 +14,18 @@ pub(crate) const ACCESS_TOOL: &str = "access_set";
 pub(crate) const OPEN_TOOL: &str = "service_open";
 
 /// Options shared by the CLI and the `service_install` tool.
-#[derive(Args, Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Args, Clone, Copy, Debug, Default, Deserialize, serde::Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstallOptions {
     /// Use a private passphrase file instead of the native secret store for new books.
     #[arg(long)]
-    file_store: bool,
+    pub(crate) file_store: bool,
     /// Leave all MCP client configurations unchanged.
     #[arg(long)]
-    no_agents: bool,
+    pub(crate) no_agents: bool,
+    /// List folder grants without changing any files or starting hosting.
+    #[arg(long)]
+    pub(crate) plan: bool,
 }
 
 impl InstallOptions {
@@ -46,7 +49,7 @@ impl InstallOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum ServiceOperation {
+pub(crate) enum ServiceOperation {
     Install(InstallOptions),
     Uninstall,
     Start,

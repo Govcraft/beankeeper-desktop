@@ -14,7 +14,7 @@ const CLAUDE_CONFIG: &str = "claude_desktop_config.json";
 const CLAUDE_REGISTRY: &str = "extensions-installations.json";
 const CLAUDE_PACKAGE_FAMILY: &str = "Claude_pzs8sxrjxfjjc";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Agent {
     ClaudeDesktop,
@@ -63,6 +63,18 @@ pub(super) enum ExtensionRegistration {
 }
 
 impl Adapter {
+    pub(super) fn directories(
+        &self,
+    ) -> impl Iterator<Item = std::io::Result<crate::folders::Directory>> {
+        std::iter::once(&self.config)
+            .chain(self.skill.iter())
+            .map(|path| {
+                crate::folders::Directory::try_from(
+                    path.parent().unwrap_or(std::path::Path::new(".")),
+                )
+            })
+    }
+
     pub fn installed(&self) -> bool {
         self.app_dir.is_dir()
             || self.config.is_file()
