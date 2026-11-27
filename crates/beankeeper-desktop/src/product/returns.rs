@@ -322,7 +322,7 @@ impl Outcome {
                 "The 60-day refund window has closed; your license is unchanged and still active."
             }
             Self::ReturnNotApplicable => {
-                "This complimentary license has no refund or in-app return. Contact support@beankeeper.app. Your license is unchanged."
+                "This license has no refund or in-app return. Contact support@beankeeper.app. Your license is unchanged."
             }
             Self::InvalidLicenseProof => {
                 "Your license or return request could not be verified. Your local license was kept. Contact support@beankeeper.app."

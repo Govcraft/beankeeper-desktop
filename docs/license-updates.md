@@ -154,8 +154,7 @@ receipt ID in its local license event log. Keep the receipt for support. A
 automatically; `submitted` means the seller accepted it. A retried committed
 challenge retrieves the same receipt and local removal is idempotent.
 
-A closed window leaves your license unchanged and active. Complimentary licenses
-have no refund or in-app return; contact support@beankeeper.app. An unauthenticated
+A closed window leaves your license unchanged and active. If a return reports that this license has no refund or in-app return, contact support@beankeeper.app. An unauthenticated
 file or challenge cannot be returned. A revoked or replaced license is reported
 as such. If the original seller cannot process the refund, the license stays
 active: try again later or contact support@beankeeper.app. Every failed request
