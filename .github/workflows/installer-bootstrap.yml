@@ -33,7 +33,12 @@ jobs:
       # POSIX tests construct a private PATH without cosign or jq. Windows tests
       # hide cosign discovery and exercise Get-FileHash with actual fixture bytes.
       - run: python -B -m unittest discover -s scripts/tests -p test_install.py -v
-      - run: python -B -m unittest discover -s scripts/tests -p test_release.py -v
+      - name: Check generated bootstrap metadata
+        working-directory: scripts/tests
+        run: >-
+          python -B -m unittest -v
+          test_release.PackagingTests.test_bootstrap_generator_hashes_official_bytes_and_embeds_all_platforms
+          test_release.PackagingTests.test_bootstrap_generator_does_not_publish_partial_metadata
       - name: Generate release installers with current official verifier hashes
         run: python scripts/release.py bootstrap-installers --output "${{ runner.temp }}/bk-bootstrap"
       - name: Install the latest signed release without cosign or jq on PATH

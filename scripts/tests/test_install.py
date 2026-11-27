@@ -616,7 +616,7 @@ class WindowsBootstrapTests(unittest.TestCase):
             test = work / "test.ps1"
             test.write_text(r'''
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'install.ps1')
+. (Join-Path $PSScriptRoot 'install.ps1') -InstallDir $PSScriptRoot
 function Get-Command { return $null }
 function Get-ReleaseFile($Url, $Destination) {
     if ($Url -cne 'https://github.com/sigstore/cosign/releases/download/v3.0.0/cosign-windows-amd64.exe') {
