@@ -475,6 +475,14 @@ Release candidates are free to use without a license. You can still open, query,
 export, back up, and restore your books in read-only mode, and use your recovery
 kit. Your encrypted books stay on your computer.
 
+Setup automatically starts an email-free 30-day trial when the books have no
+active license. Ask your agent to retry with `license_start_trial` if the network
+was unavailable; the CLI equivalent is `bk license trial`. No token or email
+prompt is needed. Status reports the trial expiry and days remaining. After
+expiry, ordinary writes pause while reads, export, backup, restore, recovery and
+undo remain available. Activating a paid license removes the local trial.
+[Trial behavior and status](docs/license-updates.md#start-a-free-trial)
+
 Ask your agent to check or activate your Desktop license. Give it the saved
 license file or the claim code you received. It also accepts signed license text
 if you have it in chat. The agent can tell you whether these books are writable
@@ -493,7 +501,7 @@ leaving books and recovery information intact. The result reports whether the
 selected books remain writable. In official stable builds, books without another
 active license become read-only. Undo by asking the agent to activate the same
 license again, provided it has not been revoked. License status includes each
-license's typed `standing` (`valid` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
+license's typed `standing` (`valid`, `expired` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
 Revocation status reflects the signed list bundled with the installed release.
 
 To request a return and refund, ask your agent or run `bk license return`.

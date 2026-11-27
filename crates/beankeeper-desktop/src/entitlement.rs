@@ -35,6 +35,7 @@ impl EnforcementPolicy {
 pub(crate) enum Entitlement {
     Active(ActiveLicense),
     Missing,
+    Expired,
     Revoked(LicenseId),
     Invalid(ProductError),
     WrongMajor(MajorVersion),
@@ -50,6 +51,7 @@ impl fmt::Display for Entitlement {
                     license.id()
                 );
             }
+            Self::Expired => return write!(f, "{}", LicenseError::TrialExpired),
             Self::Missing => f.write_str(
                 "These books are read-only because they have no active Desktop license.",
             )?,
@@ -161,7 +163,7 @@ impl LedgerAccess {
         if let Some(files) = &self.test_files {
             return self
                 .evaluate(&files.state, major, || {
-                    let keys = license::TrustedKeys::from_json(files.keys)?;
+                    let keys = license::TrustedKeys::from_json(&files.keys)?;
                     let revocations =
                         license::VerifiedRevocations::verify(files.revocations, &keys)?;
                     Ok((keys, revocations))
@@ -234,6 +236,7 @@ fn resolve(
         refusal = match load(&id) {
             Ok(Some(license)) if license.id() == &id => match (license, major).try_into() {
                 Ok(active) => return Entitlement::Active(active),
+                Err(LicenseError::TrialExpired) => Entitlement::Expired,
                 Err(LicenseError::WrongMajor(major)) => Entitlement::WrongMajor(major),
                 Err(error) => Entitlement::Invalid(error.into()),
             },
@@ -273,6 +276,10 @@ impl TryFrom<&[u8]> for LedgerBinding {
 pub(crate) struct Bindings<'a>(pub(crate) &'a Path);
 
 impl Bindings<'_> {
+    pub(crate) fn allows(&self, id: &LicenseId, books: &BooksPath) -> Result<bool, ProductError> {
+        Ok(Self::read(&self.path(id))?.is_none_or(|binding| binding == LedgerBinding::from(books)))
+    }
+
     pub(crate) fn remove(&self, id: &LicenseId) -> io::Result<bool> {
         crate::private_file::remove_file(&self.path(id))
     }
@@ -343,7 +350,7 @@ impl Bindings<'_> {
 #[derive(Clone)]
 struct TestFiles {
     state: PathBuf,
-    keys: &'static [u8],
+    keys: Arc<[u8]>,
     revocations: &'static [u8],
 }
 

@@ -708,6 +708,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
             "update_status",
             "update_check",
             "license_status",
+            "license_start_trial",
             "license_activate",
             "license_return",
             "license_remove",
@@ -3022,5 +3023,232 @@ fn cached_update_status_matches_cli_on_local_mcp_channels() -> TestResult {
         "DESKTOP_UPDATE_CHECK_UNAVAILABLE"
     );
     assert_eq!(fs::read(&path)?, b"broken cache");
+    Ok(())
+}
+
+fn sign_trial_test_claims(claims: &Value) -> Result<String, Box<dyn std::error::Error>> {
+    use ed25519_dalek::SigningKey;
+    use rusty_paseto::core::{
+        Footer, ImplicitAssertion, Key, Paseto, PasetoAsymmetricPrivateKey, Payload, Public, V4,
+    };
+    let key = Key::from(SigningKey::from_bytes(&[42; 32]).to_keypair_bytes());
+    let payload = claims.to_string();
+    Ok(Paseto::<V4, Public>::default()
+        .set_payload(Payload::from(payload.as_str()))
+        .set_footer(Footer::from(r#"{"kid":"trial-test"}"#))
+        .set_implicit_assertion(ImplicitAssertion::from("beankeeper-desktop"))
+        .try_sign(&PasetoAsymmetricPrivateKey::from(&key))?)
+}
+
+fn serve_trial_test_mock(
+    listener: std::net::TcpListener,
+    seen: mpsc::Sender<Value>,
+    stopped: tokio::sync::oneshot::Receiver<()>,
+    signed: String,
+) -> std::io::Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let app = axum::Router::new().route(
+                "/api/v1/licenses/trial",
+                axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                    let signed = signed.clone();
+                    let seen = seen.clone();
+                    async move {
+                        let _ = seen.send(body);
+                        signed
+                    }
+                }),
+            );
+            axum::serve(tokio::net::TcpListener::from_std(listener)?, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+        })
+}
+
+fn assert_trial_return_expiry_and_upgrade(
+    command: &impl Fn() -> std::process::Command,
+    pipe: &mut McpPipe,
+    root: &std::path::Path,
+    claims: Value,
+    report: &Value,
+    machine: &str,
+) -> TestResult {
+    use std::fs;
+    let id = report["licenses"][0]["license_id"]
+        .as_str()
+        .ok_or("license id")?;
+    let returned = pipe.tool("license_return", &json!({}))?;
+    assert_eq!(
+        returned["structuredContent"]["code"],
+        "trial_not_returnable"
+    );
+    assert!(
+        returned["structuredContent"]["message"]
+            .as_str()
+            .ok_or("return message")?
+            .contains("trial")
+    );
+    let cli_return = command().args(["--json", "license", "return"]).output()?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli_return.stdout)?["code"],
+        "trial_not_returnable"
+    );
+
+    let service = command().args(["service", "status", "--json"]).output()?;
+    assert!(service.status.success());
+    let service: Value = serde_json::from_slice(&service.stdout)?;
+    assert_eq!(service["license"]["licenses"], report["licenses"]);
+
+    let mut expired_claims = claims.clone();
+    expired_claims["iat"] = json!("2020-01-01T00:00:00Z");
+    expired_claims["exp"] = json!("2020-01-31T00:00:00Z");
+    let expired = sign_trial_test_claims(&expired_claims)?;
+    fs::write(
+        root.join("state/licenses").join(format!("{id}.license")),
+        &expired,
+    )?;
+    let status = command().args(["--json", "license", "status"]).output()?;
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status["status"], "expired");
+    assert_eq!(status["licenses"][0]["days_remaining"], 0);
+    assert_eq!(status["licenses"][0]["standing"], "expired");
+    assert!(
+        !status["message"]
+            .as_str()
+            .ok_or("expired message")?
+            .contains("active and valid")
+    );
+    let rejected = pipe.tool("license_activate", &json!({"license": expired}))?;
+    assert_eq!(rejected["structuredContent"]["code"], "TRIAL_EXPIRED");
+
+    let mut paid_claims = claims;
+    paid_claims["jti"] = json!("lic_01h455vb4pex5vsknk084sn02r");
+    paid_claims["storefront"] = json!("direct");
+    paid_claims
+        .as_object_mut()
+        .ok_or("claims object")?
+        .remove("exp");
+    let paid = sign_trial_test_claims(&paid_claims)?;
+    let upgraded = pipe.tool("license_activate", &json!({"license": paid}))?;
+    assert_eq!(upgraded["structuredContent"]["licenses"][0]["kind"], "paid");
+    assert!(upgraded["structuredContent"]["licenses"][0]["days_remaining"].is_null());
+    assert!(
+        !root
+            .join("state/licenses")
+            .join(format!("{id}.license"))
+            .exists()
+    );
+    assert!(!root.join("state/license-bindings").join(id).exists());
+    assert_eq!(fs::read_dir(root.join("state/licenses"))?.count(), 1);
+    assert_eq!(
+        fs::read_to_string(root.join("state/machine-token"))?,
+        machine
+    );
+    assert_eq!(fs::metadata(root.join("beankeeper.db"))?.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn trial_cli_and_mcp_share_activation_and_private_machine_identity() -> TestResult {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::SigningKey;
+    use std::fs;
+
+    let root = tempfile::tempdir()?;
+    let now = chrono::Utc::now();
+    let claims = json!({
+        "jti": "lic_01h455vb4pex5vsknk084sn02q",
+        "iat": now.to_rfc3339(),
+        "product": "beankeeper-desktop",
+        "purchaser_ref": "trial-test-machine",
+        "storefront": "trial",
+        "eligible_major": 1,
+        "exp": (now + chrono::TimeDelta::days(30)).to_rfc3339()
+    });
+    let signing = SigningKey::from_bytes(&[42; 32]);
+    let token = sign_trial_test_claims(&claims)?;
+    let keys = root.path().join("issuer.json");
+    fs::write(
+        &keys,
+        serde_json::to_vec(&json!({
+            "trial-test": URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes())
+        }))?,
+    )?;
+    fs::File::create(root.path().join("beankeeper.db"))?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let (seen, received) = mpsc::channel();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let signed = token.clone();
+    let server = std::thread::spawn(move || serve_trial_test_mock(listener, seen, stopped, signed));
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .current_dir(root.path())
+            .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys)
+            .env(
+                "BEANKEEPER_LICENSE_SERVICE_URL",
+                format!("http://{address}"),
+            );
+        command
+    };
+    let started = command().args(["--json", "license", "trial"]).output()?;
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let report: Value = serde_json::from_slice(&started.stdout)?;
+    assert_eq!(report["licenses"][0]["kind"], "trial");
+    assert_eq!(report["licenses"][0]["days_remaining"], 30);
+    assert!(!String::from_utf8_lossy(&started.stdout).contains(&token));
+    let first = received.recv_timeout(Duration::from_secs(5))?;
+    let machine = first["machine_token"]
+        .as_str()
+        .ok_or("missing machine token")?;
+    assert_eq!(first.as_object().ok_or("request object")?.len(), 1);
+    assert_eq!(
+        fs::read_to_string(root.path().join("state/machine-token"))?,
+        machine
+    );
+
+    let mut pipe = McpPipe::start(command().args(["service", "mcp"]))?;
+    let retried = pipe.tool("license_start_trial", &json!({}))?;
+    assert_eq!(retried["structuredContent"], report);
+    assert!(!retried.to_string().contains(machine));
+    assert!(received.try_recv().is_err());
+    let status = command().args(["--json", "license", "status"]).output()?;
+    assert_eq!(serde_json::from_slice::<Value>(&status.stdout)?, report);
+
+    let id = report["licenses"][0]["license_id"]
+        .as_str()
+        .ok_or("license id")?;
+    assert!(
+        command()
+            .args(["license", "remove", id])
+            .output()?
+            .status
+            .success()
+    );
+    let reactivated = pipe.tool("license_start_trial", &json!({}))?;
+    assert_eq!(reactivated["structuredContent"], report);
+    let second = received.recv_timeout(Duration::from_secs(5))?;
+    assert_eq!(first, second);
+    assert!(!reactivated.to_string().contains(&token));
+    assert_trial_return_expiry_and_upgrade(
+        &command,
+        &mut pipe,
+        root.path(),
+        claims,
+        &report,
+        machine,
+    )?;
+    let _ = stop.send(());
+    server.join().map_err(|_| "trial mock panicked")??;
     Ok(())
 }

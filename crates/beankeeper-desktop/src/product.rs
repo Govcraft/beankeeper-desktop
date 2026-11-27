@@ -28,7 +28,7 @@ pub(crate) mod returns;
 
 pub use activation::Storefront;
 use activation::{ActivationInputs, ActivationSource};
-use report::{LicenseInventory, LicenseReport};
+use report::{LicenseInventory, LicenseReport, TrialNotice};
 
 /// Product command errors, with secret-bearing service diagnostics discarded.
 #[derive(Debug)]
@@ -55,10 +55,16 @@ pub enum ProductError {
     InvalidLicenseInput,
     InvalidClaimCode,
     Recovery,
+    TrialAlreadyUsed,
+    TrialRateLimited(Option<u64>),
+    TrialUnavailable,
 }
 impl fmt::Display for ProductError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TrialAlreadyUsed => write!(f, "This computer's trial has ended. Your books remain readable and exportable. Buy a $79 license at https://beankeeper.app/#pricing and ask your agent to activate it."),
+            Self::TrialRateLimited(retry) => write!(f, "The trial service is busy. Retry later{}.", retry.map(|seconds| format!(" in {seconds} seconds")).unwrap_or_default()),
+            Self::TrialUnavailable => f.write_str("Desktop could not reach the trial service. Your books can still be created, read and exported. Ask your agent to retry later; ordinary writes wait for a license."),
             Self::License(e) => write!(f, "{e}"),
             Self::Update(e) => write!(f, "{e}"),
             Self::Io(_) => f.write_str("cannot access Desktop license configuration"),
@@ -147,6 +153,10 @@ pub struct LicenseOptions {
 /// Local license commands, including offline activation and online redemption.
 #[derive(Subcommand)]
 pub enum LicenseCommand {
+    /// Start this computer's email-free 30-day trial.
+    Trial,
+    /// Show local license status.
+    Status,
     /// Remove a license from this computer without a return or refund.
     Remove {
         /// Installed license to remove.
@@ -300,6 +310,7 @@ pub fn license_status() -> Result<String, ProductError> {
 }
 
 enum LicenseRequest {
+    Trial,
     Status,
     Activate(ActivationSource),
 }
@@ -311,14 +322,21 @@ impl LicenseRequest {
     }
 
     fn execute(self, books: Option<&BooksPath>) -> Result<LicenseReport, ProductError> {
-        let state = state_dir()?;
+        self.execute_at(books, &state_dir()?)
+    }
+
+    fn execute_at(
+        self,
+        books: Option<&BooksPath>,
+        state: &Path,
+    ) -> Result<LicenseReport, ProductError> {
         match self {
             Self::Status => {
-                let snapshot = ActivationSnapshot::load(&state);
+                let snapshot = ActivationSnapshot::load(state);
                 let access = books.map(|books| {
                     let access = LedgerAccess::from(books.clone());
-                    access.status_from(&state, |id| match &snapshot {
-                        Ok(snapshot) => snapshot.for_id(&state, id),
+                    access.status_from(state, |id| match &snapshot {
+                        Ok(snapshot) => snapshot.for_id(state, id),
                         Err(ProductError::License(error)) => Err(Arc::clone(error)),
                         Err(_) => Err(Arc::new(LicenseError::Io(io::Error::other(
                             "Desktop activation storage is unavailable",
@@ -326,20 +344,70 @@ impl LicenseRequest {
                     })
                 });
                 let inventory = snapshot.and_then(|snapshot| snapshot.installed().map(Into::into));
-                Ok(LicenseReport { inventory, access })
+                let trial_notice = match crate::private_file::PrivateFile::open(
+                    &state.join("trial-notice.json"),
+                ) {
+                    Ok(file) => file.read_bytes(4096).ok().and_then(|bytes| {
+                        use secrecy::ExposeSecret;
+                        serde_json::from_slice(bytes.expose_secret()).ok()
+                    }),
+                    Err(_) => None,
+                };
+                Ok(LicenseReport {
+                    inventory,
+                    access,
+                    trial_notice,
+                })
+            }
+            Self::Trial => {
+                let snapshot = ActivationSnapshot::load(state)?;
+                let installed = match snapshot.installed() {
+                    Ok(installed) => installed,
+                    Err(ProductError::License(_)) => Activations::default(),
+                    Err(error) => return Err(error),
+                };
+                for license in installed.licenses {
+                    let major = ENFORCEMENT.activation_major(&license);
+                    if license.entitlement().is_expired(chrono::Utc::now())
+                        || license.eligible_major() != major
+                    {
+                        continue;
+                    }
+                    if let Some(books) = books
+                        && !Bindings(state).allows(license.id(), books)?
+                    {
+                        if matches!(license.entitlement(), license::Entitlement::Trial { .. }) {
+                            return Err(ProductError::LicenseBoundElsewhere);
+                        }
+                        continue;
+                    }
+                    let active = ActiveLicense::try_from((license, major))?;
+                    if let Some(books) = books {
+                        Bindings(state).bind(&active, books)?;
+                    }
+                    return Self::Status.execute_at(books, state);
+                }
+                Self::Activate(ActivationSource::trial()).execute_at(books, state)
             }
             Self::Activate(source) => {
                 // Establish trust and the target before spending a potentially single-use claim.
                 let keys = trusted_keys()?;
                 let revocations = license::release_revocations(&keys)?;
-                let verified = source.verify(&keys, &state)?;
+                let verified = source.verify(&keys, state)?;
                 let license = revocations.admit(verified)?;
                 let major = ENFORCEMENT.activation_major(&license);
                 let active = ActiveLicense::try_from((license, major))?;
                 if let Some(books) = books {
-                    Bindings(&state).bind(&active, books)?;
+                    Bindings(state).bind(&active, books)?;
                 }
-                active.persist(&state)?;
+                active.persist(state)?;
+                let _ = crate::private_file::remove_file(&state.join("trial-notice.json"));
+                if matches!(
+                    active.as_ref().entitlement(),
+                    license::Entitlement::Perpetual { .. }
+                ) {
+                    remove_trials(state, &keys, active.id())?;
+                }
                 let inventory = LicenseInventory::Active {
                     first: Box::new(active.as_ref().clone()),
                     additional: Vec::new(),
@@ -355,6 +423,7 @@ impl LicenseRequest {
                 Ok(LicenseReport {
                     inventory: Ok(inventory),
                     access,
+                    trial_notice: None,
                 })
             }
         }
@@ -435,6 +504,10 @@ impl ActivationSnapshot {
         {
             return Err(ProductError::License(error));
         }
+        // A perpetual license takes precedence even after an interrupted trial cleanup.
+        activations.licenses.sort_by_key(|license| {
+            matches!(license.entitlement(), license::Entitlement::Trial { .. })
+        });
         Ok(activations)
     }
 }
@@ -457,7 +530,8 @@ pub fn run_license(
     json: bool,
 ) -> Result<ExitCode, ProductError> {
     let request = match options.command {
-        None => LicenseRequest::Status,
+        None | Some(LicenseCommand::Status) => LicenseRequest::Status,
+        Some(LicenseCommand::Trial) => LicenseRequest::Trial,
         Some(LicenseCommand::Remove { license_id }) => {
             let target = BooksSelection::try_from((Some(books_path), requirement))?;
             let response = removal::remove(license_id, &target)?;
@@ -591,7 +665,9 @@ impl BooksSelection<'_> {
     fn resolve(&self, request: &LicenseRequest) -> Result<Option<BooksPath>, ProductError> {
         let requirement = match request {
             LicenseRequest::Status => self.requirement,
-            LicenseRequest::Activate(_) => self.requirement.for_activation(ENFORCEMENT),
+            LicenseRequest::Trial | LicenseRequest::Activate(_) => {
+                self.requirement.for_activation(ENFORCEMENT)
+            }
         };
         match BooksPath::try_from(self.path.as_ref()) {
             Ok(books) => Ok(Some(books)),
@@ -633,6 +709,72 @@ pub fn status_text() -> String {
         .and_then(|dir| Ok(updates::status(&dir.join("updates.json"), update_checks())?))
         .unwrap_or_else(|e| e.to_string());
     format!("{license}\n{updates}")
+}
+
+fn remove_trials(
+    state: &Path,
+    keys: &TrustedKeys,
+    paid_id: &LicenseId,
+) -> Result<(), ProductError> {
+    for path in license::activation_paths(state)? {
+        if let Ok(Some(installed)) = license::load(&path, keys)
+            && installed.id() != paid_id
+            && matches!(installed.entitlement(), license::Entitlement::Trial { .. })
+        {
+            removal::remove_at(state, installed.id())?;
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort shared setup path: inability to obtain a trial never prevents setup.
+pub(crate) fn setup_trial(books: &Path) -> String {
+    match state_dir() {
+        Ok(state) => setup_trial_at(books, &state),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// Setup uses its explicit installation state, including in isolated service tests.
+pub(crate) fn setup_trial_at(books: &Path, state: &Path) -> String {
+    let target = BooksSelection {
+        path: Cow::Borrowed(books),
+        requirement: BooksRequirement::Optional,
+    };
+    let result = target
+        .resolve(&LicenseRequest::Trial)
+        .and_then(|books| LicenseRequest::Trial.execute_at(books.as_ref(), state));
+    match result {
+        Ok(report) => {
+            let _ = crate::private_file::remove_file(&state.join("trial-notice.json"));
+            report.response(None).message().to_owned()
+        }
+        Err(error) => {
+            if let Ok(bytes) = serde_json::to_vec(&TrialNotice::from(&error)) {
+                let _ = license::write_private(
+                    &bytes,
+                    &state.join("trial-notice.json"),
+                    license::SaveMode::Replace,
+                );
+            }
+            error.to_string()
+        }
+    }
+}
+
+/// Shared public, secret-free status for lifecycle tools.
+pub(crate) fn report_for_books(books: &Path, state: &Path) -> serde_json::Value {
+    let target = BooksSelection {
+        path: Cow::Borrowed(books),
+        requirement: BooksRequirement::Optional,
+    };
+    match target
+        .resolve(&LicenseRequest::Status)
+        .and_then(|books| LicenseRequest::Status.execute_at(books.as_ref(), state))
+    {
+        Ok(report) => serde_json::json!(report.response(target.settings_url().as_deref())),
+        Err(error) => error.structured(),
+    }
 }
 
 #[cfg(test)]
@@ -695,6 +837,7 @@ mod tests {
         let report = LicenseReport {
             inventory: Ok(inventory),
             access: None,
+            trial_notice: None,
         };
         let response = serde_json::to_value(report.response(None))?;
         assert_eq!(response["status"], "active");
@@ -717,6 +860,7 @@ mod tests {
         let report = LicenseReport {
             inventory: Ok(inventory),
             access: None,
+            trial_notice: None,
         };
         assert_eq!(
             serde_json::to_value(report.response(None))?["status"],

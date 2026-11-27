@@ -31,16 +31,27 @@ separately. [Trust configuration and activation](license-updates.md)
 | `iat` | Required RFC 3339 issue time. |
 | `nbf` | Optional RFC 3339 earliest use time. The issuer sets it to `iat` on new licenses. |
 | `product` | `beankeeper-desktop`. |
-| `storefront` | `polar`, `etsy`, `direct`, `stripe`, `comp`, or the reserved `gumroad`. |
+| `storefront` | `polar`, `etsy`, `direct`, `stripe`, `comp`, `trial`, or the reserved `gumroad`. |
 | `purchaser_ref` | Opaque reference of 1 to 256 UTF-8 bytes with at least one non-whitespace character, no control characters and no `@`. |
 | `eligible_major` | Positive unsigned 32-bit integer identifying the one covered major release line. |
 | `seats` | The integer 1, the one-computer limit per license. Omission defaults to 1. |
+| `exp` | RFC 3339 expiry required for `trial`, forbidden for perpetual storefronts. Explicit null is invalid. |
 
-Desktop rejects duplicate and unknown claims, including `exp`. Both timestamps
-must fall in UTC years 1970 through 9999 and be at most five minutes ahead of the
-local verifier clock. Each license covers all releases in its signed major
-version for perpetual use. A 1.x license covers 1.0.0 and 1.4.2. A 2.x release
-requires a 2.x license.
+Desktop rejects duplicate and unknown claims. All timestamps must fall in UTC
+years 1970 through 9999. Issue and earliest-use times may be at most five minutes
+ahead of the verifier clock. A trial expiry must be strictly after both times;
+the offline expiry policy allows five minutes of clock tolerance. Paid and
+complimentary licenses retain their existing wire format without `exp` and
+cover all releases in their signed major version forever.
+
+Authenticated wire claims convert once into a typed entitlement:
+`Entitlement::Perpetual { storefront: PerpetualStorefront }` or
+`Entitlement::Trial { expires_at: LicenseTime }`. A perpetual storefront cannot
+represent a trial, and a trial cannot exist without a validated expiry.
+Private claims fields preserve that relationship after parsing. Signature,
+timestamp ordering, revocation and current-clock checks remain runtime checks
+because they depend on untrusted bytes or changing external state. Expired
+claims remain available for status; they cannot authorize ordinary writes.
 
 `license::verify_offline` authenticates a token supplied as text or bytes and
 returns a `VerifiedLicense`. The original claims JSON is deserialized directly

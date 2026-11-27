@@ -7,10 +7,42 @@ the `updates` module owns release verification and installation. The approved
 without activation. [Beankeeper Desktop license agreement](../LICENSE.md)
 
 Official stable releases from 1.0.0 apply read-only mode to each set of books
-whose license is missing, invalid, revoked or for another major version.
+whose license is missing, invalid, revoked, expired or for another major version.
 Reads, exports, backups, restores, restore undo and recovery are available.
 Agents with existing authorization can undo an audited change with `audit_undo`
 over MCP or `bk audit undo` in the CLI. Owners can also undo from Changes.
+
+## Start a free trial
+
+Setup automatically requests and activates a 30-day trial when these books have
+no active license. The owner needs no email, account, terminal or token. An agent
+can explicitly retry through `license_start_trial` on the local lifecycle MCP
+connection, or `bk license trial`; both use the setup activation path.
+
+Desktop creates an opaque random `MachineToken` once and keeps it privately in
+`machine-token` inside its state directory. It sends only that token in a JSON
+body to `POST /api/v1/licenses/trial`, never hardware identifiers. Concurrent
+starts reuse the same saved token. The server returns the same trial on active
+retries, so retrying never restarts its clock. Removing local activations keeps
+the machine token. Wiping state can create a new identity; this anonymous limit
+is not hardware attestation.
+
+A network failure leaves setup and books available; ordinary writes wait for a
+successful trial or another license. Retry later through the same tool. A spent
+trial returns `TRIAL_ALREADY_USED` with a purchase link; rate limiting reports
+`TRIAL_RATE_LIMITED` and the server's retry delay when available.
+
+`bk license status`, `bk --json license status`, `license_status` and the license
+portion of `service_status` report trial expiry and days remaining alongside
+plain words and a Desktop settings link when available. Expired trials have
+zero days remaining. At expiry, ordinary writes pause using the existing
+license write boundary. Reads, export, backup, restore, recovery and audited
+undo remain available; the books are unchanged.
+
+Activating a paid license saves it before removing local trial activations and
+bindings. The machine token stays private for idempotent retries. Trials have
+no refund or in-app return. Ask the agent to activate a paid license after
+purchase at https://beankeeper.app/#pricing.
 
 ## Configure issuer trust
 
@@ -55,7 +87,7 @@ Desktop verifies each PASETO v4.public token offline before saving it by license
 ID. Activation binds the license to the canonical path of the selected books.
 You can reactivate for the same path. Each additional set of books needs its
 own license, including a copied ledger. If you activated a preview license
-before creating books, activate it again after setup to bind it. Each license
+before creating books, activate it again after setup to bind it. Each perpetual license
 covers one major version for perpetual use.
 
 When writes are denied, Desktop returns `LEDGER_WRITE_DENIED` to the CLI and

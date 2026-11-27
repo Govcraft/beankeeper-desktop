@@ -386,13 +386,21 @@ pub struct Status {
     pub message: String,
     /// Verified grants of the credential used by the managed bridge, when available.
     pub agent_access: Option<AgentAccess>,
+    /// Shared local license status, including trial expiry and remaining days.
+    pub license: serde_json::Value,
 }
 
 impl Status {
     fn plain_text(&self) -> String {
+        let license = self
+            .license
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = format!("{}\n{license}", self.message);
         match &self.agent_access {
-            Some(access) => format!("{}\n{}", self.message, access.note()),
-            None => self.message.clone(),
+            Some(access) => format!("{message}\n{}", access.note()),
+            None => message,
         }
     }
 }
@@ -430,6 +438,7 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         warning: None,
         message: ServiceError::NotInstalled.to_string(),
         agent_access: None,
+        license: serde_json::Value::Null,
     };
     let endpoint = if result.installed {
         authenticated_endpoint(paths, &result.books, bridge::Probe::AgentAccess)
@@ -463,6 +472,7 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         }
         Err(error) => return Err(error),
     }
+    result.license = crate::product::report_for_books(&result.books, &paths.state);
     result.warning = instance::default_port_warning(&paths.state, &result.books, address);
     Ok(result)
 }
@@ -876,6 +886,7 @@ fn install(
         (Ipv4Addr::LOCALHOST, port).into(),
         registration,
         mode.storage(),
+        &paths.state,
     )?;
     if adopting && cli.db.with_extension("agent-token").try_exists()? {
         cli.passphrase.passphrase_file = None;

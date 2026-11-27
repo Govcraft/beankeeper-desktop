@@ -202,7 +202,9 @@ pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
         store.as_deref().unwrap_or(&OsKeychain),
         registration,
         None,
-    )
+    )?;
+    eprintln!("{}", crate::product::setup_trial(&cli.db));
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -232,8 +234,11 @@ pub(crate) fn run_service(
     bind: SocketAddr,
     registration: ClientRegistration<'_>,
     storage: ServiceSecretStorage,
+    state: &Path,
 ) -> Result<(), SetupError> {
-    run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)
+    run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)?;
+    eprintln!("{}", crate::product::setup_trial_at(&cli.db, state));
+    Ok(())
 }
 
 fn run_service_with_native_store(
@@ -1227,6 +1232,7 @@ mod tests {
                 previous_executable: &std::env::current_exe()?,
             },
             ServiceSecretStorage::NativeWithFileFallback,
+            &home.join("state"),
         )?;
         let mut cli =
             Cli::try_parse_from(["bk", "--db", books.to_str().ok_or("path")?, "mcp", "serve"])?;

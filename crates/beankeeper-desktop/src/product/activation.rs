@@ -149,6 +149,7 @@ pub(super) struct ActivationInputs {
 
 enum Source {
     Pasted(SecretString),
+    Trial,
     Stdin,
     File(LicensePath),
     Claim(ClaimCode),
@@ -194,12 +195,26 @@ impl TryFrom<ActivationInputs> for ActivationSource {
 }
 
 impl ActivationSource {
+    pub(super) fn trial() -> Self {
+        Self(Source::Trial)
+    }
+
     pub(super) fn verify(
         self,
         keys: &TrustedKeys,
         state: &Path,
     ) -> Result<VerifiedLicense, ProductError> {
         let input = match self.0 {
+            Source::Trial => {
+                let input = LicenseService::configured()?.trial(state)?;
+                let license = verify_offline(input, keys)?;
+                return match license.entitlement() {
+                    crate::license::Entitlement::Trial { .. } => Ok(license),
+                    crate::license::Entitlement::Perpetual { .. } => {
+                        Err(ProductError::TrialUnavailable)
+                    }
+                };
+            }
             Source::Pasted(token) => LicenseInput::Pasted(token),
             Source::Stdin => read_license(io::stdin())?,
             Source::File(path) => path.read()?,
@@ -335,6 +350,45 @@ struct LicenseService {
 }
 
 impl LicenseService {
+    fn trial(&self, state: &Path) -> Result<LicenseInput, ProductError> {
+        let token = MachineToken::load_or_create(state)?;
+        let response = self
+            .http
+            .post(self.origin.endpoint("/api/v1/licenses/trial"))
+            .json(&serde_json::json!({ "machine_token": token.as_ref() }))
+            .send()
+            .map_err(|_| ProductError::TrialUnavailable)?;
+        match response.status().as_u16() {
+            200 => read_license(response).map_err(|_| ProductError::TrialUnavailable),
+            409 => {
+                #[derive(Deserialize)]
+                struct Conflict {
+                    code: String,
+                }
+                let mut body = Vec::new();
+                response
+                    .take(4097)
+                    .read_to_end(&mut body)
+                    .map_err(|_| ProductError::TrialUnavailable)?;
+                match serde_json::from_slice::<Conflict>(&body) {
+                    Ok(error) if error.code == "trial_already_used" => {
+                        Err(ProductError::TrialAlreadyUsed)
+                    }
+                    _ => Err(ProductError::TrialUnavailable),
+                }
+            }
+            429 => {
+                let retry = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok());
+                Err(ProductError::TrialRateLimited(retry))
+            }
+            _ => Err(ProductError::TrialUnavailable),
+        }
+    }
+
     fn configured() -> Result<Self, ProductError> {
         let configured_url = std::env::var("BEANKEEPER_LICENSE_SERVICE_URL")
             .ok()
@@ -396,5 +450,181 @@ impl LicenseService {
             return Err(ProductError::Redemption);
         }
         read_license(response).map_err(|_| ProductError::Redemption)
+    }
+}
+
+/// Opaque random installation identity, never derived from hardware.
+struct MachineToken(SecretString);
+impl std::str::FromStr for MachineToken {
+    type Err = ProductError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if !(32..=256).contains(&value.len())
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            return Err(ProductError::Recovery);
+        }
+        Ok(Self(value.into()))
+    }
+}
+impl AsRef<str> for MachineToken {
+    fn as_ref(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+impl MachineToken {
+    fn load_or_create(state: &Path) -> Result<Self, ProductError> {
+        let path = state.join("machine-token");
+        let read = || -> Result<Self, ProductError> {
+            PrivateFile::open(&path)?
+                .read_secret(256)?
+                .expose_secret()
+                .parse()
+        };
+        match PrivateFile::open(&path) {
+            Ok(file) => return file.read_secret(256)?.expose_secret().parse(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let mut random = Zeroizing::new([0; 32]);
+        getrandom::fill(&mut *random).map_err(|_| ProductError::Recovery)?;
+        let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(*random));
+        let token: Self = encoded.parse()?;
+        match crate::license::write_private(
+            token.as_ref().as_bytes(),
+            &path,
+            crate::license::SaveMode::Create,
+        ) {
+            Ok(()) => Ok(token),
+            Err(crate::license::LicenseError::Io(e))
+                if e.kind() == io::ErrorKind::AlreadyExists =>
+            {
+                read()
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod trial_tests {
+    use super::*;
+    use std::{net::TcpListener, thread};
+
+    #[test]
+    fn machine_identity_is_private_persistent_and_validated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = tempfile::tempdir()?;
+        let first = MachineToken::load_or_create(state.path())?;
+        let next = MachineToken::load_or_create(state.path())?;
+        assert_eq!(first.as_ref(), next.as_ref());
+        assert!("short".parse::<MachineToken>().is_err());
+        assert!(
+            format!(" {}", first.as_ref())
+                .parse::<MachineToken>()
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(state.path().join("machine-token"))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    fn mock(
+        status: u16,
+        body: &str,
+        extra: &str,
+    ) -> Result<(LicenseService, thread::JoinHandle<String>), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let response = format!(
+            "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
+            body.len()
+        );
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("timeout");
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let count = stream.read(&mut buffer).expect("request");
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|v| v.parse::<usize>().ok())
+                        })
+                        .unwrap_or_default();
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(response.as_bytes()).expect("reply");
+            String::from_utf8(bytes).expect("utf8")
+        });
+        Ok((
+            LicenseService {
+                origin: url.parse()?,
+                http: reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?,
+            },
+            handle,
+        ))
+    }
+
+    #[test]
+    fn trial_service_reuses_identity_and_maps_safe_retry_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = tempfile::tempdir()?;
+        let token = MachineToken::load_or_create(state.path())?;
+        for (status, body, extra) in [
+            (200, "signed-test-response", ""),
+            (409, "{\"code\":\"trial_already_used\"}", ""),
+            (
+                429,
+                "{\"error\":\"trial_rate_limited\"}",
+                "Retry-After: 60\r\n",
+            ),
+            (503, "private server details", ""),
+        ] {
+            let (service, server) = mock(status, body, extra)?;
+            let result = service.trial(state.path());
+            match status {
+                200 => assert_eq!(result?.as_ref(), body.as_bytes()),
+                409 => assert!(matches!(result, Err(ProductError::TrialAlreadyUsed))),
+                429 => assert!(matches!(
+                    result,
+                    Err(ProductError::TrialRateLimited(Some(60)))
+                )),
+                _ => assert!(matches!(result, Err(ProductError::TrialUnavailable))),
+            }
+            let request = server.join().map_err(|_| "mock panic")?;
+            assert!(request.starts_with("POST /api/v1/licenses/trial "));
+            let (_, body) = request.split_once("\r\n\r\n").ok_or("body")?;
+            let sent: serde_json::Value = serde_json::from_str(body)?;
+            assert_eq!(sent["machine_token"], token.as_ref());
+            assert_eq!(sent.as_object().ok_or("object")?.len(), 1);
+        }
+        Ok(())
     }
 }

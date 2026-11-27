@@ -2,7 +2,7 @@
 
 use std::{fmt, process::ExitCode, sync::Arc};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Activations, BooksSelection, ProductError};
 use crate::{
@@ -10,9 +10,29 @@ use crate::{
     license::{LicenseError, LicenseId, MajorVersion, UnrevokedLicense},
 };
 
+#[derive(Serialize, Deserialize)]
+pub(super) struct TrialNotice {
+    code: LicenseErrorCode,
+    message: String,
+    retry_after_seconds: Option<u64>,
+}
+impl From<&ProductError> for TrialNotice {
+    fn from(error: &ProductError) -> Self {
+        Self {
+            code: error.into(),
+            message: error.to_string(),
+            retry_after_seconds: match error {
+                ProductError::TrialRateLimited(retry) => *retry,
+                _ => None,
+            },
+        }
+    }
+}
+
 pub(super) struct LicenseReport {
     pub(super) inventory: Result<LicenseInventory, ProductError>,
     pub(super) access: Option<LedgerLicenseStatus>,
+    pub(super) trial_notice: Option<TrialNotice>,
 }
 
 impl LicenseReport {
@@ -39,6 +59,9 @@ impl LicenseReport {
             println!("{access}");
         }
         println!("{}", self.inventory?);
+        if let Some(notice) = self.trial_notice {
+            println!("{}", notice.message);
+        }
         Ok(ExitCode::SUCCESS)
     }
 
@@ -52,6 +75,10 @@ impl LicenseReport {
             response.message = format!("{summary}\n{}", response.message);
             response.writable = Some(access.writable());
             response.summary = Some(summary);
+        }
+        if let Some(notice) = &self.trial_notice {
+            response.message = format!("{}\n{}", response.message, notice.message);
+            response.trial_notice = Some(notice);
         }
         response.settings_url = settings_url;
         response
@@ -69,6 +96,10 @@ pub(super) struct LicenseResponse<'a> {
     summary: Option<String>,
     desktop_path: &'static str,
     settings_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trial_notice: Option<&'a TrialNotice>,
 }
 
 #[derive(Serialize)]
@@ -76,6 +107,7 @@ pub(super) struct LicenseResponse<'a> {
 enum Outcome<'a> {
     Success {
         status: Status,
+        kind: &'static str,
         licenses: Vec<Coverage<'a>>,
     },
     Failure {
@@ -87,6 +119,7 @@ enum Outcome<'a> {
 #[serde(rename_all = "snake_case")]
 enum Status {
     NotActivated,
+    Expired,
     Active,
     Revoked,
 }
@@ -97,15 +130,25 @@ struct Coverage<'a> {
     eligible_major: MajorVersion,
     storefront: crate::license::Storefront,
     standing: Standing,
+    kind: &'static str,
+    expires_at: Option<crate::license::LicenseTime>,
+    days_remaining: Option<crate::license::DaysRemaining>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Standing {
+    Expired,
     Valid,
     Revoked,
 }
 
+fn kind(term: crate::license::Entitlement) -> &'static str {
+    match term {
+        crate::license::Entitlement::Perpetual { .. } => "paid",
+        crate::license::Entitlement::Trial { .. } => "trial",
+    }
+}
 impl<'a> Coverage<'a> {
     fn revoked(license: &'a crate::license::VerifiedLicense) -> Self {
         Self {
@@ -113,6 +156,9 @@ impl<'a> Coverage<'a> {
             eligible_major: license.eligible_major(),
             storefront: license.storefront(),
             standing: Standing::Revoked,
+            kind: kind(license.entitlement()),
+            expires_at: license.entitlement().expires_at(),
+            days_remaining: license.entitlement().days_remaining(chrono::Utc::now()),
         }
     }
 }
@@ -123,7 +169,14 @@ impl<'a> From<&'a UnrevokedLicense> for Coverage<'a> {
             license_id: license.id(),
             eligible_major: license.eligible_major(),
             storefront: license.storefront(),
-            standing: Standing::Valid,
+            standing: if license.entitlement().is_expired(chrono::Utc::now()) {
+                Standing::Expired
+            } else {
+                Standing::Valid
+            },
+            kind: kind(license.entitlement()),
+            expires_at: license.entitlement().expires_at(),
+            days_remaining: license.entitlement().days_remaining(chrono::Utc::now()),
         }
     }
 }
@@ -137,6 +190,8 @@ impl<'a> LicenseResponse<'a> {
             summary: None,
             desktop_path: "/settings",
             settings_url: None,
+            retry_after_seconds: None,
+            trial_notice: None,
         }
     }
 
@@ -163,7 +218,14 @@ impl<'a> From<&'a LicenseInventory> for LicenseResponse<'a> {
                 revoked,
                 ..
             } => (
-                Status::Active,
+                if std::iter::once(first.as_ref())
+                    .chain(additional)
+                    .all(|license| license.entitlement().is_expired(chrono::Utc::now()))
+                {
+                    Status::Expired
+                } else {
+                    Status::Active
+                },
                 std::iter::once(first.as_ref())
                     .chain(additional)
                     .map(Coverage::from)
@@ -171,7 +233,21 @@ impl<'a> From<&'a LicenseInventory> for LicenseResponse<'a> {
                     .collect(),
             ),
         };
-        Self::new(Outcome::Success { status, licenses }, inventory.to_string())
+        let kind = match inventory {
+            LicenseInventory::NotActivated => "none",
+            LicenseInventory::Revoked(licenses) => licenses
+                .first()
+                .map_or("none", |license| kind(license.entitlement())),
+            LicenseInventory::Active { first, .. } => kind(first.entitlement()),
+        };
+        Self::new(
+            Outcome::Success {
+                status,
+                kind,
+                licenses,
+            },
+            inventory.to_string(),
+        )
     }
 }
 
@@ -179,7 +255,11 @@ impl From<&ProductError> for LicenseResponse<'_> {
     fn from(error: &ProductError) -> Self {
         let code = LicenseErrorCode::from(error);
         let message = code.message(error);
-        Self::new(Outcome::Failure { code }, message)
+        let mut response = Self::new(Outcome::Failure { code }, message);
+        if let ProductError::TrialRateLimited(retry) = error {
+            response.retry_after_seconds = *retry;
+        }
+        response
     }
 }
 
@@ -226,14 +306,36 @@ impl fmt::Display for LicenseInventory {
                 warning,
                 revoked,
             } => {
-                f.write_str("License status: active and valid.")?;
+                if std::iter::once(first.as_ref())
+                    .chain(additional)
+                    .all(|license| license.entitlement().is_expired(chrono::Utc::now()))
+                {
+                    f.write_str("License status: trial expired.")?;
+                } else {
+                    f.write_str("License status: active and valid.")?;
+                }
                 for license in std::iter::once(first.as_ref()).chain(additional) {
-                    write!(
-                        f,
-                        "\nLicense {} covers all {}.x releases forever.",
-                        license.id(),
-                        license.eligible_major()
-                    )?;
+                    if let Some(expiry) = license.entitlement().expires_at() {
+                        write!(
+                            f,
+                            "\nTrial {} expires {expiry}; {} days remaining.",
+                            license.id(),
+                            license
+                                .entitlement()
+                                .days_remaining(chrono::Utc::now())
+                                .ok_or(fmt::Error)?
+                        )?;
+                        if license.entitlement().is_expired(chrono::Utc::now()) {
+                            write!(f, "\n{}", LicenseError::TrialExpired)?;
+                        }
+                    } else {
+                        write!(
+                            f,
+                            "\nLicense {} covers all {}.x releases forever.",
+                            license.id(),
+                            license.eligible_major()
+                        )?;
+                    }
                 }
                 if let Some(error) = warning {
                     write!(
@@ -261,10 +363,14 @@ fn write_revoked(
     Ok(())
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(super) enum LicenseErrorCode {
     LicenseArguments,
+    TrialAlreadyUsed,
+    TrialRateLimited,
+    TrialUnavailable,
+    TrialExpired,
     LicenseInvalidClaimCode,
     LicenseRedemptionFailed,
     LicenseRecoveryFailed,
@@ -283,6 +389,9 @@ pub(super) enum LicenseErrorCode {
 impl From<&ProductError> for LicenseErrorCode {
     fn from(error: &ProductError) -> Self {
         match error {
+            ProductError::TrialAlreadyUsed => Self::TrialAlreadyUsed,
+            ProductError::TrialRateLimited(_) => Self::TrialRateLimited,
+            ProductError::TrialUnavailable => Self::TrialUnavailable,
             ProductError::ActivationInput => Self::LicenseArguments,
             ProductError::InvalidClaimCode => Self::LicenseInvalidClaimCode,
             ProductError::Redemption => Self::LicenseRedemptionFailed,
@@ -311,6 +420,7 @@ impl From<&ProductError> for LicenseErrorCode {
 impl From<&LicenseError> for LicenseErrorCode {
     fn from(error: &LicenseError) -> Self {
         match error {
+            LicenseError::TrialExpired => Self::TrialExpired,
             LicenseError::Signature | LicenseError::UnknownKey => Self::LicenseUnverified,
             LicenseError::InvalidToken
             | LicenseError::InvalidFooter
