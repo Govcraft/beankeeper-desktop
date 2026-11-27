@@ -502,20 +502,18 @@ fn keyring_check(home: &std::path::Path) -> Option<Failure> {
     let error = OsKeychain
         .load(&home.join(".beankeeper-keyring-diagnostic"))
         .err()?;
-    Some(crate::setup::SetupError::from(error).into())
+    match error {
+        crate::setup::keychain::KeychainError::Keyring(failure) => Some(failure.into()),
+        _ => None,
+    }
 }
 
-impl From<crate::setup::SetupError> for Failure {
-    fn from(error: crate::setup::SetupError) -> Self {
-        let code = match &error {
-            crate::setup::SetupError::KeyringLocked { .. } => "KEYRING_LOCKED",
-            crate::setup::SetupError::NoKeyringProvider { .. } => "KEYRING_NO_PROVIDER",
-            _ => "KEYRING_UNAVAILABLE",
-        };
+impl From<crate::setup::keychain::KeyringFailure> for Failure {
+    fn from(error: crate::setup::keychain::KeyringFailure) -> Self {
         Self {
-            code,
+            code: error.code(),
             message: error.to_string(),
-            technical_detail: error.technical_detail(),
+            technical_detail: Some(error.technical_detail()),
         }
     }
 }
@@ -692,15 +690,15 @@ mod tests {
     fn doctor_keeps_keyring_details_separate_from_owner_message() -> Result<(), Box<dyn Error>> {
         for (error, code) in [
             (
-                crate::setup::keychain::KeychainError::Locked,
+                crate::setup::keychain::KeyringFailure::Locked,
                 "KEYRING_LOCKED",
             ),
             (
-                crate::setup::keychain::KeychainError::NoProvider,
+                crate::setup::keychain::KeyringFailure::NoProvider,
                 "KEYRING_NO_PROVIDER",
             ),
         ] {
-            let failure = Failure::from(crate::setup::SetupError::from(error));
+            let failure = Failure::from(error);
             let wire = serde_json::to_value(&failure)?;
             assert_eq!(wire["code"], code);
             assert!(wire["technical_detail"].is_string());

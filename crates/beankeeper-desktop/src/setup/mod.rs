@@ -130,10 +130,8 @@ pub enum SetupError {
     Ledger(CliError),
     /// An OS credential operation failed.
     Keychain(keychain::KeychainError),
-    /// The password safe refused access.
-    KeyringLocked { detail: &'static str },
-    /// No native password safe provider could be reached.
-    NoKeyringProvider { detail: &'static str },
+    /// A classified native password safe failure.
+    Keyring(keychain::KeyringFailure),
     /// Existing configuration cannot be safely merged.
     Config(config::ConfigError),
     /// Inputs or existing state need user attention.
@@ -148,21 +146,10 @@ impl fmt::Display for SetupError {
             Self::Io(error) => write!(f, "setup file operation failed: {error}"),
             Self::Ledger(error) => write!(f, "{error}"),
             Self::Keychain(error) => write!(f, "{error}"),
-            Self::KeyringLocked { .. } => write!(f, "{}", keychain::KeychainError::Locked),
-            Self::NoKeyringProvider { .. } => write!(f, "{}", keychain::KeychainError::NoProvider),
+            Self::Keyring(failure) => failure.fmt(f),
             Self::Config(error) => write!(f, "{error}"),
             Self::Invalid(message) => f.write_str(message),
             Self::Desktop(error) => write!(f, "{error}"),
-        }
-    }
-}
-impl SetupError {
-    /// Sanitized technical classification for agent diagnostics.
-    #[must_use]
-    pub const fn technical_detail(&self) -> Option<&'static str> {
-        match self {
-            Self::KeyringLocked { detail } | Self::NoKeyringProvider { detail } => Some(detail),
-            _ => None,
         }
     }
 }
@@ -180,12 +167,7 @@ impl From<CliError> for SetupError {
 impl From<keychain::KeychainError> for SetupError {
     fn from(value: keychain::KeychainError) -> Self {
         match value {
-            keychain::KeychainError::Locked => Self::KeyringLocked {
-                detail: "keyring::Error::NoStorageAccess",
-            },
-            keychain::KeychainError::NoProvider => Self::NoKeyringProvider {
-                detail: "Native credential provider is absent or unreachable (NoDefaultStore or PlatformFailure).",
-            },
+            keychain::KeychainError::Keyring(failure) => Self::Keyring(failure),
             other => Self::Keychain(other),
         }
     }
@@ -539,11 +521,7 @@ fn store_ledger_secret(
     let automatic_file = match (store.store(&cli.db, &secret), storage, mode) {
         (Ok(()), _, _) => None,
         (
-            Err(
-                keychain::KeychainError::Unavailable
-                | keychain::KeychainError::Locked
-                | keychain::KeychainError::NoProvider,
-            ),
+            Err(keychain::KeychainError::Unavailable | keychain::KeychainError::Keyring(_)),
             Some(ServiceSecretStorage::NativeWithFileFallback),
             SetupMode::Fresh,
         ) => {
@@ -1137,23 +1115,17 @@ impl Drop for PendingServer {
 mod tests {
     use super::*;
 
-    struct UnavailableStore(keychain::KeychainError);
+    struct UnavailableStore(keychain::KeyringFailure);
     impl SecretStore for UnavailableStore {
         fn store(
             &self,
             _ledger: &Path,
             _secret: &SecretString,
         ) -> Result<(), keychain::KeychainError> {
-            Err(match self.0 {
-                keychain::KeychainError::Locked => keychain::KeychainError::Locked,
-                _ => keychain::KeychainError::NoProvider,
-            })
+            Err(keychain::KeychainError::Keyring(self.0))
         }
         fn load(&self, _ledger: &Path) -> Result<Option<SecretString>, keychain::KeychainError> {
-            Err(match self.0 {
-                keychain::KeychainError::Locked => keychain::KeychainError::Locked,
-                _ => keychain::KeychainError::NoProvider,
-            })
+            Err(keychain::KeychainError::Keyring(self.0))
         }
     }
 
@@ -1162,10 +1134,9 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         use clap::Parser;
         for failure in [
-            keychain::KeychainError::Locked,
-            keychain::KeychainError::NoProvider,
+            keychain::KeyringFailure::Locked,
+            keychain::KeyringFailure::NoProvider,
         ] {
-            let locked = matches!(failure, keychain::KeychainError::Locked);
             let root = tempfile::tempdir()?;
             keychain::restrict_directory(root.path())?;
             let books = root.path().join("books.db");
@@ -1179,11 +1150,7 @@ mod tests {
                 ServiceSecretStorage::NativeRequired,
                 &UnavailableStore(failure),
             );
-            if locked {
-                assert!(matches!(result, Err(SetupError::KeyringLocked { .. })));
-            } else {
-                assert!(matches!(result, Err(SetupError::NoKeyringProvider { .. })));
-            }
+            assert!(matches!(result, Err(SetupError::Keyring(actual)) if actual == failure));
             assert!(fs::read_dir(root.path())?.next().is_none());
         }
         Ok(())
@@ -1207,7 +1174,7 @@ mod tests {
             "127.0.0.1:8750".parse()?,
             ClientRegistration::Skip,
             ServiceSecretStorage::NativeRequired,
-            &UnavailableStore(keychain::KeychainError::NoProvider),
+            &UnavailableStore(keychain::KeyringFailure::NoProvider),
         );
         assert!(matches!(
             result,
@@ -1237,7 +1204,7 @@ mod tests {
                 previous_executable: &std::env::current_exe()?,
             },
             ServiceSecretStorage::NativeWithFileFallback,
-            &UnavailableStore(keychain::KeychainError::NoProvider),
+            &UnavailableStore(keychain::KeyringFailure::NoProvider),
         )?;
         let marker: serde_json::Value =
             serde_json::from_slice(&fs::read(books.with_extension("desktop.json"))?)?;
@@ -1274,7 +1241,7 @@ mod tests {
             "127.0.0.1:8750".parse()?,
             ClientRegistration::Skip,
             ServiceSecretStorage::NativeRequired,
-            &UnavailableStore(keychain::KeychainError::NoProvider),
+            &UnavailableStore(keychain::KeyringFailure::NoProvider),
         )?;
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(
