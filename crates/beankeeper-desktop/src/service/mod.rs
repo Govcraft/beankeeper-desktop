@@ -387,17 +387,12 @@ pub struct Status {
     /// Verified grants of the credential used by the managed bridge, when available.
     pub agent_access: Option<AgentAccess>,
     /// Shared local license status, including trial expiry and remaining days.
-    pub license: serde_json::Value,
+    pub license: crate::product::LicenseResponse,
 }
 
 impl Status {
     fn plain_text(&self) -> String {
-        let license = self
-            .license
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let message = format!("{}\n{license}", self.message);
+        let message = format!("{}\n{}", self.message, self.license);
         match &self.agent_access {
             Some(access) => format!("{message}\n{}", access.note()),
             None => message,
@@ -424,6 +419,11 @@ pub fn status() -> Result<Status, ServiceError> {
 }
 fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
     let config = Config::load(paths)?;
+    let books = config.as_ref().map_or_else(
+        || paths.data.join("books.db"),
+        |config| config.books.clone(),
+    );
+    let license = crate::product::report_for_books(&books, &paths.state);
     let mut result = Status {
         installed: config.is_some() && paths.definition.try_exists()?,
         running: false,
@@ -431,14 +431,14 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         mcp_endpoint: None,
         desktop_url: None,
         pid: None,
-        books: config.map_or_else(|| paths.data.join("books.db"), |config| config.books),
+        books,
         log: paths.log(),
         service_definition: paths.definition.clone(),
         error_code: None,
         warning: None,
         message: ServiceError::NotInstalled.to_string(),
         agent_access: None,
-        license: serde_json::Value::Null,
+        license,
     };
     let endpoint = if result.installed {
         authenticated_endpoint(paths, &result.books, bridge::Probe::AgentAccess)
@@ -472,7 +472,6 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         }
         Err(error) => return Err(error),
     }
-    result.license = crate::product::report_for_books(&result.books, &paths.state);
     result.warning = instance::default_port_warning(&paths.state, &result.books, address);
     Ok(result)
 }

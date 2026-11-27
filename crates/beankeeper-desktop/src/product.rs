@@ -24,6 +24,9 @@ mod activation;
 pub(crate) mod mcp;
 pub(crate) mod removal;
 mod report;
+mod retry_after;
+pub use report::LicenseResponse;
+pub use retry_after::RetryAfter;
 pub(crate) mod returns;
 
 pub use activation::Storefront;
@@ -56,14 +59,19 @@ pub enum ProductError {
     InvalidClaimCode,
     Recovery,
     TrialAlreadyUsed,
-    TrialRateLimited(Option<u64>),
+    TrialRateLimited(Option<RetryAfter>),
     TrialUnavailable,
+    MachineIdentity,
 }
 impl fmt::Display for ProductError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TrialAlreadyUsed => write!(f, "This computer's trial has ended. Your books remain readable and exportable. Buy a $79 license at https://beankeeper.app/#pricing and ask your agent to activate it."),
-            Self::TrialRateLimited(retry) => write!(f, "The trial service is busy. Retry later{}.", retry.map(|seconds| format!(" in {seconds} seconds")).unwrap_or_default()),
+            Self::TrialRateLimited(retry) => {
+                f.write_str("The trial service is busy. Retry later")?;
+                if let Some(retry) = retry { write!(f, " {retry}")?; }
+                f.write_str(".")
+            },
             Self::TrialUnavailable => f.write_str("Desktop could not reach the trial service. Your books can still be created, read and exported. Ask your agent to retry later; ordinary writes wait for a license."),
             Self::License(e) => write!(f, "{e}"),
             Self::Update(e) => write!(f, "{e}"),
@@ -103,6 +111,7 @@ impl fmt::Display for ProductError {
             Self::ActivationInput => f.write_str("Provide exactly one signed license, saved license file, or claim code."),
             Self::InvalidLicenseInput => f.write_str("Desktop could not read that license. Use the original license or file you received."),
             Self::InvalidClaimCode => f.write_str("That claim code is incomplete or has an invalid format."),
+            Self::MachineIdentity => f.write_str("Desktop could not save or read its private trial machine identity."),
             Self::Recovery => f.write_str("Desktop could not save or read its private license recovery information."),
         }
     }
@@ -344,15 +353,7 @@ impl LicenseRequest {
                     })
                 });
                 let inventory = snapshot.and_then(|snapshot| snapshot.installed().map(Into::into));
-                let trial_notice = match crate::private_file::PrivateFile::open(
-                    &state.join("trial-notice.json"),
-                ) {
-                    Ok(file) => file.read_bytes(4096).ok().and_then(|bytes| {
-                        use secrecy::ExposeSecret;
-                        serde_json::from_slice(bytes.expose_secret()).ok()
-                    }),
-                    Err(_) => None,
-                };
+                let trial_notice = TrialNotice::load(state)?;
                 Ok(LicenseReport {
                     inventory,
                     access,
@@ -401,7 +402,7 @@ impl LicenseRequest {
                     Bindings(state).bind(&active, books)?;
                 }
                 active.persist(state)?;
-                let _ = crate::private_file::remove_file(&state.join("trial-notice.json"));
+                TrialNotice::clear(state)?;
                 if matches!(
                     active.as_ref().entitlement(),
                     license::Entitlement::Perpetual { .. }
@@ -745,25 +746,19 @@ pub(crate) fn setup_trial_at(books: &Path, state: &Path) -> String {
         .resolve(&LicenseRequest::Trial)
         .and_then(|books| LicenseRequest::Trial.execute_at(books.as_ref(), state));
     match result {
-        Ok(report) => {
-            let _ = crate::private_file::remove_file(&state.join("trial-notice.json"));
-            report.response(None).message().to_owned()
-        }
-        Err(error) => {
-            if let Ok(bytes) = serde_json::to_vec(&TrialNotice::from(&error)) {
-                let _ = license::write_private(
-                    &bytes,
-                    &state.join("trial-notice.json"),
-                    license::SaveMode::Replace,
-                );
-            }
-            error.to_string()
-        }
+        Ok(report) => match TrialNotice::clear(state) {
+            Ok(()) => report.response(None).to_string(),
+            Err(error) => format!("{}\n{error}", report.response(None)),
+        },
+        Err(error) => match TrialNotice::from(&error).save(state) {
+            Ok(()) => error.to_string(),
+            Err(storage) => format!("{error}\n{storage}"),
+        },
     }
 }
 
 /// Shared public, secret-free status for lifecycle tools.
-pub(crate) fn report_for_books(books: &Path, state: &Path) -> serde_json::Value {
+pub(crate) fn report_for_books(books: &Path, state: &Path) -> LicenseResponse {
     let target = BooksSelection {
         path: Cow::Borrowed(books),
         requirement: BooksRequirement::Optional,
@@ -772,8 +767,8 @@ pub(crate) fn report_for_books(books: &Path, state: &Path) -> serde_json::Value 
         .resolve(&LicenseRequest::Status)
         .and_then(|books| LicenseRequest::Status.execute_at(books.as_ref(), state))
     {
-        Ok(report) => serde_json::json!(report.response(target.settings_url().as_deref())),
-        Err(error) => error.structured(),
+        Ok(report) => report.response(target.settings_url().as_deref()),
+        Err(error) => LicenseResponse::from(&error),
     }
 }
 

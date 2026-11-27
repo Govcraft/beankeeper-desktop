@@ -275,7 +275,7 @@ fn decode<T: DeserializeOwned>(arguments: Value) -> Result<T, ProductError> {
     serde_json::from_value(arguments).map_err(|_| ProductError::ActivationInput)
 }
 
-fn reply(response: &LicenseResponse<'_>) -> CallToolResult {
+fn reply(response: &LicenseResponse) -> CallToolResult {
     let payload = json!(response);
     let mut result = if response.is_error() {
         CallToolResult::structured_error(payload)

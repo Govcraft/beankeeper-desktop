@@ -344,6 +344,36 @@ struct RecoveryRequest<'a> {
     recovery_token: &'a str,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IssuerErrorCode {
+    TrialAlreadyUsed,
+    TrialExpired,
+    TrialRateLimited,
+    ReturnNotApplicable,
+    CompRequestConflict,
+    InvalidLicenseProof,
+    ReturnWindowClosed,
+    RefundUnavailable,
+    UpdateIneligible,
+    LicenseRevoked,
+    UnsupportedLicenseFormat,
+    UnsupportedCheckoutProduct,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Serialize)]
+struct TrialRequest<'a> {
+    machine_token: &'a str,
+}
+impl<'a> From<&'a MachineToken> for TrialRequest<'a> {
+    fn from(token: &'a MachineToken) -> Self {
+        Self {
+            machine_token: token.as_ref(),
+        }
+    }
+}
+
 struct LicenseService {
     origin: LicenseServiceUrl,
     http: reqwest::blocking::Client,
@@ -355,7 +385,7 @@ impl LicenseService {
         let response = self
             .http
             .post(self.origin.endpoint("/api/v1/licenses/trial"))
-            .json(&serde_json::json!({ "machine_token": token.as_ref() }))
+            .json(&TrialRequest::from(&token))
             .send()
             .map_err(|_| ProductError::TrialUnavailable)?;
         match response.status().as_u16() {
@@ -363,7 +393,7 @@ impl LicenseService {
             409 => {
                 #[derive(Deserialize)]
                 struct Conflict {
-                    code: String,
+                    code: IssuerErrorCode,
                 }
                 let mut body = Vec::new();
                 response
@@ -371,9 +401,9 @@ impl LicenseService {
                     .read_to_end(&mut body)
                     .map_err(|_| ProductError::TrialUnavailable)?;
                 match serde_json::from_slice::<Conflict>(&body) {
-                    Ok(error) if error.code == "trial_already_used" => {
-                        Err(ProductError::TrialAlreadyUsed)
-                    }
+                    Ok(Conflict {
+                        code: IssuerErrorCode::TrialAlreadyUsed,
+                    }) => Err(ProductError::TrialAlreadyUsed),
                     _ => Err(ProductError::TrialUnavailable),
                 }
             }
@@ -381,8 +411,7 @@ impl LicenseService {
                 let retry = response
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse().ok());
+                    .and_then(|value| value.try_into().ok());
                 Err(ProductError::TrialRateLimited(retry))
             }
             _ => Err(ProductError::TrialUnavailable),
@@ -462,7 +491,7 @@ impl std::str::FromStr for MachineToken {
             || value.trim() != value
             || value.chars().any(char::is_control)
         {
-            return Err(ProductError::Recovery);
+            return Err(ProductError::MachineIdentity);
         }
         Ok(Self(value.into()))
     }
@@ -473,21 +502,19 @@ impl AsRef<str> for MachineToken {
     }
 }
 impl MachineToken {
+    fn read(file: PrivateFile) -> Result<Self, ProductError> {
+        file.read_secret(256)?.expose_secret().parse()
+    }
+
     fn load_or_create(state: &Path) -> Result<Self, ProductError> {
         let path = state.join("machine-token");
-        let read = || -> Result<Self, ProductError> {
-            PrivateFile::open(&path)?
-                .read_secret(256)?
-                .expose_secret()
-                .parse()
-        };
         match PrivateFile::open(&path) {
-            Ok(file) => return file.read_secret(256)?.expose_secret().parse(),
+            Ok(file) => return Self::read(file),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
         let mut random = Zeroizing::new([0; 32]);
-        getrandom::fill(&mut *random).map_err(|_| ProductError::Recovery)?;
+        getrandom::fill(&mut *random).map_err(|_| ProductError::MachineIdentity)?;
         let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(*random));
         let token: Self = encoded.parse()?;
         match crate::license::write_private(
@@ -499,7 +526,7 @@ impl MachineToken {
             Err(crate::license::LicenseError::Io(e))
                 if e.kind() == io::ErrorKind::AlreadyExists =>
             {
-                read()
+                Self::read(PrivateFile::open(&path)?)
             }
             Err(e) => Err(e.into()),
         }
@@ -517,8 +544,11 @@ mod trial_tests {
         let state = tempfile::tempdir()?;
         let first = MachineToken::load_or_create(state.path())?;
         let next = MachineToken::load_or_create(state.path())?;
-        assert_eq!(first.as_ref(), next.as_ref());
-        assert!("short".parse::<MachineToken>().is_err());
+        assert!(first.as_ref().eq(next.as_ref()));
+        assert!(matches!(
+            "short".parse::<MachineToken>(),
+            Err(ProductError::MachineIdentity)
+        ));
         assert!(
             format!(" {}", first.as_ref())
                 .parse::<MachineToken>()
@@ -600,6 +630,9 @@ mod trial_tests {
         for (status, body, extra) in [
             (200, "signed-test-response", ""),
             (409, "{\"code\":\"trial_already_used\"}", ""),
+            (409, "{\"code\":\"future_issuer_code\"}", ""),
+            (409, "{\"code\":\"comp_request_conflict\"}", ""),
+            (409, "invalid JSON", ""),
             (
                 429,
                 "{\"error\":\"trial_rate_limited\"}",
@@ -611,10 +644,12 @@ mod trial_tests {
             let result = service.trial(state.path());
             match status {
                 200 => assert_eq!(result?.as_ref(), body.as_bytes()),
-                409 => assert!(matches!(result, Err(ProductError::TrialAlreadyUsed))),
+                409 if body.contains("trial_already_used") => {
+                    assert!(matches!(result, Err(ProductError::TrialAlreadyUsed)));
+                }
                 429 => assert!(matches!(
                     result,
-                    Err(ProductError::TrialRateLimited(Some(60)))
+                    Err(ProductError::TrialRateLimited(Some(retry))) if retry == "60".parse()?
                 )),
                 _ => assert!(matches!(result, Err(ProductError::TrialUnavailable))),
             }
@@ -622,7 +657,11 @@ mod trial_tests {
             assert!(request.starts_with("POST /api/v1/licenses/trial "));
             let (_, body) = request.split_once("\r\n\r\n").ok_or("body")?;
             let sent: serde_json::Value = serde_json::from_str(body)?;
-            assert_eq!(sent["machine_token"], token.as_ref());
+            assert!(
+                sent["machine_token"]
+                    .as_str()
+                    .is_some_and(|value| value.eq(token.as_ref()))
+            );
             assert_eq!(sent.as_object().ok_or("object")?.len(), 1);
         }
         Ok(())
