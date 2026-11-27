@@ -59,13 +59,10 @@ impl TrialNotice {
 impl fmt::Display for TrialNotice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.code {
-            LicenseErrorCode::TrialAlreadyUsed => ProductError::TrialAlreadyUsed.fmt(f),
             LicenseErrorCode::TrialRateLimited => {
                 ProductError::TrialRateLimited(self.retry_after_seconds).fmt(f)
             }
-            LicenseErrorCode::TrialExpired => LicenseError::TrialExpired.fmt(f),
-            LicenseErrorCode::LicenseMachineIdentity => ProductError::MachineIdentity.fmt(f),
-            _ => ProductError::TrialUnavailable.fmt(f),
+            code => code.fmt(f),
         }
     }
 }
@@ -482,6 +479,31 @@ pub(super) enum LicenseErrorCode {
     WorkerFailed,
 }
 
+impl fmt::Display for LicenseErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TrialAlreadyUsed => ProductError::TrialAlreadyUsed.fmt(f),
+            Self::TrialRateLimited => ProductError::TrialRateLimited(None).fmt(f),
+            Self::TrialUnavailable => ProductError::TrialUnavailable.fmt(f),
+            Self::TrialExpired => LicenseError::TrialExpired.fmt(f),
+            Self::LicenseArguments => ProductError::ActivationInput.fmt(f),
+            Self::LicenseInvalidClaimCode => ProductError::InvalidClaimCode.fmt(f),
+            Self::LicenseRedemptionFailed => ProductError::Redemption.fmt(f),
+            Self::LicenseRecoveryFailed => ProductError::Recovery.fmt(f),
+            Self::LicenseMachineIdentity => ProductError::MachineIdentity.fmt(f),
+            Self::LicenseBooksRequired => ProductError::BooksRequired.fmt(f),
+            Self::LicenseBoundElsewhere => ProductError::LicenseBoundElsewhere.fmt(f),
+            Self::LicenseRevoked => f.write_str("This Desktop license was revoked and does not allow writes."),
+            Self::LicenseWrongMajor => f.write_str("This Desktop license does not cover the current release."),
+            Self::LicenseInvalid => f.write_str("Desktop could not read that license. Use the original license from your purchase or grant."),
+            Self::LicenseUnverified => f.write_str("Desktop could not verify that license. Use the original license from your purchase or grant."),
+            Self::LicenseConfiguration => f.write_str("This installation is missing a working license configuration."),
+            Self::LicenseUnavailable => f.write_str("Desktop could not read or save the license information on this computer."),
+            Self::WorkerFailed => ProductError::LicenseWorkerFailed.fmt(f),
+        }
+    }
+}
+
 impl From<&ProductError> for LicenseErrorCode {
     fn from(error: &ProductError) -> Self {
         match error {
@@ -536,10 +558,10 @@ impl From<&LicenseError> for LicenseErrorCode {
 impl LicenseErrorCode {
     fn message(self, error: &ProductError) -> String {
         match self {
-            Self::LicenseUnverified => "Desktop could not verify that license. Use the original license from your purchase or grant.".into(),
-            Self::LicenseInvalid => "Desktop could not read that license. Use the original license from your purchase or grant.".into(),
-            Self::LicenseConfiguration => "This installation is missing a working license configuration.".into(),
-            Self::LicenseUnavailable => "Desktop could not read or save the license information on this computer.".into(),
+            Self::LicenseUnverified
+            | Self::LicenseInvalid
+            | Self::LicenseConfiguration
+            | Self::LicenseUnavailable => self.to_string(),
             _ => error.to_string(),
         }
     }
@@ -564,6 +586,8 @@ mod tests {
             ProductError::TrialRateLimited(Some("60".parse()?)),
             ProductError::TrialAlreadyUsed,
             ProductError::TrialUnavailable,
+            ProductError::LicenseBoundElsewhere,
+            ProductError::MachineIdentity,
         ] {
             let notice = TrialNotice::from(&error);
             notice.save(state.path())?;
@@ -575,6 +599,11 @@ mod tests {
             let response = serde_json::to_value(TrialNoticeResponse::from(&loaded))?;
             assert_eq!(response["message"], error.to_string());
         }
+        let configuration = TrialNotice::from(&ProductError::ServiceUrlMissing);
+        assert_eq!(
+            configuration.to_string(),
+            "This installation is missing a working license configuration."
+        );
         let path = state.path().join(TrialNotice::PATH);
         std::fs::write(
             &path,
