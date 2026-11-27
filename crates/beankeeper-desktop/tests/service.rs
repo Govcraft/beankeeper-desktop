@@ -950,6 +950,7 @@ fn provision_through_lifecycle_mcp(
 ) -> TestResult {
     command
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/stub-systemd-bus")
+        .env("XDG_RUNTIME_DIR", home.join("missing-fixture-runtime"))
         .env("CODEX_HOME", home.join("codex"))
         .args(["service", "mcp"]);
     let install = stdio_tool_response(
@@ -962,7 +963,7 @@ fn provision_through_lifecycle_mcp(
     assert!(
         install["structuredContent"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("OS service manager refused"))
+            .is_some_and(|message| message.contains("OS service manager"))
     );
     assert!(books.with_extension("passphrase").is_file());
     assert_eq!(std::fs::read_dir(home)?.count(), 0);
@@ -1758,7 +1759,8 @@ fn unusable_session_is_reported_before_managing_services_and_after_agent_registr
     assert!(String::from_utf8(bridge.stderr)?.contains("SESSION_ENV_UNAVAILABLE"));
     check_lifecycle(command(), "SESSION_ENV_UNAVAILABLE", true)?;
     fs::create_dir(&runtime)?;
-    let _bus = UnixListener::bind(runtime.join("bus"))?;
+    fs::create_dir(runtime.join("systemd"))?;
+    let _bus = UnixListener::bind(runtime.join("systemd/private"))?;
     assert_stop_clears_stale_runtime(&command, &state)?;
     Ok(())
 }
@@ -3344,3 +3346,200 @@ fn trial_cli_and_mcp_share_activation_and_private_machine_identity() -> TestResu
     server.join().map_err(|_| "trial mock panicked")??;
     Ok(())
 }
+
+#[test]
+fn install_plan_is_read_only_and_matches_mcp_with_overrides() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    std::fs::create_dir(&home)?;
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", root.path().join("config"));
+        command
+    };
+    let output = command()
+        .args([
+            "service",
+            "install",
+            "--plan",
+            "--json",
+            "--file-store",
+            "--no-agents",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(plan["ok"], true);
+    let directories = plan["data"]["directories"]
+        .as_array()
+        .ok_or("missing folders")?;
+    for expected in ["data", "state", "logs"] {
+        assert!(directories.iter().any(|entry| entry["path"] == root.path().join(expected).to_string_lossy().as_ref()));
+    }
+    for entry in directories {
+        assert!(std::path::Path::new(entry["parent"].as_str().ok_or("missing parent")?).is_dir());
+    }
+    let mut mcp = command();
+    mcp.args(["service", "mcp"]);
+    let result = stdio_tool_response(
+        mcp,
+        "service_install",
+        &json!({"plan":true,"file_store":true,"no_agents":true}),
+    )?;
+    assert_eq!(result["structuredContent"]["data"], plan["data"]);
+    assert!(!root.path().join("data").exists());
+    assert!(!root.path().join("state").exists());
+    assert!(!root.path().join("logs").exists());
+    assert_eq!(std::fs::read_dir(&home)?.count(), 0);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn install_denied_directory_is_a_json_envelope_with_exact_resume() -> TestResult {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    if rustix::process::geteuid().as_raw() == 0 {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir(&home)?;
+    let blocked = root.path().join("blocked");
+    fs::create_dir(&blocked)?;
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500))?;
+    let mut command = isolated(root.path());
+    command
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("BEANKEEPER_SERVICE_DATA_DIR", blocked.join("data"));
+    let output = command
+        .args([
+            "service",
+            "install",
+            "--json",
+            "--file-store",
+            "--no-agents",
+        ])
+        .output()?;
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error"]["code"], "SERVICE_WRITE_DENIED");
+    assert_eq!(
+        report["error"]["path"],
+        blocked.join("data").to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        report["error"]["parent"],
+        blocked.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        report["error"]["resume"],
+        "bk service install --file-store --no-agents --json"
+    );
+    assert!(!root.path().join("data/books.db").exists());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn manager_prefers_explicit_bus_and_retries_private_transport_once() -> TestResult {
+    use std::{
+        fs,
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+    };
+    let fixture = LegacyService::new()?;
+    let root = fixture.root.path();
+    let runtime = root.join("runtime");
+    fs::create_dir_all(runtime.join("systemd"))?;
+    let _private = UnixListener::bind(runtime.join("systemd/private"))?;
+    let bin = root.join("manager-bin");
+    fs::create_dir(&bin)?;
+    fs::write(
+        bin.join("systemctl"),
+        r#"#!/bin/sh
+printf '%s|%s|%s\n' "$2" "$DBUS_SESSION_BUS_ADDRESS" "$XDG_RUNTIME_DIR" >> "$BK_TEST_TRACE"
+if [ "$BK_TEST_FAIL_BUS" = 1 ] && [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    printf 'localized connection diagnostic\n' >&2
+    exit 1
+fi
+printf 'on-failure\n'
+exit 0
+"#,
+    )?;
+    fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755))?;
+    let trace = root.join("transport-trace");
+    let command = |fail_bus: &str| {
+        let mut command = fixture.command();
+        command
+            .env("PATH", &bin)
+            .env("BK_TEST_TRACE", &trace)
+            .env("BK_TEST_FAIL_BUS", fail_bus)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/missing-fixture-bus")
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .args(["service", "stop"]);
+        command
+    };
+    let first = command("0").output()?;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let calls = fs::read_to_string(&trace)?;
+    assert!(
+        calls
+            .lines()
+            .all(|line| line.ends_with("|unix:path=/missing-fixture-bus|"))
+    );
+    fs::write(&trace, [])?;
+    let second = command("1").output()?;
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let calls = fs::read_to_string(&trace)?;
+    let lines: Vec<_> = calls.lines().collect();
+    assert_eq!(lines.len(), 6, "{calls}");
+    for pair in lines.as_chunks::<2>().0 {
+        assert!(pair[0].ends_with("|unix:path=/missing-fixture-bus|"));
+        assert!(pair[1].ends_with(&format!("||{}", runtime.display())));
+    }
+    Ok(())
+}
+
+#[test]
+fn agents_connect_plan_has_cli_mcp_parity() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let command = || {
+        let mut command = isolated(root.path());
+        command
+            .env("HOME", root.path())
+            .env("USERPROFILE", root.path())
+            .env("CODEX_HOME", root.path().join("custom-codex"));
+        command
+    };
+    let cli = command()
+        .args(["agents", "connect", "codex", "--plan", "--json"])
+        .output()?;
+    assert!(cli.status.success());
+    let report: Value = serde_json::from_slice(&cli.stdout)?;
+    let mut mcp = command();
+    mcp.args(["service", "mcp"]);
+    let reply = stdio_tool_response(mcp, "agents_connect", &json!({"agent":"codex","plan":true}))?;
+    assert_ne!(reply["isError"], true, "{reply}");
+    assert_eq!(report["data"], reply["structuredContent"]["data"]);
+    assert!(!root.path().join("state").exists());
+    assert!(!root.path().join("custom-codex").exists());
+    Ok(())
+}
+

@@ -41,6 +41,7 @@ impl ServerHandler for Lifecycle {
                 .into_iter()
                 .filter_map(ServiceOperation::tool)
                 .chain(extension::mcp_tool())
+                .chain(std::iter::once(crate::agents::connect_tool()))
                 .chain(crate::diagnostics::tools())
                 .chain(LicenseTool::tools())
                 .collect(),
@@ -62,6 +63,14 @@ impl ServerHandler for Lifecycle {
                 .unwrap_or_else(|_| failure(&ServiceError::Worker))
                 .into());
         }
+        if request.name == crate::agents::CONNECT_TOOL {
+            return Ok(
+                tokio::task::spawn_blocking(move || crate::agents::connect_call(request))
+                    .await
+                    .unwrap_or_else(|_| failure(&ServiceError::Worker))
+                    .into(),
+            );
+        }
         if request.name == extension::TOOL {
             let result = tokio::task::spawn_blocking(move || extension::mcp_call(request)).await;
             return Ok(result
@@ -75,7 +84,7 @@ impl ServerHandler for Lifecycle {
         let result = tokio::task::spawn_blocking(move || execute(operation, None, None)).await;
         Ok(match result {
             Ok(Ok(status)) => reply(status),
-            Ok(Err(error)) => failure(&error),
+            Ok(Err(error)) => failure_for(&error, operation),
             Err(_) => failure(&ServiceError::Worker),
         }
         .into())
@@ -99,6 +108,12 @@ pub(crate) fn local_call(params: &serde_json::Value, books: &Path) -> CallToolRe
 }
 
 fn reply(reply: ServiceReply) -> CallToolResult {
+    if let ServiceReply::Plan(plan) = reply {
+        let message = plan.to_string();
+        let mut result = CallToolResult::structured(json!({"ok":true,"data":plan}));
+        result.content = vec![ContentBlock::text(message)];
+        return result;
+    }
     let ServiceReply::Status(status) = reply else {
         let message = ServiceReply::OPENED_MESSAGE;
         let mut result = CallToolResult::structured(json!({"opened": true, "message": message}));
@@ -118,10 +133,19 @@ fn reply(reply: ServiceReply) -> CallToolResult {
     result.content = vec![ContentBlock::text(message)];
     result
 }
+fn failure_for(error: &ServiceError, operation: ServiceOperation) -> CallToolResult {
+    let resume = match operation {
+        ServiceOperation::Install(options) => options.resume(),
+        _ => "bk service status --json".into(),
+    };
+    let mut result = CallToolResult::structured_error(error.structured(&resume));
+    result.content = vec![ContentBlock::text(error.to_string())];
+    result
+}
 fn failure(error: &ServiceError) -> CallToolResult {
     let message = error.to_string();
     let mut result =
-        CallToolResult::structured_error(json!({"code": error.code(), "message": message}));
+        CallToolResult::structured_error(error.structured("bk service install --json"));
     result.content = vec![ContentBlock::text(message)];
     result
 }

@@ -12,6 +12,7 @@ pub mod cli;
 pub mod demo;
 pub mod diagnostics;
 mod entitlement;
+mod folders;
 #[doc(hidden)]
 pub mod imports;
 mod instance;

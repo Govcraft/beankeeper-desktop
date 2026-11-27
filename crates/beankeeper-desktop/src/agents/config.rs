@@ -106,7 +106,7 @@ struct FileSnapshot {
 
 impl FileSnapshot {
     fn read(path: &Path) -> Result<Self, AgentError> {
-        let error_at = |error| AgentError::Io(path.into(), error);
+        let error_at = |error| AgentError::at(path, error);
         let before = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CONFIG_BYTES => {
                 let file = File::open(path).map_err(error_at)?;
@@ -160,7 +160,7 @@ impl FileChange {
                 original.as_bytes(),
                 WriteMode::Backup,
             )
-            .map_err(|error| AgentError::Io(path.into(), error))?;
+            .map_err(|error| AgentError::at(path, error))?;
         }
         self.replace(self.revised.as_deref())
     }
@@ -179,7 +179,7 @@ impl FileChange {
             Some(contents) => write_private(path, contents.as_bytes(), WriteMode::Replace),
             None => fs::remove_file(path),
         }
-        .map_err(|error| AgentError::Io(path.clone(), error))
+        .map_err(|error| AgentError::at(path, error))
     }
 }
 
@@ -190,11 +190,9 @@ enum WriteMode {
 }
 
 fn write_private(path: &Path, content: &[u8], mode: WriteMode) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("config path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    let parent = crate::folders::Directory::containing(path);
+    parent.create()?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent.as_ref())?;
     crate::setup::keychain::restrict_file(temp.path())?;
     temp.write_all(content)?;
     temp.as_file().sync_all()?;

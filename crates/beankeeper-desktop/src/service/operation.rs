@@ -19,13 +19,33 @@ pub(crate) const OPEN_TOOL: &str = "service_open";
 pub struct InstallOptions {
     /// Use a private passphrase file instead of the native secret store for new books.
     #[arg(long)]
-    file_store: bool,
+    pub(super) file_store: bool,
     /// Leave all MCP client configurations unchanged.
     #[arg(long)]
-    no_agents: bool,
+    pub(super) no_agents: bool,
+    /// List folder grants without changing any files or starting hosting.
+    #[arg(long)]
+    pub(super) plan: bool,
 }
 
 impl InstallOptions {
+    pub(super) fn resume(self) -> String {
+        self.resume_for(None)
+    }
+    pub(super) fn resume_for(self, books: Option<&Path>) -> String {
+        let books = books.map_or_else(String::new, |path| {
+            format!(
+                " --db '{}'",
+                path.to_string_lossy().replace('\'', "'\"'\"'")
+            )
+        });
+        format!(
+            "bk{books} service install{}{} --json",
+            if self.file_store { " --file-store" } else { "" },
+            if self.no_agents { " --no-agents" } else { "" }
+        )
+    }
+
     pub(super) fn storage(self) -> ServiceSecretStorage {
         if self.file_store {
             ServiceSecretStorage::PrivateFile

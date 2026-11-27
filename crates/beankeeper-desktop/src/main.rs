@@ -112,17 +112,7 @@ fn main() -> ExitCode {
                 );
             return agents::run(options, json, matches.get_flag("quiet"));
         }
-        DesktopCommand::Service(options) => {
-            let mut ledger = cli::ledger_options(&matches).unwrap_or_else(|error| error.exit());
-            ledger.output = beankeeper_cli::cli::FormatOptions::from_arg_matches(&matches)
-                .unwrap_or_else(|error| error.exit());
-            service::run(
-                &options,
-                ledger,
-                matches.value_source("db") == Some(ValueSource::CommandLine),
-            )
-            .map_err(|error| DesktopError::Service(Box::new(error)))
-        }
+        DesktopCommand::Service(options) => return run_service(&options, &matches),
         DesktopCommand::License(options) => return run_license(options, &matches),
         DesktopCommand::Diagnostic(operation) => return run_diagnostic(operation, &matches),
         DesktopCommand::InstallUpdate => install_update(),
@@ -182,6 +172,24 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_service(options: &service::ServiceOptions, matches: &clap::ArgMatches) -> ExitCode {
+    let ledger = desktop_ledger_options(matches);
+    let json = ledger.is_json() && matches!(options.command, service::ServiceCommand::Install(_));
+    match service::run(
+        options,
+        ledger,
+        matches.value_source("db") == Some(ValueSource::CommandLine),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if !json {
+                eprintln!("{}: {error}", error.code());
+            }
             ExitCode::FAILURE
         }
     }

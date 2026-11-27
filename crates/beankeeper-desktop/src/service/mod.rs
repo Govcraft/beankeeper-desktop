@@ -40,6 +40,8 @@ use operation::ServiceOperation;
 pub(crate) use operation::{ACCESS_TOOL, OPEN_TOOL, access_tool, open_tool};
 use session::UserSessionEnv;
 
+use crate::folders::{Directory, FolderPlan, WriteDenied};
+
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
 
 /// Lifecycle controls run with the current OS user's authority.
@@ -95,7 +97,8 @@ pub enum ServiceCommand {
 }
 
 /// Secret-free service-manager failure categories, independent of localized messages.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManagerFailure {
     /// The selected session socket could not be reached.
     Connection,
@@ -119,6 +122,8 @@ impl fmt::Display for ManagerFailure {
 pub enum ServiceError {
     /// Filesystem or process execution failure.
     Io(io::Error),
+    /// A denied write, retaining its affected directory and OS failure kind.
+    WriteDenied(crate::folders::WriteDenied),
     /// Invalid or conflicting service configuration.
     Configuration(&'static str),
     /// An OS manager command failed. Secret-bearing output is never included.
@@ -162,11 +167,28 @@ pub enum ServiceError {
 }
 
 impl ServiceError {
+    pub(crate) fn at(directory: Directory, error: io::Error) -> Self {
+        WriteDenied::at(directory, &error).map_or_else(|| Self::Io(error), Self::WriteDenied)
+    }
+    pub(crate) fn structured(&self, resume: &str) -> serde_json::Value {
+        let mut value = serde_json::json!({"code": self.code(), "message": self.to_string()});
+        if let Self::WriteDenied(error) = self
+            && let (Some(object), Some(details)) =
+                (value.as_object_mut(), error.details(resume).as_object())
+        {
+            object.extend(details.clone());
+        }
+        if let Self::Manager(reason) = self {
+            value["reason"] = serde_json::json!(reason);
+        }
+        value
+    }
     /// Stable error name returned by lifecycle MCP tools.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::Io(_) => "SERVICE_IO",
+            Self::WriteDenied(_) => "SERVICE_WRITE_DENIED",
             Self::Configuration(_) => "SERVICE_CONFIGURATION",
             Self::Manager(_) => "SERVICE_MANAGER",
             Self::SessionEnvUnavailable => "SESSION_ENV_UNAVAILABLE",
@@ -194,6 +216,7 @@ impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "service I/O failed: {error}"),
+            Self::WriteDenied(error) => error.fmt(f),
             Self::Configuration(message) => f.write_str(message),
             Self::Manager(error) => error.fmt(f),
             Self::SessionEnvUnavailable => f.write_str("Cannot find your Linux session bus. The agent should use the owner's active login session and its DBUS_SESSION_BUS_ADDRESS. When that address works, leave XDG_RUNTIME_DIR unset for the service-manager child. If no bus address is available, the agent can use the owner's XDG_RUNTIME_DIR with its systemd/private socket. Retry the same operation; it picks up where it stopped."),
@@ -225,7 +248,10 @@ impl From<io::Error> for ServiceError {
 }
 impl From<setup::SetupError> for ServiceError {
     fn from(error: setup::SetupError) -> Self {
-        Self::Setup(Box::new(error))
+        match error {
+            setup::SetupError::WriteDenied(error) => Self::WriteDenied(error),
+            error => Self::Setup(Box::new(error)),
+        }
     }
 }
 impl From<crate::DesktopError> for ServiceError {
@@ -305,10 +331,14 @@ impl Paths {
     pub fn log(&self) -> PathBuf {
         self.logs.join("service.log")
     }
+    fn directories(&self) -> [Directory; 3] {
+        [&self.data, &self.state, &self.logs].map(|path| Directory::new(path))
+    }
     fn prepare(&self) -> Result<(), ServiceError> {
-        for path in [&self.data, &self.state, &self.logs] {
-            fs::create_dir_all(path)?;
-            keychain::restrict_directory(path)?;
+        for directory in self.directories() {
+            directory
+                .prepare()
+                .map_err(|error| ServiceError::at(directory, error))?;
         }
         Ok(())
     }
@@ -424,6 +454,7 @@ impl Status {
 enum ServiceReply {
     Status(Box<Status>),
     Opened,
+    Plan(FolderPlan),
 }
 
 impl ServiceReply {
@@ -703,10 +734,75 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         _ => {}
     }
     let operation = ServiceOperation::try_from(options.command)?;
-    let ServiceReply::Status(status) = execute(operation, Some((cli, explicit_db)), None)? else {
-        println!("{}", ServiceReply::OPENED_MESSAGE);
+    let json = cli.is_json()
+        || matches!(
+            options.command,
+            ServiceCommand::Status { json: true } | ServiceCommand::AccessSet { json: true, .. }
+        );
+    let resume = match operation {
+        ServiceOperation::Install(options) => {
+            options.resume_for(explicit_db.then_some(cli.db.as_path()))
+        }
+        _ => "bk service status --json".into(),
+    };
+    let reply = match execute(operation, Some((cli, explicit_db)), None) {
+        Ok(reply) => reply,
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_value(crate::output::Envelope::<_, (), _> {
+                        ok: false,
+                        meta: crate::output::Metadata::new("service"),
+                        data: None,
+                        error: Some(error.structured(&resume))
+                    })
+                    .map_err(|_| ServiceError::Configuration("cannot serialize service error"))?
+                );
+            }
+            return Err(error);
+        }
+    };
+    if let ServiceReply::Plan(plan) = reply {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_value(crate::output::Envelope::<_, _, ()> {
+                    ok: true,
+                    meta: crate::output::Metadata::new("service.install"),
+                    data: Some(plan),
+                    error: None
+                })
+                .map_err(|_| ServiceError::Configuration("cannot serialize folder plan"))?
+            );
+        } else {
+            println!("{plan}");
+        }
+        return Ok(());
+    }
+    let ServiceReply::Status(status) = reply else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"opened":true,"message":ServiceReply::OPENED_MESSAGE})
+            );
+        } else {
+            println!("{}", ServiceReply::OPENED_MESSAGE);
+        }
         return Ok(());
     };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&status)
+                .map_err(|_| ServiceError::Configuration("cannot serialize service status"))?
+        );
+        return Ok(());
+    }
+    print_status(options, *status)
+}
+
+fn print_status(options: &ServiceOptions, status: Status) -> Result<(), ServiceError> {
     match options.command {
         ServiceCommand::Status { json: true } | ServiceCommand::AccessSet { json: true, .. } => {
             println!(
@@ -750,6 +846,39 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
     Ok(())
 }
 
+fn install_plan(
+    paths: &Paths,
+    ledger: Option<&(Cli, bool)>,
+    options: InstallOptions,
+) -> Result<FolderPlan, ServiceError> {
+    let mut directories = paths.directories().to_vec();
+    directories.push(setup::temporary_secret_directory());
+    directories.push(Directory::containing(&paths.definition));
+    if cfg!(target_os = "linux") {
+        directories.push(Directory::containing(&manager::linux_artifact(paths)));
+    }
+    let explicit = ledger
+        .filter(|(_, explicit)| *explicit)
+        .map(|(cli, _)| cli.db.as_path());
+    let books = explicit.map_or_else(
+        || {
+            Config::load(paths).map(|config| {
+                config.map_or_else(|| paths.data.join("books.db"), |config| config.books)
+            })
+        },
+        |path| std::path::absolute(path).map_err(Into::into),
+    )?;
+    directories.push(Directory::containing(&books));
+    if !options.no_agents {
+        directories.extend(
+            setup::config::service_config_paths(&paths.home)
+                .iter()
+                .map(|path| Directory::containing(path)),
+        );
+    }
+    FolderPlan::try_from((directories, options.resume_for(explicit))).map_err(Into::into)
+}
+
 fn execute(
     operation: ServiceOperation,
     ledger: Option<(Cli, bool)>,
@@ -763,6 +892,11 @@ fn execute(
             return Ok(ServiceReply::Opened);
         }
         _ => {}
+    }
+    if let ServiceOperation::Install(options) = operation
+        && options.plan
+    {
+        return install_plan(&paths, ledger.as_ref(), options).map(ServiceReply::Plan);
     }
     paths.prepare()?;
     let _lock = lock(&paths.state.join("service-operation.lock"))?;
@@ -1051,6 +1185,12 @@ fn bind_listener(preferred: u16) -> io::Result<TcpListener> {
     }
 }
 pub(crate) fn lock(path: &Path) -> Result<fs::File, ServiceError> {
+    lock_at(path).map_err(|error| match error {
+        ServiceError::Io(error) => ServiceError::at(Directory::containing(path), error),
+        error => error,
+    })
+}
+fn lock_at(path: &Path) -> Result<fs::File, ServiceError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1077,16 +1217,20 @@ pub(crate) fn private_json(path: &Path, value: &impl Serialize) -> Result<(), Se
     private_write(path, &bytes)
 }
 pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
-    let parent = path.parent().ok_or(ServiceError::Configuration(
-        "service file needs a parent directory",
-    ))?;
-    fs::create_dir_all(parent)?;
+    private_write_at(path, bytes).map_err(|error| match error {
+        ServiceError::Io(error) => ServiceError::at(Directory::containing(path), error),
+        error => error,
+    })
+}
+fn private_write_at(path: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
+    let parent = Directory::containing(path);
+    parent.create()?;
     match PrivateFile::open(path) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent.as_ref())?;
     keychain::restrict_file(pending.path())?;
     pending.write_all(bytes)?;
     pending.as_file().sync_all()?;

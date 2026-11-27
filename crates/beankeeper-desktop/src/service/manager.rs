@@ -309,7 +309,6 @@ struct SystemdLog(String);
 impl TryFrom<&Path> for SystemdLog {
     type Error = ServiceError;
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
-        if !path.is_absolute() { return Err(ServiceError::Configuration("systemd log paths must be absolute")); }
         let path = text(path)?;
         if path
             .chars()
@@ -532,8 +531,9 @@ mod tests {
             port: 8750,
         };
         let unit = systemd(&paths, &config)?;
+        let log = paths.log().to_string_lossy().replace('%', "%%");
         for directive in ["StandardOutput", "StandardError"] {
-            assert!(unit.contains(&format!("{directive}=append:/logs/100%%/service.log\n")));
+            assert!(unit.contains(&format!("{directive}=append:{log}\n")));
             assert!(!unit.contains(&format!("{directive}=\"")));
         }
         Ok(())

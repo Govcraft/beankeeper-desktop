@@ -126,6 +126,8 @@ pub struct SetupLaunchOptions {
 pub enum SetupError {
     /// A file or terminal operation failed.
     Io(io::Error),
+    /// A filesystem boundary denied a write to this directory.
+    WriteDenied(crate::folders::WriteDenied),
     /// An upstream ledger operation failed.
     Ledger(CliError),
     /// An OS credential operation failed.
@@ -140,10 +142,37 @@ pub enum SetupError {
     Desktop(crate::DesktopError),
 }
 
+impl SetupError {
+    fn at(self, file: &Path) -> Self {
+        match self {
+            Self::Io(error) | Self::Keychain(keychain::KeychainError::Io(error)) => {
+                crate::folders::WriteDenied::at(crate::folders::Directory::containing(file), &error)
+                    .map_or_else(|| Self::Io(error), Self::WriteDenied)
+            }
+            Self::Config(config::ConfigError::Io(path, error)) => crate::folders::WriteDenied::at(
+                crate::folders::Directory::containing(&path),
+                &error,
+            )
+            .map_or_else(
+                || Self::Config(config::ConfigError::Io(path, error)),
+                Self::WriteDenied,
+            ),
+            error => error,
+        }
+    }
+    pub(crate) fn service_file(error: crate::service::ServiceError) -> Self {
+        match error {
+            crate::service::ServiceError::WriteDenied(error) => Self::WriteDenied(error),
+            crate::service::ServiceError::Io(error) => Self::Io(error),
+            _ => Self::Invalid("cannot update private setup state"),
+        }
+    }
+}
 impl fmt::Display for SetupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "setup file operation failed: {error}"),
+            Self::WriteDenied(error) => error.fmt(f),
             Self::Ledger(error) => write!(f, "{error}"),
             Self::Keychain(error) => write!(f, "{error}"),
             Self::Keyring(failure) => failure.fmt(f),
@@ -242,7 +271,8 @@ pub(crate) fn run_service(
     storage: ServiceSecretStorage,
     state: &Path,
 ) -> Result<(), SetupError> {
-    run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)?;
+    run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)
+        .map_err(|error| error.at(&cli.db))?;
     eprintln!("{}", crate::product::setup_trial_at(&cli.db, state));
     Ok(())
 }
@@ -429,7 +459,11 @@ fn run_with_store(
             recovery_kit(&cli.db, &owner_file, secret.expose_secret()).as_bytes(),
         )?;
     }
-    let temporary = temporary_passphrase(&secret)?;
+    let temporary = temporary_passphrase(&secret).map_err(|error| {
+        let directory = temporary_secret_directory();
+        crate::folders::WriteDenied::at(directory, &error)
+            .map_or_else(|| SetupError::Io(error), SetupError::WriteDenied)
+    })?;
     cli.passphrase.passphrase_fd = None;
     cli.passphrase.passphrase_file = Some(temporary.path().into());
     if matches!(mode, SetupMode::Fresh) {
@@ -871,8 +905,11 @@ fn set_private(path: &Path) -> io::Result<()> {
     keychain::restrict_file(path)
 }
 
+pub(crate) fn temporary_secret_directory() -> crate::folders::Directory {
+    crate::folders::Directory::new(&std::env::temp_dir())
+}
 pub(crate) fn temporary_passphrase(secret: &SecretString) -> io::Result<tempfile::NamedTempFile> {
-    let mut file = tempfile::NamedTempFile::new()?;
+    let mut file = tempfile::NamedTempFile::new_in(temporary_secret_directory().as_ref())?;
     keychain::restrict_file(file.path())?;
     file.write_all(secret.expose_secret().as_bytes())?;
     file.flush()?;

@@ -14,6 +14,7 @@ use std::{
     process::ExitCode,
 };
 
+use crate::folders::{Directory, FolderPlan, WriteDenied};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -37,7 +38,7 @@ enum AgentCommand {
     /// List all supported clients and their local configuration state.
     Detect,
     /// Add Beankeeper to installed agents and install the skill where supported.
-    Connect(Selection),
+    Connect(ConnectOptions),
     /// Remove Beankeeper's managed entries and skill, retaining other settings.
     Disconnect(Selection),
     /// Verify client configuration and make an authenticated read-only MCP call.
@@ -46,7 +47,17 @@ enum AgentCommand {
     Extension(extension::Options),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Deserialize, Default)]
+#[serde(try_from = "ConnectInput")]
+struct ConnectOptions {
+    #[command(flatten)]
+    selection: Selection,
+    /// List folder grants without changing any files.
+    #[arg(long)]
+    plan: bool,
+}
+
+#[derive(Args, Debug, Default)]
 struct Selection {
     /// Apply to all detected clients, instead of selecting a single client.
     #[arg(long, conflicts_with = "agent")]
@@ -55,6 +66,29 @@ struct Selection {
     /// Without a selection, checks all detected clients.
     #[arg(value_enum)]
     agent: Option<Agent>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ConnectInput {
+    all: bool,
+    agent: Option<Agent>,
+    plan: bool,
+}
+impl TryFrom<ConnectInput> for ConnectOptions {
+    type Error = AgentError;
+    fn try_from(input: ConnectInput) -> Result<Self, Self::Error> {
+        if input.all && input.agent.is_some() {
+            return Err(AgentError::Arguments);
+        }
+        Ok(Self {
+            selection: Selection {
+                all: input.all,
+                agent: input.agent,
+            },
+            plan: input.plan,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -71,6 +105,7 @@ enum Operation {
 
 #[derive(Debug)]
 enum AgentError {
+    Arguments,
     Home,
     Version,
     Binary(io::Error),
@@ -85,11 +120,17 @@ enum AgentError {
         reason: config::ServerConflict,
     },
     Io(PathBuf, io::Error),
+    WriteDenied(WriteDenied),
 }
 
 impl AgentError {
+    fn at(path: &std::path::Path, error: io::Error) -> Self {
+        WriteDenied::at(Directory::containing(path), &error)
+            .map_or_else(|| Self::Io(path.into(), error), Self::WriteDenied)
+    }
     fn code(&self) -> &'static str {
         match self {
+            Self::Arguments => "AGENT_ARGUMENTS",
             Self::Home => "AGENT_HOME_UNAVAILABLE",
             Self::Version => "AGENT_VERSION_INVALID",
             Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
@@ -98,6 +139,7 @@ impl AgentError {
             Self::Conflict(_) | Self::RegistrationConflict { .. } => "AGENT_CONFIG_CONFLICT",
             Self::ServerDisabled(_) => "AGENT_MCP_SERVER_DISABLED",
             Self::Io(..) => "AGENT_CONFIG_IO",
+            Self::WriteDenied(_) => "AGENT_CONFIG_WRITE_DENIED",
         }
     }
 }
@@ -105,6 +147,7 @@ impl AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Arguments => f.write_str("Select either all or a single agent."),
             Self::Home => {
                 f.write_str("Beankeeper needs the desktop user's absolute home directory.")
             }
@@ -135,6 +178,7 @@ impl fmt::Display for AgentError {
             Self::RegistrationConflict { path, server, reason } => {
                 write!(f, "{}: the `{server}` entry {reason}", path.display())
             }
+            Self::WriteDenied(error) => error.fmt(f),
             Self::Io(path, error) => write!(f, "cannot update or read {}: {error}", path.display()),
         }
     }
@@ -149,12 +193,14 @@ impl Error for AgentError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Failure {
     code: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     technical_detail: Option<&'static str>,
+    #[serde(flatten)]
+    details: Option<serde_json::Value>,
 }
 
 impl Failure {
@@ -163,13 +209,18 @@ impl Failure {
             code,
             message: message.into(),
             technical_detail: None,
+            details: None,
         }
     }
 }
 
 impl From<AgentError> for Failure {
     fn from(error: AgentError) -> Self {
-        Self::new(error.code(), error.to_string())
+        let mut failure = Self::new(error.code(), error.to_string());
+        if let AgentError::WriteDenied(error) = error {
+            failure.details = Some(error.details("bk agents connect --all --json"));
+        }
+        failure
     }
 }
 
@@ -281,6 +332,8 @@ impl From<ClaudeOverlap> for &'static str {
 struct Report {
     agents: Vec<ClientStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<FolderPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     claude_overlap: Option<ClaudeOverlap>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<ServiceCheck>,
@@ -292,33 +345,43 @@ struct Report {
 
 type Output = Envelope<Operation, Report, Failure>;
 
+impl From<(Operation, Report)> for Output {
+    fn from((operation, data): (Operation, Report)) -> Self {
+        let ok = data.keyring.is_none()
+            && data.agents.iter().all(|item| item.error.is_none())
+            && !matches!(data.service, Some(ServiceCheck::Unavailable { .. }));
+        let error = (!ok).then(|| {
+            data.agents.iter().filter_map(|item| item.error.as_ref())
+                .find(|error| error.details.is_some()).cloned()
+                .unwrap_or_else(|| Failure::new("AGENT_CHECKS_FAILED", "One or more agent operations need attention. See the per-client or service result."))
+        });
+        Self {
+            ok,
+            meta: Metadata::new(operation),
+            data: Some(data),
+            error,
+        }
+    }
+}
+
 /// Run the requested local agent operation and print its result.
 #[must_use = "return this status to the CLI caller"]
 pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
+    if let AgentCommand::Connect(options) = &options.command
+        && options.plan
+    {
+        return run_plan(options, json);
+    }
     let (operation, selected) = match options.command {
         AgentCommand::Detect => (Operation::Detect, None),
-        AgentCommand::Connect(selection) => (Operation::Connect, selected_agent(&selection)),
+        AgentCommand::Connect(options) => (Operation::Connect, selected_agent(&options.selection)),
         AgentCommand::Disconnect(selection) => (Operation::Disconnect, selected_agent(&selection)),
         AgentCommand::Doctor(selection) => (Operation::Doctor, selected_agent(&selection)),
         AgentCommand::Extension(options) => return extension::run(options, json, quiet),
     };
     let output_meta = Metadata::new(operation);
-    let output = match perform(operation, selected) {
-        Ok(data) => {
-            let ok = data.keyring.is_none()
-                && data.agents.iter().all(|item| item.error.is_none())
-                && !matches!(data.service, Some(ServiceCheck::Unavailable { .. }));
-            let error = (!ok).then(|| Failure::new(
-                "AGENT_CHECKS_FAILED",
-                "One or more agent operations need attention. See the per-client or service result.",
-            ));
-            Output {
-                ok,
-                meta: output_meta,
-                data: Some(data),
-                error,
-            }
-        }
+    let mut output = match perform(operation, selected) {
+        Ok(data) => (operation, data).into(),
         Err(error) => Output {
             ok: false,
             meta: output_meta,
@@ -326,6 +389,7 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
             error: Some(error.into()),
         },
     };
+    set_resume(&mut output, &connect_resume(selected));
     let result = if json {
         write_json(&output, &mut io::stdout().lock())
     } else if !quiet || !output.ok {
@@ -344,6 +408,160 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
     }
 }
 
+fn connect_resume(selected: Option<Agent>) -> String {
+    use clap::ValueEnum;
+    let selection = selected
+        .and_then(|agent| agent.to_possible_value())
+        .map_or_else(|| "--all".into(), |value| value.get_name().to_owned());
+    format!("bk agents connect {selection} --json")
+}
+
+fn set_resume(output: &mut Output, resume: &str) {
+    let update = |failure: &mut Failure| {
+        if let Some(details) = failure
+            .details
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            details.insert("resume".into(), resume.into());
+        }
+    };
+    if let Some(error) = &mut output.error {
+        update(error);
+    }
+    if let Some(data) = &mut output.data {
+        for status in &mut data.agents {
+            if let Some(error) = &mut status.error {
+                update(error);
+            }
+        }
+    }
+}
+
+fn folder_plan(selected: Option<Agent>) -> Result<FolderPlan, AgentError> {
+    let locations = Locations::discover()
+        .filter(|paths| paths.home.is_absolute())
+        .ok_or(AgentError::Home)?;
+    let mut directories = vec![Directory::containing(&mutation_lock_path()?)];
+    for agent in Agent::ALL
+        .into_iter()
+        .filter(|agent| selected.is_none_or(|selected| selected == *agent))
+    {
+        if let Some(adapter) = agent.adapter(&locations)?
+            && (selected.is_some() || adapter.installed())
+            && adapter.extension_registration()?.is_none()
+        {
+            directories.extend(adapter.directories());
+        }
+    }
+    FolderPlan::try_from((directories, connect_resume(selected)))
+        .map_err(|error| AgentError::Io(locations.home, error))
+}
+
+fn plan_output(options: &ConnectOptions) -> Output {
+    let selected = selected_agent(&options.selection);
+    match folder_plan(selected) {
+        Ok(plan) => Output {
+            ok: true,
+            meta: Metadata::new(Operation::Connect),
+            data: Some(Report {
+                agents: vec![],
+                plan: Some(plan),
+                claude_overlap: None,
+                service: None,
+                warning: None,
+                keyring: None,
+            }),
+            error: None,
+        },
+        Err(error) => Output {
+            ok: false,
+            meta: Metadata::new(Operation::Connect),
+            data: None,
+            error: Some(error.into()),
+        },
+    }
+}
+
+fn run_plan(options: &ConnectOptions, json: bool) -> ExitCode {
+    let output = plan_output(options);
+    let result = if json {
+        write_json(&output, &mut io::stdout().lock())
+    } else {
+        write_text(&output, &mut io::stdout().lock(), &mut io::stderr().lock())
+    };
+    if result.is_ok() && output.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+pub(crate) const CONNECT_TOOL: &str = "agents_connect";
+pub(crate) fn connect_tool() -> rmcp::model::Tool {
+    use clap::ValueEnum;
+    let agents: Vec<_> = Agent::ALL
+        .into_iter()
+        .filter_map(|agent| {
+            agent
+                .to_possible_value()
+                .map(|value| value.get_name().to_owned())
+        })
+        .collect();
+    rmcp::model::Tool::new(CONNECT_TOOL, "Register Beankeeper in local agents. Use plan=true first in a sandbox to obtain directory grants, never file grants. Retry resume after granting parent on a write-denied error.", serde_json::json!({"type":"object","properties":{"all":{"type":"boolean"},"agent":{"type":"string","enum":agents},"plan":{"type":"boolean"}},"additionalProperties":false}).as_object().cloned().unwrap_or_default())
+}
+pub(crate) fn connect_call(
+    request: rmcp::model::CallToolRequestParams,
+) -> rmcp::model::CallToolResult {
+    let options = serde_json::from_value::<ConnectOptions>(serde_json::Value::Object(
+        request.arguments.unwrap_or_default(),
+    ));
+    let mut output = match options {
+        Ok(options) => {
+            if options.plan {
+                plan_output(&options)
+            } else {
+                let selected = selected_agent(&options.selection);
+                let mut output = match perform(Operation::Connect, selected) {
+                    Ok(data) => (Operation::Connect, data).into(),
+                    Err(error) => Output {
+                        ok: false,
+                        meta: Metadata::new(Operation::Connect),
+                        data: None,
+                        error: Some(error.into()),
+                    },
+                };
+                set_resume(&mut output, &connect_resume(selected));
+                output
+            }
+        }
+        _ => Output {
+            ok: false,
+            meta: Metadata::new(Operation::Connect),
+            data: None,
+            error: Some(Failure::new(
+                "AGENT_ARGUMENTS",
+                "Use the agents_connect tool schema; select agent or all.",
+            )),
+        },
+    };
+    let ok = output.ok;
+    let mut message = Vec::new();
+    let mut errors = Vec::new();
+    let _ = write_text(&output, &mut message, &mut errors);
+    message.extend(errors);
+    let value = serde_json::to_value(&mut output).unwrap_or_default();
+    let mut result = if ok {
+        rmcp::model::CallToolResult::structured(value)
+    } else {
+        rmcp::model::CallToolResult::structured_error(value)
+    };
+    result.content = vec![rmcp::model::ContentBlock::text(String::from_utf8_lossy(
+        &message,
+    ))];
+    result
+}
+
 fn selected_agent(selection: &Selection) -> Option<Agent> {
     if selection.all { None } else { selection.agent }
 }
@@ -355,6 +573,9 @@ fn write_json(output: &Output, writer: &mut impl Write) -> io::Result<()> {
 
 fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write) -> io::Result<()> {
     if let Some(data) = &output.data {
+        if let Some(plan) = &data.plan {
+            writeln!(writer, "{plan}")?;
+        }
         for item in &data.agents {
             if let Some(error) = &item.error {
                 writeln!(errors, "{}: {}: {}", item.name, error.code, error.message)?;
@@ -489,6 +710,7 @@ fn perform_for(
     };
     Ok(Report {
         agents,
+        plan: None,
         claude_overlap,
         service,
         warning,
@@ -514,16 +736,21 @@ impl From<crate::setup::keychain::KeyringFailure> for Failure {
             code: error.code(),
             message: error.to_string(),
             technical_detail: Some(error.technical_detail()),
+            details: None,
         }
     }
 }
 
+fn mutation_lock_path() -> Result<PathBuf, AgentError> {
+    Ok(crate::product::state_dir()
+        .map_err(|_| AgentError::Home)?
+        .join("agent-registration.lock"))
+}
 fn mutation_lock() -> Result<fs::File, AgentError> {
-    let state = crate::product::state_dir().map_err(|_| AgentError::Home)?;
-    let path = state.join("agent-registration.lock");
-    let error_at = |error| AgentError::Io(path.clone(), error);
-    fs::create_dir_all(&state).map_err(error_at)?;
-    crate::setup::keychain::restrict_directory(&state).map_err(error_at)?;
+    let path = mutation_lock_path()?;
+    let state = Directory::containing(&path);
+    let error_at = |error| AgentError::at(&path, error);
+    state.prepare().map_err(error_at)?;
     if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
         return Err(AgentError::Invalid(path));
     }
