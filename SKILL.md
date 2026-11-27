@@ -964,6 +964,19 @@ See [docs/setup.md](https://github.com/Govcraft/beankeeper-desktop/blob/main/doc
 credential paths, headless test options, lifecycle and recovery instructions.
 Ledger, library and schema work belongs in Govcraft/beankeeper.
 
+Setup automatically starts the computer's email-free 30-day trial when the books
+have no active license. If it could not reach the service, retry later with
+`license_start_trial` on the local lifecycle connection; the CLI equivalent is
+`bk license trial`. Act directly. Never ask the owner for a terminal, email or
+machine token, and never display license or machine tokens.
+
+Mention remaining days when asked, once when a session first checks status, and
+when seven or fewer days remain. Do not prepend a countdown to every reply.
+After expiry, explain that nothing was lost: reading, export, backup, restore,
+recovery and undo still work. Offer the $79 purchase at
+https://beankeeper.app/#pricing and activate the resulting license. Paid
+activation removes local trials. Trials have no refund or in-app return.
+
 When the owner asks about their license, call `license_status` on the local
 Beankeeper connection. Explain whether the selected books are writable and
 which Desktop versions the installed license covers. If the books need a
@@ -984,7 +997,7 @@ leaving books and recovery information intact. The result reports whether the
 selected books remain writable. In official stable builds, books without another
 active license become read-only. Undo by asking the agent to activate the same
 license again, provided it has not been revoked. License status includes each
-license's typed `standing` (`valid` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
+license's typed `standing` (`valid`, `expired` or `revoked`) and signed `storefront`; revoked licenses never authorize writes.
 Revocation status reflects the signed list bundled with the installed release.
 
 When the owner requests a return, explain before the single confirmation:

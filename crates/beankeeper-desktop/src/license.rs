@@ -117,7 +117,7 @@ impl AsRef<str> for Product {
 /// The signed provenance of a purchase or grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Storefront {
+pub enum PerpetualStorefront {
     /// Polar purchase.
     Polar,
     /// Etsy purchase.
@@ -132,24 +132,153 @@ pub enum Storefront {
     Gumroad,
 }
 
+/// Authenticated provenance, including anonymous trials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Storefront {
+    Polar,
+    Etsy,
+    Direct,
+    Stripe,
+    Comp,
+    Gumroad,
+    Trial,
+}
+impl From<PerpetualStorefront> for Storefront {
+    fn from(value: PerpetualStorefront) -> Self {
+        match value {
+            PerpetualStorefront::Polar => Self::Polar,
+            PerpetualStorefront::Etsy => Self::Etsy,
+            PerpetualStorefront::Direct => Self::Direct,
+            PerpetualStorefront::Stripe => Self::Stripe,
+            PerpetualStorefront::Comp => Self::Comp,
+            PerpetualStorefront::Gumroad => Self::Gumroad,
+        }
+    }
+}
+impl TryFrom<Storefront> for PerpetualStorefront {
+    type Error = LicenseError;
+    fn try_from(value: Storefront) -> Result<Self, Self::Error> {
+        match value {
+            Storefront::Polar => Ok(Self::Polar),
+            Storefront::Etsy => Ok(Self::Etsy),
+            Storefront::Direct => Ok(Self::Direct),
+            Storefront::Stripe => Ok(Self::Stripe),
+            Storefront::Comp => Ok(Self::Comp),
+            Storefront::Gumroad => Ok(Self::Gumroad),
+            Storefront::Trial => Err(LicenseError::InvalidClaims),
+        }
+    }
+}
+/// Provenance and expiry cannot disagree after boundary validation.
+///
+/// ```compile_fail
+/// use beankeeper_desktop::license::PerpetualStorefront;
+/// let invalid = PerpetualStorefront::Trial;
+/// ```
+/// ```compile_fail
+/// use beankeeper_desktop::license::Entitlement;
+/// let invalid = Entitlement::Trial {};
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entitlement {
+    Perpetual { storefront: PerpetualStorefront },
+    Trial { expires_at: LicenseTime },
+}
+impl Entitlement {
+    /// The authenticated expiry; perpetual licenses have none.
+    #[must_use]
+    pub fn expires_at(self) -> Option<LicenseTime> {
+        match self {
+            Self::Perpetual { .. } => None,
+            Self::Trial { expires_at } => Some(expires_at),
+        }
+    }
+    /// Whether the trial has ended beyond the shared five-minute clock tolerance.
+    #[must_use]
+    pub fn is_expired(self, now: DateTime<Utc>) -> bool {
+        self.check_clock(now).is_err()
+    }
+    fn check_clock(self, now: DateTime<Utc>) -> Result<(), LicenseError> {
+        if let Some(expiry) = self.expires_at()
+            && now.signed_duration_since(expiry.0) > LicenseTime::CLOCK_SKEW
+        {
+            return Err(LicenseError::TrialExpired);
+        }
+        Ok(())
+    }
+    /// Remaining calendar-length days, rounding every positive fraction upward.
+    #[must_use]
+    pub fn days_remaining(self, now: DateTime<Utc>) -> Option<DaysRemaining> {
+        self.expires_at()
+            .map(|expiry| DaysRemaining::from((expiry, now)))
+    }
+}
+/// Whole or partial days left, saturating to zero after expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DaysRemaining(u64);
+impl From<(LicenseTime, DateTime<Utc>)> for DaysRemaining {
+    fn from((expiry, now): (LicenseTime, DateTime<Utc>)) -> Self {
+        let duration = expiry.0.signed_duration_since(now);
+        let days = duration.num_days();
+        let partial = duration > TimeDelta::days(days);
+        Self(
+            u64::try_from(days).unwrap_or_default()
+                + u64::from(duration > TimeDelta::zero() && partial),
+        )
+    }
+}
+impl fmt::Display for DaysRemaining {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
-struct LicenseTime(DateTime<Utc>);
+pub struct LicenseTime(DateTime<Utc>);
 
+impl FromStr for LicenseTime {
+    type Err = LicenseError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        DateTime::parse_from_rfc3339(value)
+            .map_err(|_| LicenseError::InvalidClaims)?
+            .to_utc()
+            .try_into()
+    }
+}
 impl TryFrom<String> for LicenseTime {
     type Error = LicenseError;
-
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let time = DateTime::parse_from_rfc3339(&value)
-            .map_err(|_| LicenseError::InvalidClaims)?
-            .to_utc();
+        value.parse()
+    }
+}
+impl TryFrom<DateTime<Utc>> for LicenseTime {
+    type Error = LicenseError;
+    fn try_from(time: DateTime<Utc>) -> Result<Self, Self::Error> {
         if !(1970..=9999).contains(&time.year()) {
             return Err(LicenseError::InvalidClaims);
         }
         Ok(Self(time))
     }
 }
+impl From<LicenseTime> for DateTime<Utc> {
+    fn from(value: LicenseTime) -> Self {
+        value.0
+    }
+}
 
+impl Serialize for LicenseTime {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+impl fmt::Display for LicenseTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.to_rfc3339().fmt(f)
+    }
+}
 impl LicenseTime {
     const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 
@@ -164,7 +293,7 @@ impl LicenseTime {
 // Deserialize the signed bytes directly. Serde rejects duplicate or unknown claims.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LicenseClaims {
+struct WireClaims {
     #[serde(rename = "jti")]
     license_id: LicenseId,
     product: Product,
@@ -177,8 +306,51 @@ struct LicenseClaims {
     eligible_major: MajorVersion,
     #[serde(default)]
     seats: SeatCount,
+    #[serde(default, rename = "exp", deserialize_with = "present_expiry")]
+    expires_at: Option<LicenseTime>,
 }
-
+fn present_expiry<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<LicenseTime>, D::Error> {
+    LicenseTime::deserialize(d).map(Some)
+}
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "WireClaims")]
+struct LicenseClaims {
+    license_id: LicenseId,
+    product: Product,
+    purchaser_ref: PurchaserRef,
+    issued_at: LicenseTime,
+    not_before: Option<LicenseTime>,
+    eligible_major: MajorVersion,
+    seats: SeatCount,
+    entitlement: Entitlement,
+}
+impl TryFrom<WireClaims> for LicenseClaims {
+    type Error = LicenseError;
+    fn try_from(w: WireClaims) -> Result<Self, Self::Error> {
+        let entitlement = match (w.storefront, w.expires_at) {
+            (Storefront::Trial, Some(expires_at))
+                if expires_at.0 > w.issued_at.0
+                    && w.not_before.is_none_or(|nbf| expires_at.0 > nbf.0) =>
+            {
+                Entitlement::Trial { expires_at }
+            }
+            (Storefront::Trial, _) | (_, Some(_)) => return Err(LicenseError::InvalidClaims),
+            (storefront, None) => Entitlement::Perpetual {
+                storefront: storefront.try_into()?,
+            },
+        };
+        Ok(Self {
+            license_id: w.license_id,
+            product: w.product,
+            purchaser_ref: w.purchaser_ref,
+            issued_at: w.issued_at,
+            not_before: w.not_before,
+            eligible_major: w.eligible_major,
+            seats: w.seats,
+            entitlement,
+        })
+    }
+}
 impl LicenseClaims {
     fn check_clock(&self, now: DateTime<Utc>) -> Result<(), LicenseError> {
         self.issued_at.check_clock(now)?;
@@ -189,7 +361,7 @@ impl LicenseClaims {
     }
 }
 
-/// A perpetual Desktop license authenticated by a configured issuer.
+/// A Desktop entitlement authenticated by a configured issuer.
 #[derive(Clone)]
 pub struct VerifiedLicense {
     claims: LicenseClaims,
@@ -215,6 +387,12 @@ impl fmt::Debug for VerifiedLicense {
 }
 
 impl VerifiedLicense {
+    /// Authenticated inseparable provenance and term.
+    #[must_use]
+    pub fn entitlement(&self) -> Entitlement {
+        self.claims.entitlement
+    }
+
     /// Canonical service-issued identifier.
     #[must_use]
     pub fn id(&self) -> &LicenseId {
@@ -230,7 +408,10 @@ impl VerifiedLicense {
     /// Signed source of the purchase or grant.
     #[must_use]
     pub fn storefront(&self) -> Storefront {
-        self.claims.storefront
+        match self.claims.entitlement {
+            Entitlement::Perpetual { storefront } => storefront.into(),
+            Entitlement::Trial { .. } => Storefront::Trial,
+        }
     }
 }
 
@@ -522,6 +703,10 @@ impl TryFrom<LicenseStanding> for UnrevokedLicense {
 pub(crate) struct UnrevokedLicense(VerifiedLicense);
 
 impl UnrevokedLicense {
+    pub(crate) fn entitlement(&self) -> Entitlement {
+        self.0.entitlement()
+    }
+
     pub(crate) fn storefront(&self) -> Storefront {
         self.0.storefront()
     }
@@ -546,6 +731,7 @@ impl TryFrom<(UnrevokedLicense, MajorVersion)> for ActiveLicense {
         if license.eligible_major() != major {
             return Err(LicenseError::WrongMajor(license.eligible_major()));
         }
+        license.entitlement().check_clock(Utc::now())?;
         Ok(Self(license))
     }
 }
@@ -676,6 +862,8 @@ pub fn load(path: &Path, keys: &TrustedKeys) -> Result<Option<VerifiedLicense>, 
 /// License failures with no secret-bearing platform or claim diagnostics.
 #[derive(Debug)]
 pub enum LicenseError {
+    /// The authenticated trial has expired.
+    TrialExpired,
     /// Production issuer trust has not been provisioned.
     Unconfigured,
     /// The trusted public-key file is malformed.
@@ -705,6 +893,7 @@ pub enum LicenseError {
 impl fmt::Display for LicenseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::TrialExpired => "The 30-day trial has ended. Nothing was lost. Your books remain readable and exportable; backup, restore, recovery and undo still work. Buy a $79 license at https://beankeeper.app/#pricing and ask your agent to activate it.",
             Self::Unconfigured => "license issuer public keys are not configured",
             Self::TrustConfiguration => "invalid trusted license public-key configuration",
             Self::TooLarge => "license token exceeds 16384 bytes",
@@ -1096,6 +1285,64 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
         assert!(load(&path, &keys()?).is_err());
         assert!(activate_fixture(FIXTURE.as_bytes(), directory.path()).is_err());
+        Ok(())
+    }
+    #[test]
+    fn trial_wire_contract_and_clock_boundaries() -> TestResult {
+        let issuer = TestIssuer::new()?;
+        let keys = issuer.keys()?;
+        let now: DateTime<Utc> = "2026-11-20T12:00:00Z".parse()?;
+        let mut claims = valid_claims();
+        claims["storefront"] = json!("trial");
+        claims["exp"] = json!("2026-12-20T12:00:00Z");
+        let token = issuer.sign_claims(&claims.to_string())?;
+        let verified = UnverifiedToken::try_from(token.as_bytes())?.verify(&keys, now)?;
+        let term = verified.entitlement();
+        assert_eq!(
+            term.days_remaining(now).map(|days| days.to_string()),
+            Some("30".into())
+        );
+        assert!(!term.is_expired("2026-12-20T12:05:00Z".parse()?));
+        assert!(term.is_expired("2026-12-20T12:05:00.001Z".parse()?));
+        assert_eq!(
+            term.days_remaining("2026-12-20T11:59:59.999Z".parse()?)
+                .map(|days| days.to_string()),
+            Some("1".into())
+        );
+        assert_eq!(
+            term.days_remaining("2026-12-21T12:00:00Z".parse()?)
+                .map(|days| days.to_string()),
+            Some("0".into())
+        );
+        for invalid in [Value::Null, json!("2026-11-20T12:00:00Z"), json!("invalid")] {
+            claims["exp"] = invalid;
+            assert!(matches!(
+                UnverifiedToken::try_from(issuer.sign_claims(&claims.to_string())?.as_bytes())?
+                    .verify(&keys, now),
+                Err(LicenseError::InvalidClaims)
+            ));
+        }
+        claims.as_object_mut().ok_or("claims")?.remove("exp");
+        assert!(serde_json::from_value::<LicenseClaims>(claims.clone()).is_err());
+        claims["storefront"] = json!("polar");
+        claims["exp"] = json!("2026-12-20T12:00:00Z");
+        assert!(serde_json::from_value::<LicenseClaims>(claims).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn expired_trial_is_authenticated_but_cannot_activate() -> TestResult {
+        let issuer = TestIssuer::new()?;
+        let mut claims = valid_claims();
+        claims["storefront"] = json!("trial");
+        claims["iat"] = json!("2020-01-01T00:00:00Z");
+        claims["exp"] = json!("2020-01-31T00:00:00Z");
+        let verified = verify_offline(issuer.sign_claims(&claims.to_string())?, &issuer.keys()?)?;
+        let license = UnrevokedLicense(verified);
+        assert!(matches!(
+            ActiveLicense::try_from((license, MajorVersion::try_from(1)?)),
+            Err(LicenseError::TrialExpired)
+        ));
         Ok(())
     }
 }

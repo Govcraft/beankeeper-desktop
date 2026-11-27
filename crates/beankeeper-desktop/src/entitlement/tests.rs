@@ -27,7 +27,7 @@ fn enforced(
         policy: EnforcementPolicy::Enforced(MajorVersion::try_from(1).map_err(io::Error::other)?),
         test_files: Some(TestFiles {
             state: state.into(),
-            keys: KEYS,
+            keys: KEYS.into(),
             revocations,
         }),
     })
@@ -580,5 +580,75 @@ fn removing_only_license_keeps_books_intact_and_enforces_read_only() -> TestResu
     crate::product::removal::remove_at(dir.path(), active.id())?;
     assert!(!access.status().writable());
     assert_eq!(fs::read_to_string(path)?, "unchanged books");
+    Ok(())
+}
+
+#[test]
+fn trial_expiry_pauses_only_ordinary_writes_and_rechecks_each_time() -> TestResult {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::SigningKey;
+    use rusty_paseto::core::{
+        Footer, ImplicitAssertion, Key, Paseto, PasetoAsymmetricPrivateKey, Payload, Public, V4,
+    };
+    use serde_json::json;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("books.db");
+    fs::write(&path, "books remain unchanged")?;
+    let signing = SigningKey::from_bytes(&[7; 32]);
+    let mut trust: serde_json::Value = serde_json::from_slice(KEYS)?;
+    trust["trial-test"] = json!(URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes()));
+    let keys_bytes = serde_json::to_vec(&trust)?;
+    let keys = license::TrustedKeys::from_json(&keys_bytes)?;
+    let mut access = enforced(&path, dir.path(), CLEAN)?;
+    access.test_files.as_mut().ok_or("test files")?.keys = keys_bytes.into();
+    let active = active_fixture(&keys)?;
+    Bindings(dir.path()).bind(&active, &access.books)?;
+    let stored = license::activation_path(dir.path(), active.id());
+    let sign =
+        |expiry: chrono::DateTime<chrono::Utc>| -> Result<String, Box<dyn std::error::Error>> {
+            let claims = json!({
+            "jti": active.id().to_string(), "product": "beankeeper-desktop", "purchaser_ref": "trial-test",
+            "storefront": "trial", "eligible_major": 1, "iat": "2020-01-01T00:00:00Z", "exp": expiry,
+        }).to_string();
+            let key = Key::from(signing.to_keypair_bytes());
+            let mut paseto = Paseto::<V4, Public>::default();
+            paseto
+                .set_payload(Payload::from(claims.as_str()))
+                .set_footer(Footer::from("{\"kid\":\"trial-test\"}"))
+                .set_implicit_assertion(ImplicitAssertion::from("beankeeper-desktop"));
+            Ok(paseto.try_sign(&PasetoAsymmetricPrivateKey::from(&key))?)
+        };
+    let now = chrono::Utc::now();
+    let future = sign(now + chrono::TimeDelta::hours(1))?;
+    license::write_private(future.as_bytes(), &stored, license::SaveMode::Replace)?;
+    let target = LedgerTarget::default();
+    assert!(
+        access
+            .authorize_write(&target, LedgerWriteKind::Ordinary)
+            .is_ok()
+    );
+    let expired = sign(now - chrono::TimeDelta::minutes(6))?;
+    license::write_private(expired.as_bytes(), &stored, license::SaveMode::Replace)?;
+    assert!(matches!(
+        access.current_entitlement(MajorVersion::try_from(1)?),
+        Entitlement::Expired
+    ));
+    let refusal = access
+        .authorize_write(&target, LedgerWriteKind::Ordinary)
+        .err()
+        .ok_or("must refuse")?;
+    assert!(refusal.to_string().contains("Nothing was lost"));
+    assert!(
+        access
+            .authorize_write(&target, LedgerWriteKind::Restore)
+            .is_ok()
+    );
+    assert!(
+        access
+            .authorize_write(&target, LedgerWriteKind::Reversal)
+            .is_ok()
+    );
+    assert_eq!(fs::read_to_string(path)?, "books remain unchanged");
     Ok(())
 }

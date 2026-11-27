@@ -62,7 +62,26 @@ impl ReturnRequest {
             confirmation,
         }
     }
+    pub(crate) fn trial_response(&self) -> Option<ReturnResponse> {
+        let state = super::state_dir().ok()?;
+        let path = if let Some(id) = &self.license_id {
+            license::activation_path(&state, id)
+        } else {
+            let paths = license::activation_paths(&state).ok()?;
+            match paths.as_slice() {
+                [path] => path.clone(),
+                _ => return None,
+            }
+        };
+        match Proof::read(&path) {
+            Err(Outcome::TrialNotReturnable) => Some(Outcome::TrialNotReturnable.into()),
+            _ => None,
+        }
+    }
     pub(crate) fn execute(self) -> ReturnResponse {
+        if let Some(response) = self.trial_response() {
+            return response;
+        }
         let Some(confirmed) = self.confirmation.confirmed() else {
             return Outcome::ConfirmationRequired.into();
         };
@@ -203,6 +222,9 @@ impl Proof {
         let keys = super::trusted_keys().map_err(|_| Outcome::InvalidLicenseProof)?;
         let verified = license::verify_offline(token.expose_secret(), &keys)
             .map_err(|_| Outcome::InvalidLicenseProof)?;
+        if matches!(verified.entitlement(), license::Entitlement::Trial { .. }) {
+            return Err(Outcome::TrialNotReturnable);
+        }
         Ok(Self {
             id: verified.id().clone(),
             token,
@@ -298,6 +320,7 @@ struct Receipt {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Outcome {
+    TrialNotReturnable,
     ConfirmationRequired,
     Returned,
     ReturnWindowClosed,
@@ -314,6 +337,9 @@ enum Outcome {
 impl Outcome {
     fn message(self) -> &'static str {
         match self {
+            Self::TrialNotReturnable => {
+                "A free trial has no refund or return. Your trial and books are unchanged."
+            }
             Self::ConfirmationRequired => POLICY,
             Self::Returned => {
                 "Your license was returned. Paid features have stopped on this computer. Your books stay yours and readable and were never touched."

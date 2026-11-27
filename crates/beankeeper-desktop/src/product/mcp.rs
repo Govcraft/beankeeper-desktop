@@ -17,6 +17,7 @@ use super::{
 #[derive(Clone, Copy)]
 pub(crate) enum LicenseTool {
     Status,
+    Trial,
     Activate,
     Return,
     Remove,
@@ -30,6 +31,7 @@ impl LicenseTool {
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
+            "license_start_trial" => Some(Self::Trial),
             Self::STATUS => Some(Self::Status),
             Self::ACTIVATE => Some(Self::Activate),
             Self::RETURN => Some(Self::Return),
@@ -39,13 +41,24 @@ impl LicenseTool {
     }
 
     pub(crate) fn tools() -> impl Iterator<Item = Tool> {
-        [Self::Status, Self::Activate, Self::Return, Self::Remove]
-            .into_iter()
-            .filter_map(Self::tool)
+        [
+            Self::Status,
+            Self::Trial,
+            Self::Activate,
+            Self::Return,
+            Self::Remove,
+        ]
+        .into_iter()
+        .filter_map(Self::tool)
     }
 
     fn tool(self) -> Option<Tool> {
         let (name, description, schema) = match self {
+            Self::Trial => (
+                "license_start_trial",
+                "Start the email-free 30-day trial directly. Tell the owner what happened; never show tokens. Mention days remaining on the first status check in a session, when asked, and at seven or fewer days, without repeating a countdown in every reply.",
+                schemars::schema_for!(NoArguments),
+            ),
             Self::Status => (
                 Self::STATUS,
                 "Check the Desktop license and whether the selected books are writable. Tell the owner in plain words. Offer to activate a license they already have and continue any work Desktop permits.",
@@ -70,7 +83,7 @@ impl LicenseTool {
         let annotations = ToolAnnotations::new()
             .read_only(matches!(self, Self::Status))
             .destructive(matches!(self, Self::Return | Self::Remove))
-            .open_world(matches!(self, Self::Activate | Self::Return));
+            .open_world(matches!(self, Self::Trial | Self::Activate | Self::Return));
         Some(
             Tool::new(name, description, schema.to_value().as_object()?.clone())
                 .with_annotations(annotations),
@@ -92,6 +105,11 @@ impl LicenseTool {
             Ok(arguments) => arguments,
             Err(error) => return failure(&error),
         };
+        if let Some(response) =
+            ReturnRequest::new(arguments.license_id.clone(), arguments.confirm).trial_response()
+        {
+            return return_reply(&response);
+        }
         if !arguments.confirm.is_confirmed()
             && context
                 .peer
@@ -159,6 +177,10 @@ impl LicenseTool {
                         .into_request()
                         .execute(),
                 ));
+            }
+            Self::Trial => {
+                decode::<NoArguments>(arguments)?;
+                LicenseRequest::Trial
             }
             Self::Status => {
                 decode::<NoArguments>(arguments)?;
@@ -253,7 +275,7 @@ fn decode<T: DeserializeOwned>(arguments: Value) -> Result<T, ProductError> {
     serde_json::from_value(arguments).map_err(|_| ProductError::ActivationInput)
 }
 
-fn reply(response: &LicenseResponse<'_>) -> CallToolResult {
+fn reply(response: &LicenseResponse) -> CallToolResult {
     let payload = json!(response);
     let mut result = if response.is_error() {
         CallToolResult::structured_error(payload)

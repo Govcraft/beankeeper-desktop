@@ -386,13 +386,16 @@ pub struct Status {
     pub message: String,
     /// Verified grants of the credential used by the managed bridge, when available.
     pub agent_access: Option<AgentAccess>,
+    /// Shared local license status, including trial expiry and remaining days.
+    pub license: crate::product::LicenseResponse,
 }
 
 impl Status {
     fn plain_text(&self) -> String {
+        let message = format!("{}\n{}", self.message, self.license);
         match &self.agent_access {
-            Some(access) => format!("{}\n{}", self.message, access.note()),
-            None => self.message.clone(),
+            Some(access) => format!("{message}\n{}", access.note()),
+            None => message,
         }
     }
 }
@@ -416,6 +419,11 @@ pub fn status() -> Result<Status, ServiceError> {
 }
 fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
     let config = Config::load(paths)?;
+    let books = config.as_ref().map_or_else(
+        || paths.data.join("books.db"),
+        |config| config.books.clone(),
+    );
+    let license = crate::product::report_for_books(&books, &paths.state);
     let mut result = Status {
         installed: config.is_some() && paths.definition.try_exists()?,
         running: false,
@@ -423,13 +431,14 @@ fn status_at(paths: &Paths) -> Result<Status, ServiceError> {
         mcp_endpoint: None,
         desktop_url: None,
         pid: None,
-        books: config.map_or_else(|| paths.data.join("books.db"), |config| config.books),
+        books,
         log: paths.log(),
         service_definition: paths.definition.clone(),
         error_code: None,
         warning: None,
         message: ServiceError::NotInstalled.to_string(),
         agent_access: None,
+        license,
     };
     let endpoint = if result.installed {
         authenticated_endpoint(paths, &result.books, bridge::Probe::AgentAccess)
@@ -876,6 +885,7 @@ fn install(
         (Ipv4Addr::LOCALHOST, port).into(),
         registration,
         mode.storage(),
+        &paths.state,
     )?;
     if adopting && cli.db.with_extension("agent-token").try_exists()? {
         cli.passphrase.passphrase_file = None;

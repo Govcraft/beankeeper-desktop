@@ -30,7 +30,10 @@ impl Setup {
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("bk"));
-        cmd.env("BEANKEEPER_NO_UPDATE_CHECK", "1");
+        cmd.env("BEANKEEPER_NO_UPDATE_CHECK", "1")
+            .env("BEANKEEPER_DESKTOP_STATE_DIR", self.path("state"))
+            .env_remove("BEANKEEPER_LICENSE_SERVICE_URL")
+            .env_remove("BEANKEEPER_LICENSE_KEYS_FILE");
         for name in [
             "BK_AGENT_TOKEN",
             "BEANKEEPER_PASSPHRASE_CMD",
@@ -434,5 +437,47 @@ fn setup_starts_detached_server_and_reuses_only_the_matching_ledger() -> TestRes
     let log = fs::read_to_string(setup.path("books.desktop.log"))?;
     assert!(!log.contains(SECRET));
     assert!(!log.contains(&fs::read_to_string(setup.path("books.agent-token"))?));
+    Ok(())
+}
+
+#[test]
+fn automatic_trial_network_failure_preserves_setup_and_informs_status() -> TestResult {
+    let setup = Setup::new()?;
+    let keys = setup.path("issuer.json");
+    fs::write(&keys, include_bytes!("fixtures/license-public-keys.json"))?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let output = setup
+        .setup()
+        .env("BEANKEEPER_LICENSE_KEYS_FILE", &keys)
+        .env(
+            "BEANKEEPER_LICENSE_SERVICE_URL",
+            format!("http://{address}"),
+        )
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(setup.db().is_ok());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not reach the trial service"));
+    let status = setup
+        .command()
+        .args(["--json", "license", "status"])
+        .output()?;
+    assert!(status.status.success());
+    let report: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(report["trial_notice"]["code"], "TRIAL_UNAVAILABLE");
+    assert!(
+        report["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("retry later")
+    );
+    let machine = fs::read_to_string(setup.path("state/machine-token"))?;
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&machine));
+    assert!(!String::from_utf8_lossy(&status.stdout).contains(&machine));
     Ok(())
 }
