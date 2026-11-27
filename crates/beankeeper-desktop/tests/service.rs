@@ -705,6 +705,7 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
             "setup_status",
             "doctor",
             "agents_extension",
+            "update_status",
             "update_check",
             "license_status",
             "license_activate",
@@ -785,7 +786,7 @@ fn extension_diagnostics_match_cli_and_mcp_without_cosign_or_a_ledger() -> TestR
         for args in [["service", "mcp"], ["mcp", "extension"]] {
             let mut pipe = McpPipe::start(command().args(args))?;
             let listed = pipe.request("tools/list", &json!({}))?;
-            for name in ["doctor", "update_check"] {
+            for name in ["doctor", "update_status", "update_check"] {
                 assert_eq!(
                     listed["tools"]
                         .as_array()
@@ -797,7 +798,7 @@ fn extension_diagnostics_match_cli_and_mcp_without_cosign_or_a_ledger() -> TestR
                 );
                 let report = pipe.tool(name, &json!({}))?;
                 assert_eq!(report["structuredContent"]["extension"], cli["extension"]);
-                if name == "update_check" {
+                if name != "doctor" {
                     assert_eq!(
                         report["structuredContent"]["desktop_updates"],
                         updates["desktop_updates"]
@@ -2927,5 +2928,99 @@ fn license_remove_cli_and_mcp_preserve_other_activation_and_books() -> TestResul
     assert!(
         matches!(service.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
+    Ok(())
+}
+
+#[test]
+fn cached_update_status_matches_cli_on_local_mcp_channels() -> TestResult {
+    use std::fs;
+    let root = tempfile::tempdir()?;
+    let state = root.path().join("state");
+    fs::create_dir(&state)?;
+    let path = state.join("updates.json");
+    // An old cache must remain a read: no daily retry, lock or cache mutation.
+    for (attempt, expected) in [
+        (
+            json!({"state":"complete", "manifest":{
+                "schema_version":1, "version":"1.10.0", "released_at":"2026-11-26T00:00:00Z",
+                "artifacts":{}
+            }}),
+            "available",
+        ),
+        (
+            json!({"state":"complete", "manifest":{
+                "schema_version":1, "version":env!("CARGO_PKG_VERSION"), "released_at":"2026-11-26T00:00:00Z",
+                "artifacts":{}
+            }}),
+            "up_to_date",
+        ),
+        (
+            json!({"state":"failed", "failure":{"kind":"network"}}),
+            "failed",
+        ),
+        (json!({"state":"incomplete"}), "incomplete"),
+    ] {
+        let bytes = serde_json::to_vec(&json!({
+            "desktop_version":env!("CARGO_PKG_VERSION"), "last_attempt":1, "attempt":attempt
+        }))?;
+        fs::write(&path, &bytes)?;
+        let command = || {
+            let mut cmd = isolated(root.path());
+            cmd.env("BEANKEEPER_NO_UPDATE_CHECK", "0");
+            cmd
+        };
+        let output = command().args(["update-status", "--json"]).output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cli: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(cli["installed_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(cli["desktop_updates"]["outcome"]["state"], expected);
+        assert_eq!(cli["desktop_updates"]["last_attempt"], 1);
+        if expected == "available" {
+            assert_eq!(cli["desktop_updates"]["outcome"]["version"], "1.10.0");
+            assert_eq!(
+                cli["desktop_updates"]["outcome"]["release_notes_url"],
+                "https://github.com/Govcraft/beankeeper-desktop/releases/tag/beankeeper-desktop-v1.10.0"
+            );
+        }
+        for args in [["service", "mcp"], ["mcp", "extension"]] {
+            let mut pipe = McpPipe::start(command().args(args))?;
+            let report = pipe.tool("update_status", &json!({}))?;
+            assert_eq!(report["structuredContent"], cli);
+            let invalid = pipe.tool("update_status", &json!({"fresh":true}))?;
+            assert_eq!(invalid["isError"], true);
+        }
+        let output = command().arg("update-status").output()?;
+        assert!(output.status.success());
+        if expected == "available" {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("Desktop 1.10.0 is available.")
+            );
+        }
+        assert_eq!(fs::read(&path)?, bytes);
+        assert!(!state.join("updates.lock").exists());
+    }
+    fs::remove_file(&path)?;
+    let output = isolated(root.path())
+        .env("BEANKEEPER_NO_UPDATE_CHECK", "0")
+        .args(["update-status", "--json"])
+        .output()?;
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["desktop_updates"]["state"], "unchecked");
+    assert!(!path.exists());
+    fs::write(&path, b"broken cache")?;
+    let output = isolated(root.path())
+        .env("BEANKEEPER_NO_UPDATE_CHECK", "0")
+        .args(["update-status", "--json"])
+        .output()?;
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        report["desktop_updates"]["code"],
+        "DESKTOP_UPDATE_CHECK_UNAVAILABLE"
+    );
+    assert_eq!(fs::read(&path)?, b"broken cache");
     Ok(())
 }

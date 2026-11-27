@@ -508,6 +508,11 @@ license active. See the return instructions for seller availability and support.
 
 [License commands and recovery](docs/license-updates.md)
 
+`bk update-status --json` and the read-only `update_status` MCP tool return the
+installed version and typed cached update outcome, including the last attempt
+and release notes link when known. Status reads never contact the network. Agents
+mention an available release once in plain words and continue your work.
+
 `bk update-check` checks the signed GitHub release manifest at most once daily,
 including failed attempts, for each running Desktop version. After a version
 change, the next check refreshes the cache immediately; caches from older builds

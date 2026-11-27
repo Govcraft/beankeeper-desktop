@@ -237,3 +237,21 @@ Permission or verification failures preserve the installed executable. No sudo
 is launched. For a system-owned installation, use the OS installer with the
 required privileges. Restart `bk serve` to run the new executable; no ledger or
 configuration is replaced.
+
+### Read cached Desktop updates
+
+Use `update_status` on the local Beankeeper connection, or `bk update-status
+--json`, to read the installed version and cached `desktop_updates` without a
+network request. The typed result includes `state`; checked results carry
+`last_attempt` (Unix seconds) and an `outcome` with `state`, the latest known
+`version` and `release_notes_url` when known. Missing or version-mismatched
+caches are `unchecked`; disabled checks are `disabled`. Failed and incomplete
+checks never claim that Desktop is up to date.
+
+Read this status when starting work if the tool is listed. Mention an available
+release once per conversation in plain words, for example, “Beankeeper 1.10.0
+is available. I can help update it.” Continue the owner's task. Never block
+bookkeeping, repeat the notice on each call, or ask the owner to use a terminal
+or handle tokens. Offer the returned release notes link only as optional detail.
+When the owner asks for a fresh check, use the separate `update_check` tool
+(`bk update-check` on the CLI); its existing daily retry limit still applies.

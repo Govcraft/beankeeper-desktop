@@ -64,6 +64,9 @@ impl DesktopCommand {
             Some(("doctor", _)) => Ok(Self::Diagnostic(
                 beankeeper_desktop::diagnostics::Diagnostic::Doctor,
             )),
+            Some(("update-status", _)) => Ok(Self::Diagnostic(
+                beankeeper_desktop::diagnostics::Diagnostic::UpdateStatus,
+            )),
             Some(("update-check", _)) => Ok(Self::Diagnostic(
                 beankeeper_desktop::diagnostics::Diagnostic::UpdateCheck,
             )),

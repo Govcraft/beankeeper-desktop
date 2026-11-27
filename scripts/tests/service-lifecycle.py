@@ -148,10 +148,17 @@ def extension_session(launcher, arguments, env):
 def setup_in_extension(launcher, arguments, env, definition):
     with extension_session(launcher, arguments, env) as (request, tool, notifications):
         lifecycle_tools = {
-            "setup", "setup_status", "doctor", "agents_extension", "update_check", "license_status", "license_activate", "license_return", "license_remove",
+            "setup", "setup_status", "doctor", "agents_extension", "update_check", "update_status", "license_status", "license_activate", "license_return", "license_remove",
         }
         tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
         assert tools == lifecycle_tools, tools
+        cache = Path(env["BEANKEEPER_DESKTOP_STATE_DIR"]) / "updates.json"
+        cached_before = cache.read_bytes() if cache.exists() else None
+        status = tool("update_status")
+        assert not status.get("isError", False), status
+        assert isinstance(status["structuredContent"], dict), status
+        assert status["structuredContent"]["installed_version"]
+        assert (cache.read_bytes() if cache.exists() else None) == cached_before
         assert tool("setup_status")["structuredContent"]["state"] == "not_started"
         rejected = tool("setup", {"url": "unexpected", "command": "unexpected"})
         assert rejected["isError"] and rejected["structuredContent"]["code"] == "SERVICE_ARGUMENTS"

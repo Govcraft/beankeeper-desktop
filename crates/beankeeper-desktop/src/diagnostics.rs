@@ -10,6 +10,8 @@ use std::{fmt, process::ExitCode, str::FromStr};
 pub enum Diagnostic {
     /// Inspect the locally installed Claude extension.
     Doctor,
+    /// Read cached Desktop release status without network access.
+    UpdateStatus,
     /// Check Desktop releases and inspect the locally installed Claude extension.
     UpdateCheck,
 }
@@ -50,6 +52,7 @@ struct NoArguments {}
 
 #[derive(Serialize)]
 struct Report {
+    installed_version: &'static str,
     extension: Observation,
     #[serde(skip_serializing_if = "Option::is_none")]
     desktop_updates: Option<DesktopUpdates>,
@@ -94,6 +97,7 @@ impl AsRef<str> for Diagnostic {
         match self {
             Self::Doctor => "doctor",
             Self::UpdateCheck => "update_check",
+            Self::UpdateStatus => "update_status",
         }
     }
 }
@@ -106,12 +110,15 @@ impl fmt::Display for Diagnostic {
 
 impl Diagnostic {
     /// Complete diagnostic catalog shared by CLI and MCP adapters.
-    pub const ALL: [Self; 2] = [Self::Doctor, Self::UpdateCheck];
+    pub const ALL: [Self; 3] = [Self::Doctor, Self::UpdateStatus, Self::UpdateCheck];
 
     fn description(self) -> &'static str {
         match self {
             Self::Doctor => {
                 "Read the installed Claude extension version and compare it with this Desktop version. A stale extension never blocks the books. Ask agents_extension to open an upgrade when the owner requests it."
+            }
+            Self::UpdateStatus => {
+                "Read cached Desktop update status without network access. Mention an available update once in plain words, offer help, and continue the owner's work without blocking it. Use update_check only when a fresh check is requested."
             }
             Self::UpdateCheck => {
                 "Check signed Desktop releases and report the same Claude extension status as doctor. Takes no arguments."
@@ -120,18 +127,32 @@ impl Diagnostic {
     }
 
     fn report(self) -> Report {
-        let desktop_updates = matches!(self, Self::UpdateCheck).then(|| {
-            product::state_dir()
-                .and_then(|dir| {
-                    Ok(updates::check(
-                        &dir.join("updates.json"),
-                        product::update_checks(),
-                        updates::now(),
-                    )?)
-                })
-                .map_or_else(DesktopUpdates::from, DesktopUpdates::Status)
-        });
+        let desktop_updates = match self {
+            Self::Doctor => None,
+            Self::UpdateStatus => Some(
+                product::state_dir()
+                    .and_then(|dir| {
+                        Ok(updates::cached_status(
+                            &dir.join("updates.json"),
+                            product::update_checks(),
+                        )?)
+                    })
+                    .map_or_else(DesktopUpdates::from, DesktopUpdates::Status),
+            ),
+            Self::UpdateCheck => Some(
+                product::state_dir()
+                    .and_then(|dir| {
+                        Ok(updates::check(
+                            &dir.join("updates.json"),
+                            product::update_checks(),
+                            updates::now(),
+                        )?)
+                    })
+                    .map_or_else(DesktopUpdates::from, DesktopUpdates::Status),
+            ),
+        };
         Report {
+            installed_version: env!("CARGO_PKG_VERSION"),
             extension: Observation::discover(),
             desktop_updates,
         }
@@ -141,6 +162,7 @@ impl Diagnostic {
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(updates) = &self.desktop_updates {
+            writeln!(f, "Installed Desktop: {}.", self.installed_version)?;
             writeln!(f, "{updates}")?;
         }
         self.extension.fmt(f)
@@ -175,7 +197,12 @@ pub(crate) fn tools() -> Vec<Tool> {
                     operation.description(),
                     schema.as_object()?.clone(),
                 )
-                .with_annotations(ToolAnnotations::new().read_only(true).destructive(false)),
+                .with_annotations(
+                    ToolAnnotations::new()
+                        .read_only(true)
+                        .destructive(false)
+                        .open_world(operation == Diagnostic::UpdateCheck),
+                ),
             )
         })
         .collect()
@@ -236,6 +263,20 @@ mod tests {
             assert_eq!(operation.to_string(), tool.name);
         }
         assert!("unknown".parse::<Diagnostic>().is_err());
+    }
+
+    #[test]
+    fn cached_status_is_read_only_and_local() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "update_status");
+        assert!(tool.is_some());
+        if let Some(tool) = tool {
+            let annotations = tool.annotations.unwrap_or_default();
+            assert_eq!(annotations.read_only_hint, Some(true));
+            assert_eq!(annotations.open_world_hint, Some(false));
+            assert_eq!(annotations.destructive_hint, Some(false));
+        }
     }
 
     #[test]

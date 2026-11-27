@@ -219,10 +219,12 @@ impl Session {
             );
             return response(output, id, result).map(|()| true);
         }
-        if let Some(operation @ crate::diagnostics::Diagnostic::UpdateCheck) =
-            message["params"]["name"]
-                .as_str()
-                .and_then(|name| name.parse::<crate::diagnostics::Diagnostic>().ok())
+        if let Some(
+            operation @ (crate::diagnostics::Diagnostic::UpdateCheck
+            | crate::diagnostics::Diagnostic::UpdateStatus),
+        ) = message["params"]["name"]
+            .as_str()
+            .and_then(|name| name.parse::<crate::diagnostics::Diagnostic>().ok())
         {
             let params = CallToolRequestParams::deserialize(&message["params"])
                 .map_err(|_| BridgeError::Protocol)?;
