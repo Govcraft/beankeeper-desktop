@@ -185,6 +185,8 @@ Write-Host 'Windows installer mirror discovery tests passed'
 function Test-SignaturesRequired {
     $directory = [IO.Path]::GetTempPath()
     . "$root/install.ps1" -InstallDir $directory -RequireSignatures:$false
+    # Committed installers contain real metadata; explicitly model its absence.
+    $CosignWindowsAmd64 = ''
     function Get-Command([string]$Name, [string]$ErrorAction) {
         if ($Name -ne 'cosign') { throw "Unexpected executable check: $Name" }
     }
