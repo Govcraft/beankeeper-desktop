@@ -25,7 +25,8 @@ files for both architectures, and an x64 Windows ZIP and EXE installer. Paid OS
 signing is disabled while the Apple and Azure accounts are pending. Tag releases
 include SHA-256 checksums, Sigstore bundles and build provenance. The shell and
 PowerShell installers read the latest release version from beankeeper.app and
-require cosign to verify both the platform archive and the checksum list.
+verify both the platform archive and the checksum list with cosign, fetching a
+temporary, hash-verified copy automatically when it is absent from PATH.
 See [release packaging and verification](docs/RELEASE.md) for artifact names,
 installation commands, unsigned dry runs and signing configuration.
 

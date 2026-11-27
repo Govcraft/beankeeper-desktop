@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fetch and verify a temporary cosign automatically when signed installation needs it.
+
 - Keep trial notices specific to their books so a second set cannot show a bound-elsewhere warning on the licensed books.
 
 ## [1.0.3] - 2026-11-26

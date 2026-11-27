@@ -1,0 +1,10 @@
+{
+  "sha256": {
+    "cosign-darwin-amd64": "a91eebd5824c1d40a2f3fb730a65f470ec0acf99e5c63dc7b79c322eeb9b5549",
+    "cosign-darwin-arm64": "0ce6045c42e9f21427b3a8b70d54b130ca35cdd88a38358cc303fc6fec7366ba",
+    "cosign-linux-amd64": "318a99ade4156a0c4113aa983b46c0a0830fa7896a096c63121ee47b610a94c6",
+    "cosign-linux-arm64": "bbb2ebc765f483cf9fac42da8763dddc2b55b350ee12ea0c44a520a6d6d52334",
+    "cosign-windows-amd64.exe": "0a5abb35f16b18266d6f3991cb69f8933c4449c1eafb475ae57bde554b273ddf"
+  },
+  "version": "v3.1.6"
+}

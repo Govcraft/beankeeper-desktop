@@ -1,0 +1,82 @@
+name: Installer verifier bootstrap
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cosign-bootstrap.json'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'scripts/release.py'
+      - 'scripts/tests/test_install.py'
+      - 'scripts/tests/test_release.py'
+      - '.github/workflows/installer-bootstrap.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap without cosign or jq / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # POSIX tests construct a private PATH without cosign or jq. Windows tests
+      # hide cosign discovery and exercise Get-FileHash with actual fixture bytes.
+      - run: python -B -m unittest discover -s scripts/tests -p test_install.py -v
+      - name: Verify committed installer values offline
+        run: python scripts/release.py check-bootstrap-installers
+      - name: Check generated bootstrap metadata
+        working-directory: scripts/tests
+        run: >-
+          python -B -m unittest -v
+          test_release.PackagingTests.test_bootstrap_generator_hashes_official_bytes_and_embeds_all_platforms
+          test_release.PackagingTests.test_bootstrap_generator_does_not_publish_partial_metadata
+      - name: Verify and stage committed release installers
+        run: python scripts/release.py bootstrap-installers --output "${{ runner.temp }}/bk-bootstrap"
+      - name: Install the latest signed release without cosign or jq on PATH
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          work = Path(os.environ["RUNNER_TEMP"]) / "bk-bootstrap"
+          tools = work / "tools"
+          tools.mkdir()
+          for command in ("sh", "uname", "curl", "awk", "grep", "mktemp", "rm",
+                          "chmod", "sha256sum", "shasum", "tar", "gzip", "mkdir", "install", "mv"):
+              if executable := shutil.which(command):
+                  (tools / command).symlink_to(executable)
+          subprocess.run(["/bin/sh", str(work / "install.sh"), "--no-service", "--no-agents"],
+                         env={**os.environ, "PATH": str(tools), "BK_REQUIRE_SIGNATURES": "1",
+                              "BK_INSTALL": str(work / "installed")}, check=True)
+          assert not (tools / "cosign").exists()
+          PYTHON
+      - name: Install the latest signed release on Windows without cosign
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Simulate a clean machine even if the runner image acquires cosign later.
+          function Get-Command {
+              param([string]$Name, [string]$ErrorAction)
+              if ($Name -eq 'cosign') { return $null }
+              Microsoft.PowerShell.Core\Get-Command -Name $Name -ErrorAction $ErrorAction
+          }
+          $work = Join-Path $env:RUNNER_TEMP 'bk-bootstrap'
+          & "$work/install.ps1" -RequireSignatures -NoService -NoAgents -InstallDir "$work/installed"

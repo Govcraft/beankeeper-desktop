@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -31,7 +32,7 @@ class ShellInstallerTests(unittest.TestCase):
         self.stage_shell_fixture("0.1.0")
         self.cosign()
         self.bundles()
-        for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "sha256sum", "shasum", "grep"):
+        for command in ("sh", "awk", "cat", "tar", "install", "mktemp", "mkdir", "mv", "rm", "gzip", "chmod", "sha256sum", "shasum", "grep"):
             if location := shutil.which(command):
                 (self.bin / command).symlink_to(location)
         # Exercise release discovery without exposing jq from the host.
@@ -71,7 +72,10 @@ assert args[0] == "-q" and args[args.index("--proto-redir") + 1] == "=https"
 version = os.environ["FIXTURE_VERSION"]
 if base == "https://github.com/Govcraft/beankeeper-desktop/releases/download":
     version = "beankeeper-desktop-v" + version
-assert url.startswith(f"{base}/{version}/"), url
+if url.startswith("https://github.com/sigstore/cosign/releases/download/"):
+    if os.environ.get("BOOTSTRAP_UNAVAILABLE"): sys.exit(22)
+else:
+    assert url.startswith(f"{base}/{version}/"), url
 path = fixtures / Path(urlparse(url).path).name
 if not path.exists():
     if "-w" in args: print(os.environ.get("BUNDLE_STATUS", "404"), end="")
@@ -106,7 +110,7 @@ if "-w" in args: print("200", end="")
         path.chmod(0o755)
 
     def run_installer(self):
-        return subprocess.run(["/bin/sh", str(ROOT / "install.sh")], env=self.env,
+        return subprocess.run(["/bin/sh", str(getattr(self, "installer", ROOT / "install.sh"))], env=self.env,
                               capture_output=True, text=True)
 
     def cosign(self, fail=False):
@@ -195,7 +199,68 @@ sys.exit({1 if fail else 0})
         self.env.update(BK_REQUIRE_SIGNATURES="0", BK_VERIFY_ATTESTATION="1")
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cosign is required", result.stderr)
+        self.assertEqual(result.stderr, "Could not securely prepare release verification; retry the installer.\n")
+        self.assertFalse((self.destination / "bk").exists())
+
+    def bootstrap_fixture(self, os_name="Linux", arch="x86_64", fail_signature=False):
+        self.cosign(fail=fail_signature)
+        verifier = (self.bin / "cosign").read_bytes()
+        (self.bin / "cosign").unlink()
+        for asset in release.COSIGN_ASSETS.values():
+            (self.fixtures / asset).write_bytes(verifier)
+        output = self.root / "generated"
+        release.render_bootstrap_installers(output, "v3.0.0", {
+            key: hashlib.sha256(verifier).hexdigest() for key in release.COSIGN_ASSETS
+        })
+        self.installer = output / "install.sh"
+        self.script("uname", f'print({os_name!r} if "-s" in sys.argv else {arch!r})')
+
+    def test_bootstrap_verifies_both_signatures_for_every_posix_platform_and_cleans_up(self):
+        for os_name, arch, asset in (
+            ("Linux", "x86_64", "cosign-linux-amd64"),
+            ("Linux", "aarch64", "cosign-linux-arm64"),
+            ("Darwin", "x86_64", "cosign-darwin-amd64"),
+            ("Darwin", "arm64", "cosign-darwin-arm64"),
+        ):
+            with self.subTest(os=os_name, arch=arch):
+                self.bootstrap_fixture(os_name, arch)
+                # The fixture archive stays Linux; only bootstrap platform selection changes.
+                script = self.installer.read_text().replace('    resolve_download_base',
+                    '    TARGET="x86_64-unknown-linux-gnu"\n    resolve_download_base', 1)
+                self.installer.write_text(script)
+                self.env.update(BK_REQUIRE_SIGNATURES="1", BK_NO_SERVICE="1")
+                result = self.run_installer()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("https://github.com/sigstore/cosign/releases/download/v3.0.0/" + asset,
+                              (self.fixtures / "requested-urls").read_text())
+                self.assertEqual((self.fixtures / "verified").read_text().splitlines(),
+                                 [f"{self.stem}.tar.gz", "checksums-sha256.txt"])
+                (self.fixtures / "verified").unlink()
+                self.assertFalse(any(self.root.glob("tmp.*")))
+                self.assertFalse((self.bin / "cosign").exists())
+
+    def test_bootstrap_failure_preserves_previous_install_and_never_executes_verifier(self):
+        for failure in ("tampered", "network"):
+            with self.subTest(failure=failure):
+                self.bootstrap_fixture()
+                (self.destination / "bk").write_text("previous binary")
+                if failure == "tampered":
+                    (self.fixtures / "cosign-linux-amd64").write_text("untrusted")
+                else:
+                    self.env["BOOTSTRAP_UNAVAILABLE"] = "1"
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "Could not securely prepare release verification; retry the installer.\n")
+                self.assertEqual((self.destination / "bk").read_text(), "previous binary")
+                self.assertFalse((self.fixtures / "verified").exists())
+                self.assertFalse((self.root / "service-actions").exists())
+                self.assertFalse(any(self.root.glob("tmp.*")))
+
+    def test_bootstrapped_signature_failure_never_installs(self):
+        self.bootstrap_fixture(fail_signature=True)
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Sigstore verification failed", result.stderr)
         self.assertFalse((self.destination / "bk").exists())
 
     def test_service_is_installed_by_default_and_reinstall_stops_before_upgrading(self):
@@ -536,6 +601,46 @@ else:
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Apple signing/notarization skipped", result.stdout)
+
+
+@unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell required")
+class WindowsBootstrapTests(unittest.TestCase):
+    def test_bootstrap_validates_before_returning_executable_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            payload = b"fixture verifier, never executed"
+            release.render_bootstrap_installers(work, "v3.0.0", {
+                key: hashlib.sha256(payload).hexdigest() for key in release.COSIGN_ASSETS
+            })
+            (work / "payload").write_bytes(payload)
+            test = work / "test.ps1"
+            test.write_text(r'''
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'install.ps1') -InstallDir $PSScriptRoot
+function Get-Command { return $null }
+function Get-ReleaseFile($Url, $Destination) {
+    if ($Url -cne 'https://github.com/sigstore/cosign/releases/download/v3.0.0/cosign-windows-amd64.exe') {
+        throw 'Unexpected URL'
+    }
+    if ($script:FailNetwork) { throw 'Network unavailable' }
+    Copy-Item (Join-Path $PSScriptRoot 'payload') $Destination -Force
+}
+$expected = Join-Path $PSScriptRoot 'cosign.exe'
+if ((Get-Cosign $PSScriptRoot) -cne $expected) { throw 'Wrong executable' }
+foreach ($failure in @('tamper', 'network')) {
+    if ($failure -eq 'tamper') { Set-Content (Join-Path $PSScriptRoot 'payload') 'tampered' }
+    $script:FailNetwork = $failure -eq 'network'
+    $failed = $false
+    try { Get-Cosign $PSScriptRoot } catch {
+        if ($_.Exception.Message -cne 'Could not securely prepare release verification; retry the installer.') { throw }
+        $failed = $true
+    }
+    if (-not $failed) { throw 'Bootstrap accepted untrusted verifier' }
+}
+''')
+            result = subprocess.run([shutil.which("pwsh") or shutil.which("powershell"),
+                                     "-NoProfile", "-File", str(test)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

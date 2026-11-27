@@ -60,6 +60,12 @@ class SelectTests(unittest.TestCase):
         )
         self.assertFalse(select(["install.ps1"])["rust"])
 
+    def test_bootstrap_metadata_packages_every_target(self):
+        plan = select(["cosign-bootstrap.json"])
+        self.assertEqual(targets(plan), ALL_TARGETS)
+        self.assertFalse(plan["rust"] or plan["service_any"])
+        self.assertIn("installer verifier bootstrap metadata", plan["reasons"][0])
+
     def test_service_test_runs_service_and_one_package_per_os(self):
         plan = select(["scripts/tests/service-lifecycle.py"])
         self.assertFalse(plan["rust"])
