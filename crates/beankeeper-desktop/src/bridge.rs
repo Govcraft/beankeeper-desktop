@@ -78,6 +78,8 @@ pub enum BridgeError {
     Http(reqwest::Error),
     /// Desktop rejected the HTTP request.
     Rejected(StatusCode),
+    /// No managed ledger has been set up for this connection.
+    NotSetUp,
     /// The client or server sent malformed or oversized JSON-RPC.
     Protocol,
     /// The embedded agent skill could not supply valid MCP guidance.
@@ -90,6 +92,7 @@ impl BridgeError {
     pub(crate) fn diagnostic_code(&self) -> &'static str {
         match self {
             Self::Service(error) => error.code(),
+            Self::NotSetUp => "NOT_SET_UP",
             Self::InvalidToken => "AGENT_CREDENTIAL_INVALID",
             Self::Rejected(_) => "AGENT_MCP_REJECTED",
             Self::ToolFailed => "AGENT_TOOL_FAILED",
@@ -109,6 +112,7 @@ impl fmt::Display for BridgeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Service(error) => write!(f, "{}: {error}", error.code()),
+            Self::NotSetUp => f.write_str("Beankeeper isn't set up on this computer yet. Call setup, then try again."),
             Self::InvalidUrl => f.write_str("MCP bridge requires http://127.0.0.1:PORT/mcp, http://localhost:PORT/mcp or http://[::1]:PORT/mcp"),
             Self::InvalidToken => f.write_str("MCP bridge requires a nonempty private agent token file (Unix mode 0600); run `bk setup` to configure it"),
             Self::Io(error) => write!(f, "MCP bridge I/O failed: {error}"),

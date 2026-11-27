@@ -62,9 +62,8 @@ Open With > Claude. Dragging the file into a chat only attaches it.
 Click **Install** in the preview, and restart Claude if it asks. In a new chat,
 say **Set up my books** or **Set up demo books**. Real-books setup creates
 encrypted books and starts the 30-day trial. Demo books are free and do not
-start the trial; pre-setup demo discovery in this extension arrives with #221.
-After setup, quit and reopen Claude, then start a new chat. The bookkeeping
-tools are ready there.
+start the trial. Continue in the same chat after setup. The extension lists its
+bookkeeping tools from the start.
 [Skills over MCP](https://skills.extensions.modelcontextprotocol.io/) lets
 compatible clients load Beankeeper's setup, correction, and reporting guide
 directly from the extension or the `beankeeper` stdio connection. The guide

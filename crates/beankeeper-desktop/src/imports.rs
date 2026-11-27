@@ -353,6 +353,10 @@ fn extension_method(request: &Request) -> Option<(ImportMethod, ProtocolVersion)
     Some((method, version))
 }
 
+pub(crate) fn supports_file_imports(extensions: &Value) -> bool {
+    extensions[FILES]["upload"].is_object() && extensions[FILES].get("revision").is_none()
+}
+
 async fn intercept(State(state): State<Imports>, request: Request, next: Next) -> Response {
     let Some((method, version)) = extension_method(&request) else {
         return next.run(request).await;
@@ -377,8 +381,7 @@ async fn intercept(State(state): State<Imports>, request: Request, next: Next) -
         return next.run(request).await;
     }
     let capabilities = &metadata[META_CAPABILITIES]["extensions"];
-    let files =
-        capabilities[FILES]["upload"].is_object() && capabilities[FILES].get("revision").is_none();
+    let files = supports_file_imports(capabilities);
     let tasks = capabilities[TASKS].is_object();
     let versions_agree =
         || ProtocolVersion::deserialize(&metadata[META_VERSION]).is_ok_and(|body| body == version);
@@ -408,6 +411,26 @@ async fn discovery(request: Request, next: Next, id: &Value) -> Response {
     .await
 }
 
+/// Apply the Desktop file-upload schema to the shared upstream import definition.
+pub(crate) fn amend_tool_definitions(tools: &mut [rmcp::model::Tool]) {
+    if let Some(tool) = tools.iter_mut().find(|tool| tool.name == TOOL) {
+        let mut schema = (*tool.input_schema).clone();
+        amend_import_schema(&mut schema);
+        tool.input_schema = std::sync::Arc::new(schema);
+    }
+}
+
+fn amend_import_schema(schema: &mut serde_json::Map<String, Value>) {
+    schema.entry("properties").or_insert_with(|| json!({}))["file"] = upload::schema();
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        required.retain(|field| field != "content");
+    }
+    schema.insert(
+        "oneOf".into(),
+        json!([{"required":["file"]},{"required":["content"]}]),
+    );
+}
+
 async fn tool_list(request: Request, next: Next, id: &Value) -> Response {
     amend(request, next, id, |result| {
         if let Some(tool) = result["tools"]
@@ -415,14 +438,7 @@ async fn tool_list(request: Request, next: Next, id: &Value) -> Response {
             .and_then(|tools| tools.iter_mut().find(|tool| tool["name"] == TOOL))
             && let Some(schema) = tool["inputSchema"].as_object_mut()
         {
-            schema.entry("properties").or_insert_with(|| json!({}))["file"] = upload::schema();
-            if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
-                required.retain(|field| field != "content");
-            }
-            schema.insert(
-                "oneOf".into(),
-                json!([{"required":["file"]},{"required":["content"]}]),
-            );
+            amend_import_schema(schema);
         }
     })
     .await

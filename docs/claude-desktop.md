@@ -41,9 +41,12 @@ to install or upgrade the Claude Desktop extension. The `agents_extension`
 tool is available in Claude's Beankeeper extension and on the local lifecycle
 connection. The command-line equivalent is `bk agents extension`.
 
-Before setup, the extension lists `setup`, `setup_status`, `doctor`,
-`update_check`, and `agents_extension`, alongside the license tools. You can prepare the verified installer before creating
-books or starting the local service.
+Before setup, the extension lists the ledger and Desktop tools alongside setup,
+license, update, and diagnostic tools. Clients that cache discovery can use the
+books in the same chat after setup, without restarting Claude. A ledger or
+Desktop tool called too early returns `NOT_SET_UP`: call `setup`, wait for
+`setup_status` to report ready, then retry. Access changes can narrow the tool
+list; the service continues to enforce the caller's signed permissions.
 
 Beankeeper verifies the newest published release for your computer in-process,
 without requiring a separate `cosign` installation.

@@ -64,6 +64,39 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .collect()
 }
 
+fn initial_tools(file_imports: bool) -> Vec<Tool> {
+    let access = crate::setup::ManagedAccess::default();
+    let mut catalog: std::collections::BTreeMap<_, _> =
+        beankeeper_cli::mcp::LedgerAccess::ReadWrite
+            .tools()
+            .into_iter()
+            .filter(|tool| {
+                tool.name
+                    .parse::<beankeeper_cli::operation::Operation>()
+                    .and_then(beankeeper_cli::operation::Operation::primary_capability)
+                    .is_ok_and(|capability| access.catalog_includes(capability))
+            })
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+    for host in crate::onboarding::DesktopTools::definitions(true) {
+        if access.catalog_includes(host.capability) {
+            catalog.insert(host.tool.name.clone(), host.tool);
+        }
+    }
+    for tool in service::access_tool()
+        .into_iter()
+        .chain(service::open_tool())
+        .chain(tools(false))
+    {
+        catalog.insert(tool.name.clone(), tool);
+    }
+    let mut tools: Vec<_> = catalog.into_values().collect();
+    if file_imports {
+        crate::imports::amend_tool_definitions(&mut tools);
+    }
+    tools
+}
+
 #[derive(Default)]
 enum Worker {
     #[default]
@@ -198,7 +231,7 @@ impl Session {
             Some(command @ ExtensionCommand::Status) if status_is_local => {
                 self.call(command, unavailable.as_ref(), message, id, output)
             }
-            _ => self.forward(&request, id, output, unavailable.as_ref()),
+            _ => self.forward(&request, id, output),
         }
     }
 
@@ -333,25 +366,21 @@ impl Session {
         request: &BridgeRequest<'_>,
         id: &Value,
         output: &mut impl Write,
-        unavailable: Option<&BridgeError>,
     ) -> Result<(), BridgeError> {
         match request.kind() {
             MethodKind::ToolsList if self.transport.is_none() => {
-                let result = ListToolsResult::with_all_items(tools(true))
-                    .with_ttl_ms(0)
-                    .with_cache_scope(CacheScope::Private);
+                let result = ListToolsResult::with_all_items(initial_tools(
+                    request
+                        .inline()
+                        .is_some_and(InlineProtocol::desktop_file_imports),
+                ))
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Private);
                 return response(output, id, result);
             }
             MethodKind::ToolsCall if self.transport.is_none() => {
-                let result = match self.progress(unavailable) {
-                    progress @ Progress::Failed { .. } => {
-                        progress.result().map_err(|_| BridgeError::Protocol)?
-                    }
-                    _ => failure(
-                        "EXTENSION_SETUP_REQUIRED",
-                        "Call setup to set up Beankeeper, then check setup_status.",
-                    ),
-                };
+                let error = BridgeError::NotSetUp;
+                let result = failure(error.diagnostic_code(), &error.to_string());
                 return response(output, id, result);
             }
             _ => {}

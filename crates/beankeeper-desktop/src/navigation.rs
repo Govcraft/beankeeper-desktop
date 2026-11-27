@@ -393,12 +393,18 @@ fn failure(code: NavigationFailure, message: &str) -> CallToolResult {
     result
 }
 
-impl HostToolHandler for Navigation {
-    fn tools(&self) -> Vec<HostTool> {
+impl Navigation {
+    pub(crate) fn definitions() -> Vec<HostTool> {
         NavigationTool::ALL
             .into_iter()
             .map(NavigationTool::definition)
             .collect()
+    }
+}
+
+impl HostToolHandler for Navigation {
+    fn tools(&self) -> Vec<HostTool> {
+        Self::definitions()
     }
 
     fn call_tool(
