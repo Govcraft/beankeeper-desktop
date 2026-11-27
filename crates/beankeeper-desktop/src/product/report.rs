@@ -29,10 +29,32 @@ impl From<&ProductError> for TrialNotice {
     }
 }
 
-impl TrialNotice {
-    const PATH: &str = "trial-notice.json";
-    pub(super) fn load(state: &Path) -> Result<Option<Self>, ProductError> {
-        let file = match crate::private_file::PrivateFile::open(&state.join(Self::PATH)) {
+/// Notice storage cannot be addressed without a resolved, typed books identity.
+pub(super) struct TrialNoticeStore<'a> {
+    state: &'a Path,
+    books: crate::entitlement::LedgerBinding,
+}
+
+impl<'a> From<(&'a Path, &crate::instance::BooksPath)> for TrialNoticeStore<'a> {
+    fn from((state, books): (&'a Path, &crate::instance::BooksPath)) -> Self {
+        Self {
+            state,
+            books: books.into(),
+        }
+    }
+}
+
+impl TrialNoticeStore<'_> {
+    fn path(&self) -> std::path::PathBuf {
+        // The legacy machine-wide trial-notice.json has no trustworthy owner.
+        // Leave it untouched and never read it into a books-specific report.
+        self.state
+            .join("trial-notices")
+            .join(format!("{}.json", self.books))
+    }
+
+    pub(super) fn load(&self) -> Result<Option<TrialNotice>, ProductError> {
+        let file = match crate::private_file::PrivateFile::open(&self.path()) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -42,17 +64,13 @@ impl TrialNotice {
             .map(Some)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error).into())
     }
-    pub(super) fn save(&self, state: &Path) -> Result<(), ProductError> {
-        let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
-        crate::license::write_private(
-            &bytes,
-            &state.join(Self::PATH),
-            crate::license::SaveMode::Replace,
-        )?;
+    pub(super) fn save(&self, notice: &TrialNotice) -> Result<(), ProductError> {
+        let bytes = serde_json::to_vec(notice).map_err(io::Error::other)?;
+        crate::license::write_private(&bytes, &self.path(), crate::license::SaveMode::Replace)?;
         Ok(())
     }
-    pub(super) fn clear(state: &Path) -> Result<(), ProductError> {
-        crate::private_file::remove_file(&state.join(Self::PATH))?;
+    pub(super) fn clear(&self) -> Result<(), ProductError> {
+        crate::private_file::remove_file(&self.path())?;
         Ok(())
     }
 }
@@ -581,7 +599,9 @@ mod tests {
     fn notice_store_derives_messages_and_reports_failures() -> Result<(), Box<dyn std::error::Error>>
     {
         let state = tempfile::tempdir()?;
-        assert!(TrialNotice::load(state.path())?.is_none());
+        let books = crate::instance::BooksPath::try_from(state.path())?;
+        let store = TrialNoticeStore::from((state.path(), &books));
+        assert!(store.load()?.is_none());
         for error in [
             ProductError::TrialRateLimited(Some("60".parse()?)),
             ProductError::TrialAlreadyUsed,
@@ -590,11 +610,10 @@ mod tests {
             ProductError::MachineIdentity,
         ] {
             let notice = TrialNotice::from(&error);
-            notice.save(state.path())?;
-            let loaded = TrialNotice::load(state.path())?.ok_or("missing notice")?;
+            store.save(&notice)?;
+            let loaded = store.load()?.ok_or("missing notice")?;
             assert_eq!(loaded.to_string(), error.to_string());
-            let stored: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(state.path().join(TrialNotice::PATH))?)?;
+            let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path())?)?;
             assert!(stored.get("message").is_none());
             let response = serde_json::to_value(TrialNoticeResponse::from(&loaded))?;
             assert_eq!(response["message"], error.to_string());
@@ -604,33 +623,57 @@ mod tests {
             configuration.to_string(),
             "This installation is missing a working license configuration."
         );
-        let path = state.path().join(TrialNotice::PATH);
+        let path = store.path();
         std::fs::write(
             &path,
             br#"{"code":"TRIAL_RATE_LIMITED","retry_after_seconds":60,"message":"stale message"}"#,
         )?;
         assert_eq!(
-            TrialNotice::load(state.path())?
-                .ok_or("missing notice")?
-                .to_string(),
+            store.load()?.ok_or("missing notice")?.to_string(),
             ProductError::TrialRateLimited(Some("60".parse()?)).to_string()
         );
         std::fs::write(
             &path,
             br#"{"code":"TRIAL_RATE_LIMITED","retry_after_seconds":0}"#,
         )?;
-        assert!(TrialNotice::load(state.path()).is_err());
-        TrialNotice::clear(state.path())?;
-        TrialNotice::clear(state.path())?;
-        assert!(TrialNotice::load(state.path())?.is_none());
-        std::fs::create_dir(state.path().join(TrialNotice::PATH))?;
-        assert!(TrialNotice::load(state.path()).is_err());
+        assert!(store.load().is_err());
+        store.clear()?;
+        store.clear()?;
+        assert!(store.load()?.is_none());
+        std::fs::create_dir(store.path())?;
+        assert!(store.load().is_err());
         assert!(
-            TrialNotice::from(&ProductError::TrialUnavailable)
-                .save(state.path())
+            store
+                .save(&TrialNotice::from(&ProductError::TrialUnavailable))
                 .is_err()
         );
-        assert!(TrialNotice::clear(state.path()).is_err());
+        assert!(store.clear().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn notices_are_isolated_and_legacy_notices_have_no_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = tempfile::tempdir()?;
+        let a = tempfile::tempdir()?;
+        let b = tempfile::tempdir()?;
+        let a = crate::instance::BooksPath::try_from(a.path())?;
+        let b = crate::instance::BooksPath::try_from(b.path())?;
+        let first = TrialNoticeStore::from((state.path(), &a));
+        let second = TrialNoticeStore::from((state.path(), &b));
+        std::fs::write(
+            state.path().join("trial-notice.json"),
+            b"unattributable legacy data",
+        )?;
+        assert!(first.load()?.is_none());
+        assert!(second.load()?.is_none());
+        second.save(&TrialNotice::from(&ProductError::LicenseBoundElsewhere))?;
+        assert!(first.load()?.is_none());
+        assert!(second.load()?.is_some());
+        first.save(&TrialNotice::from(&ProductError::TrialUnavailable))?;
+        first.clear()?;
+        assert!(first.load()?.is_none());
+        assert!(second.load()?.is_some());
         Ok(())
     }
 

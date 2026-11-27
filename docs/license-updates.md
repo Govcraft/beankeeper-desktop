@@ -32,6 +32,10 @@ successful trial or another license. Retry later through the same tool. A spent
 trial returns `TRIAL_ALREADY_USED` with a purchase link; rate limiting reports
 `TRIAL_RATE_LIMITED` and the server's retry delay when available.
 
+Trial setup notices apply only to the selected books. Successful license binding
+clears their stale notice without clearing notices for other books. Desktop ignores
+legacy machine-wide trial notices because their books cannot be identified.
+
 `bk license status`, `bk --json license status`, `license_status` and the license
 portion of `service_status` report trial expiry and days remaining alongside
 plain words and a Desktop settings link when available. Expired trials have
