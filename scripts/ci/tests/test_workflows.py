@@ -12,7 +12,7 @@ from catalog import ROOT, families, msrv_toolchain
 from gate import expectations
 
 GITHUB = ROOT / ".github"
-COMPILING_WORKFLOWS = ("ci.yml", "packaging.yml", "cache-maintenance.yml")
+COMPILING_WORKFLOWS = ("ci.yml", "packaging.yml", "cache-maintenance.yml", "bump-core-release.yml")
 
 
 def text(relative: str) -> str:

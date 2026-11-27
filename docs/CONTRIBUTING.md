@@ -15,6 +15,11 @@ Issues and feedback are welcome in the [issue tracker](https://github.com/Govcra
 
 Ledger, library, and schema changes belong in the open-source
 [Beankeeper repository](https://github.com/Govcraft/beankeeper).
+Desktop depends on a released `beankeeper-cli-vX.Y.Z` tag of that repository,
+not on `main`. After a core release, merge the automated bump PR (or update
+`crates/beankeeper-desktop/Cargo.toml` and `Cargo.lock` to the new tag) so
+Desktop stays on the latest released core. Do not bump the Desktop version in
+that PR.
 
 ## Maintainer pull requests
 

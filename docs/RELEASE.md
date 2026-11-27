@@ -7,13 +7,13 @@ Program and Azure Artifact Signing accounts are **pending Roland's setup**.
 Paid signing hooks are disabled by default. No production credentials are
 required to build or merge this work.
 
-Until Beankeeper ships a stable release, both upstream crates track the Git
-`main` branch. `Cargo.lock` is the sole lock, and regular CI and releases build
-with `--locked`. The `upstream-main` job refreshes both crates when CI selects
-Rust checks and on a daily schedule. It reports the revisions before building,
-linting and testing them. Once Beankeeper ships a stable release, switch both
-crates to stable release tags or crates.io versions and retire or repurpose the
-job.
+Both upstream crates (`beankeeper` and `beankeeper-cli`) pin the same Git tag,
+`beankeeper-cli-vX.Y.Z`, from [Govcraft/beankeeper](https://github.com/Govcraft/beankeeper).
+Do not depend on `branch = "main"`. `Cargo.lock` is the sole lock, and regular
+CI and releases build with `--locked`. After a new CLI GitHub release, the
+`bump-core-release` workflow (daily and on `workflow_dispatch`) opens a pull
+request that updates the tag and lockfile without bumping the Desktop version.
+Merge that PR once its checks pass so Desktop tracks the latest released core.
 
 ## Artifacts and versions
 

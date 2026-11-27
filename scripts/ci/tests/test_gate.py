@@ -19,7 +19,6 @@ def results(rust="true", service="true", packaging="false", **overrides):
         },
         "stable": {"result": "success" if rust == "true" else "skipped"},
         "msrv": {"result": "success" if rust == "true" else "skipped"},
-        "upstream-main": {"result": "success" if rust == "true" else "skipped"},
         "service": {"result": "success" if service == "true" else "skipped"},
         "packaging": {"result": "success" if packaging == "true" else "skipped"},
     }
@@ -37,7 +36,7 @@ class GateTests(unittest.TestCase):
         self.check(results(rust="false", service="false", packaging="true"))
 
     def test_failure_or_cancellation_fails(self):
-        for job in ("stable", "upstream-main"):
+        for job in ("stable", "msrv"):
             for result in ("failure", "cancelled"):
                 with self.subTest(job=job, result=result), self.assertRaisesRegex(ValueError, job):
                     self.check(results(**{job: result}))

@@ -17,7 +17,6 @@ def expectations(results: dict) -> dict[str, bool]:
         "changes": True,
         "stable": flags["rust"],
         "msrv": flags["rust"],
-        "upstream-main": flags["rust"],
         "service": flags["service_any"],
         "packaging": flags["packaging_any"],
     }
