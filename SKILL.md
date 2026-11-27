@@ -970,6 +970,10 @@ have no active license. If it could not reach the service, retry later with
 `bk license trial`. Act directly. Never ask the owner for a terminal, email or
 machine token, and never display license or machine tokens.
 
+Trial setup notices apply only to the selected books. Successful license binding
+clears their stale notice without clearing notices for other books. Desktop ignores
+legacy machine-wide trial notices because their books cannot be identified.
+
 Mention remaining days when asked, once when a session first checks status, and
 when seven or fewer days remain. Do not prepend a countdown to every reply.
 After expiry, explain that nothing was lost: reading, export, backup, restore,

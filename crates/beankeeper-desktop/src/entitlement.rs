@@ -254,8 +254,16 @@ fn resolve(
     refusal
 }
 
+/// Opaque books identity shared by license bindings and books-scoped local state.
 #[derive(PartialEq, Eq)]
-struct LedgerBinding([u8; 32]);
+pub(crate) struct LedgerBinding([u8; 32]);
+
+impl fmt::Display for LedgerBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        f.write_str(&URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
 
 impl From<&BooksPath> for LedgerBinding {
     fn from(books: &BooksPath) -> Self {

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Keep trial notices specific to their books so a second set cannot show a bound-elsewhere warning on the licensed books.
+
 ## [1.0.3] - 2026-11-26
 
 - Use plainer wording in return messages, license-update docs, and the shipped skill.

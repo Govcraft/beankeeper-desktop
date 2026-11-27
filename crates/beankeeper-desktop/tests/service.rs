@@ -3078,6 +3078,7 @@ fn assert_trial_return_expiry_and_upgrade(
     machine: &str,
 ) -> TestResult {
     use std::fs;
+    let books_before = fs::read(root.join("beankeeper.db"))?;
     let id = report["licenses"][0]["license_id"]
         .as_str()
         .ok_or("license id")?;
@@ -3148,7 +3149,94 @@ fn assert_trial_return_expiry_and_upgrade(
         fs::read_to_string(root.join("state/machine-token"))?,
         machine
     );
-    assert_eq!(fs::metadata(root.join("beankeeper.db"))?.len(), 0);
+    assert_eq!(fs::read(root.join("beankeeper.db"))?, books_before);
+    Ok(())
+}
+
+fn setup_trial_test_books(
+    mut command: std::process::Command,
+    root: &std::path::Path,
+    name: &str,
+) -> Result<std::process::Output, std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::fs::write(root.join("setup-secret"), "notice-regression-passphrase")?;
+    command
+        .arg("--db")
+        .arg(root.join(format!("{name}.db")))
+        .arg("--passphrase-file")
+        .arg(root.join("setup-secret"))
+        .args([
+            "setup",
+            "--non-interactive",
+            "--no-open",
+            "--no-start",
+            "--config-home",
+        ])
+        .arg(root.join(format!("{name}-home")))
+        .arg("--secret-store-file")
+        .arg(root.join(format!("{name}-secret")))
+        .output()
+}
+
+fn assert_trial_notices_stay_with_books(
+    command: &impl Fn() -> std::process::Command,
+    root: &std::path::Path,
+    report: &Value,
+) -> TestResult {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    // Setup of a second set of books must not contaminate the first books' status.
+    let other_books = root.join("other.db");
+    let setup = setup_trial_test_books(command(), root, "other")?;
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let first_status = command().args(["--json", "license", "status"]).output()?;
+    let first_report: Value = serde_json::from_slice(&first_status.stdout)?;
+    assert_eq!(&first_report, report);
+    assert_eq!(first_report["writable"], true);
+    assert!(first_report.get("trial_notice").is_none());
+    let other_status = command()
+        .arg("--db")
+        .arg(&other_books)
+        .args(["--json", "license", "status"])
+        .output()?;
+    let other_report: Value = serde_json::from_slice(&other_status.stdout)?;
+    assert_eq!(
+        other_report["trial_notice"]["code"],
+        "LICENSE_BOUND_ELSEWHERE"
+    );
+    // Retrying a successful binding clears only these books' stale notice.
+    let binding = std::fs::read_dir(root.join("state/license-bindings"))?
+        .next()
+        .ok_or("missing binding")??;
+    let notice = root.join("state/trial-notices").join(format!(
+        "{}.json",
+        URL_SAFE_NO_PAD.encode(std::fs::read(binding.path())?)
+    ));
+    std::fs::write(
+        &notice,
+        br#"{"code":"TRIAL_UNAVAILABLE","retry_after_seconds":null}"#,
+    )?;
+    let retried = command().args(["--json", "license", "trial"]).output()?;
+    assert!(retried.status.success());
+    assert_eq!(&serde_json::from_slice::<Value>(&retried.stdout)?, report);
+    assert!(!notice.exists());
+    let other_status = command()
+        .arg("--db")
+        .arg(&other_books)
+        .args(["--json", "license", "status"])
+        .output()?;
+    let other_report: Value = serde_json::from_slice(&other_status.stdout)?;
+    assert_eq!(
+        other_report["trial_notice"]["code"],
+        "LICENSE_BOUND_ELSEWHERE"
+    );
     Ok(())
 }
 
@@ -3178,7 +3266,6 @@ fn trial_cli_and_mcp_share_activation_and_private_machine_identity() -> TestResu
             "trial-test": URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes())
         }))?,
     )?;
-    fs::File::create(root.path().join("beankeeper.db"))?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
@@ -3197,13 +3284,15 @@ fn trial_cli_and_mcp_share_activation_and_private_machine_identity() -> TestResu
             );
         command
     };
-    let started = command().args(["--json", "license", "trial"]).output()?;
+    let started = setup_trial_test_books(command(), root.path(), "beankeeper")?;
     assert!(
         started.status.success(),
         "{}",
         String::from_utf8_lossy(&started.stderr)
     );
-    let report: Value = serde_json::from_slice(&started.stdout)?;
+    let status = command().args(["--json", "license", "status"]).output()?;
+    assert!(status.status.success());
+    let report: Value = serde_json::from_slice(&status.stdout)?;
     assert_eq!(report["licenses"][0]["kind"], "trial");
     assert_eq!(report["licenses"][0]["days_remaining"], 30);
     assert!(!String::from_utf8_lossy(&started.stdout).contains(&token));
@@ -3224,6 +3313,9 @@ fn trial_cli_and_mcp_share_activation_and_private_machine_identity() -> TestResu
     assert!(received.try_recv().is_err());
     let status = command().args(["--json", "license", "status"]).output()?;
     assert_eq!(serde_json::from_slice::<Value>(&status.stdout)?, report);
+
+    assert_trial_notices_stay_with_books(&command, root.path(), &report)?;
+    assert!(received.try_recv().is_err());
 
     let id = report["licenses"][0]["license_id"]
         .as_str()

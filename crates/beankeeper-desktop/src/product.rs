@@ -31,7 +31,7 @@ pub(crate) mod returns;
 
 pub use activation::Storefront;
 use activation::{ActivationInputs, ActivationSource};
-use report::{LicenseInventory, LicenseReport, TrialNotice};
+use report::{LicenseInventory, LicenseReport, TrialNotice, TrialNoticeStore};
 
 /// Product command errors, with secret-bearing service diagnostics discarded.
 #[derive(Debug)]
@@ -353,7 +353,10 @@ impl LicenseRequest {
                     })
                 });
                 let inventory = snapshot.and_then(|snapshot| snapshot.installed().map(Into::into));
-                let trial_notice = TrialNotice::load(state)?;
+                let trial_notice = books
+                    .map(|books| TrialNoticeStore::from((state, books)).load())
+                    .transpose()?
+                    .flatten();
                 Ok(LicenseReport {
                     inventory,
                     access,
@@ -385,6 +388,7 @@ impl LicenseRequest {
                     let active = ActiveLicense::try_from((license, major))?;
                     if let Some(books) = books {
                         Bindings(state).bind(&active, books)?;
+                        TrialNoticeStore::from((state, books)).clear()?;
                     }
                     return Self::Status.execute_at(books, state);
                 }
@@ -402,7 +406,9 @@ impl LicenseRequest {
                     Bindings(state).bind(&active, books)?;
                 }
                 active.persist(state)?;
-                TrialNotice::clear(state)?;
+                if let Some(books) = books {
+                    TrialNoticeStore::from((state, books)).clear()?;
+                }
                 if matches!(
                     active.as_ref().entitlement(),
                     license::Entitlement::Perpetual { .. }
@@ -742,16 +748,20 @@ pub(crate) fn setup_trial_at(books: &Path, state: &Path) -> String {
         path: Cow::Borrowed(books),
         requirement: BooksRequirement::Optional,
     };
-    let result = target
-        .resolve(&LicenseRequest::Trial)
-        .and_then(|books| LicenseRequest::Trial.execute_at(books.as_ref(), state));
-    match result {
-        Ok(report) => match TrialNotice::clear(state) {
-            Ok(()) => report.response(None).to_string(),
-            Err(error) => format!("{}\n{error}", report.response(None)),
-        },
-        Err(error) => match TrialNotice::from(&error).save(state) {
-            Ok(()) => error.to_string(),
+    let books = match target.resolve(&LicenseRequest::Trial) {
+        Ok(books) => books,
+        Err(error) => return error.to_string(),
+    };
+    let store = books
+        .as_ref()
+        .map(|books| TrialNoticeStore::from((state, books)));
+    match LicenseRequest::Trial.execute_at(books.as_ref(), state) {
+        Ok(report) => report.response(None).to_string(),
+        Err(error) => match store
+            .map(|store| store.save(&TrialNotice::from(&error)))
+            .transpose()
+        {
+            Ok(_) => error.to_string(),
             Err(storage) => format!("{error}\n{storage}"),
         },
     }
