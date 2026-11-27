@@ -130,7 +130,7 @@ impl Progress<'_> {
     fn summary(&self) -> &'static str {
         match self {
             Self::NotStarted => {
-                "Beankeeper is ready to set up. Call setup when the owner asks to set up their books or try practice books."
+                "Beankeeper is ready to set up. Demo books are free and do not start the trial. The 30-day trial starts only when the owner sets up their real books. Call setup only for real books. Use demo_start when available to try demo books."
             }
             Self::Running => "Beankeeper is setting up locally. Check setup_status again shortly.",
             Self::Ready { .. } => {
@@ -312,6 +312,15 @@ fn install_executable(source: &Path, paths: &Paths) -> Result<PathBuf, ServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_started_explains_demo_and_real_books() {
+        let summary = Progress::NotStarted.summary();
+        assert!(summary.contains("demo books"));
+        assert!(!summary.contains("practice books"));
+        assert!(summary.contains("free and do not start the trial"));
+        assert!(summary.contains("30-day trial starts only"));
+    }
 
     #[test]
     fn service_binary_is_independent_of_the_extension_cache()

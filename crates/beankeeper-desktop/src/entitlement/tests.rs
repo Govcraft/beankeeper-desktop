@@ -652,3 +652,62 @@ fn trial_expiry_pauses_only_ordinary_writes_and_rechecks_each_time() -> TestResu
     assert_eq!(fs::read_to_string(path)?, "books remain unchanged");
     Ok(())
 }
+
+#[tokio::test]
+async fn expired_owner_gate_does_not_block_demo_mcp_writes() -> TestResult {
+    use crate::demo::{DemoBooks, DemoOperation};
+    use beankeeper_cli::mcp::LedgerTargets;
+    use serde_json::json;
+
+    struct ExpiredOwner;
+    impl LedgerWriteAuthorizer for ExpiredOwner {
+        fn authorize_write(
+            &self,
+            target: &LedgerTarget,
+            _: LedgerWriteKind,
+        ) -> Result<(), WriteDenied> {
+            assert_eq!(
+                target,
+                &LedgerTarget::default(),
+                "demo consulted the owner gate"
+            );
+            Err("expired trial".into())
+        }
+    }
+
+    let root = tempfile::tempdir()?;
+    let owner = root.path().join("owner.db");
+    let McpBooks { db, token } = McpBooks::open(&owner)?;
+    let targets =
+        LedgerTargets::new(db.with_write_authorizer(LedgerTarget::default(), ExpiredOwner));
+    let demo = DemoBooks::new(
+        targets.clone(),
+        &owner,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let started = demo
+        .call(
+            DemoOperation::Start,
+            serde_json::from_value(json!({"name":"demo_start"}))?,
+        )
+        .await;
+    let content = started.structured_content.ok_or("missing demo result")?;
+    let target = content["target"].as_str().ok_or("missing demo target")?;
+    let (client, cancel, server) = mcp_client(targets, &token).await?;
+    let create = json!({"slug":"demo-check", "name":"Demo check"});
+    let denied = client
+        .call("startup", &token, "company_create", create.clone())
+        .await?;
+    assert_eq!(denied["structuredContent"]["code"], "LEDGER_WRITE_DENIED");
+    assert!(denied.to_string().contains("expired trial"));
+    let allowed = client
+        .call(target, &token, "company_create", create)
+        .await?;
+    assert_ne!(allowed["isError"], true, "{allowed}");
+    demo.remove().await?;
+    let owner = Db::open_existing(&owner, Some(&PASSPHRASE.into()))?;
+    assert!(beankeeper_cli::db::list_companies(owner.read())?.is_empty());
+    cancel.cancel();
+    server.abort();
+    Ok(())
+}

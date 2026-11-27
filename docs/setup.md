@@ -34,7 +34,7 @@ local server and open the UI. No account or model API key is required.
 
 ```sh
 bk --db ~/books.db setup
-bk --db ~/demo.db setup --demo --preset bookkeeper
+bk demo start
 ```
 
 Interactive setup generates a random 256-bit passphrase and shows it once on the
@@ -64,7 +64,7 @@ operation to look up a known import batch.
 | `--non-interactive` | Suppress prompting and terminal secret display; required without a terminal. |
 | `--preset read-only` | Default. Issue only `ledger/read`. |
 | `--preset bookkeeper` | Issue `ledger/read`, `ledger/post` and `ledger/propose` in Direct mode without spend caps. |
-| `--demo` | Use upstream demo initialization with its three sample companies. |
+| `--demo` | Start free demo books on the running managed service without provisioning real books or starting a trial. Prefer `bk demo start`. |
 | `--force` or `--resume` | Resume an existing encrypted ledger. With no ledger selection, prefer the installed managed service’s books. |
 | `--recovery-kit PATH` | Override the default private recovery kit path. |
 | `--config-home PATH` | Use this home directory when locating all three client configs. |

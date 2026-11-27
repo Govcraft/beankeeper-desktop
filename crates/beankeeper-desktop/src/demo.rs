@@ -1,4 +1,4 @@
-//! Ephemeral, encrypted sample books hosted by the managed MCP endpoint.
+//! Ephemeral, encrypted demo books hosted by the managed MCP endpoint.
 
 use std::{
     fmt, fs, io,
@@ -30,22 +30,30 @@ use tempfile::Builder;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-/// Manage a disposable sample ledger on the running service.
+/// Manage disposable demo books on the running service.
 #[derive(Args, Debug)]
 pub struct DemoOptions {
     #[command(subcommand)]
     command: DemoCommand,
 }
 
+impl Default for DemoOptions {
+    fn default() -> Self {
+        Self {
+            command: DemoCommand::Start { profile: None },
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum DemoCommand {
-    /// Prepare sample books using the running managed service.
+    /// Prepare demo books using the running managed service.
     Start {
         /// Synthetic profile as a JSON object, or '-' to read JSON from stdin.
         #[arg(long, value_name = "JSON|-", verbatim_doc_comment)]
         profile: Option<String>,
     },
-    /// Discard the sample books and their practice entries.
+    /// Discard the demo books and their demo entries.
     Remove,
 }
 
@@ -81,7 +89,7 @@ pub(crate) enum DemoOperation {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StartArguments {
-    /// Optional interview choices for generating fictional books. Omit for the quick demo.
+    /// Optional interview choices for generating demo books. Omit for the quick demo.
     profile: Option<DemoProfile>,
 }
 
@@ -136,11 +144,11 @@ impl DemoOperation {
     pub(crate) fn definition(self) -> HostTool {
         let (description, schema) = match self {
             Self::Start => (
-                "Try Beankeeper with encrypted fictional books. Omit profile for a quick demo or to resume an active demo. To tailor a new demo, ask about work, book and account types, investments, country and currencies in chat, and pass only those categories. Tell the owner every figure is fictional. HTTP clients select the returned target on each ledger request.",
+                "Try Beankeeper with encrypted demo books. Demo books are free and do not start the trial. The 30-day trial starts only when the owner sets up their real books. Omit profile for a quick demo or to resume an active demo. To tailor a new demo, ask about work, book and account types, investments, country and currencies in chat, and pass only those categories. Tell the owner every figure is fictional. HTTP clients select the returned target on each ledger request.",
                 schemars::schema_for!(StartArguments),
             ),
             Self::Remove => (
-                "Discard the fictional books, including any practice entries. A managed connection returns to the owner's books after this succeeds.",
+                "Discard the demo books, including any demo entries. A managed connection returns to the owner's books after this succeeds.",
                 schemars::schema_for!(NoArguments),
             ),
         };
@@ -168,14 +176,12 @@ impl DemoReport {
     fn message(&self) -> &'static str {
         match self {
             Self::Active { .. } => {
-                "The fictional books are ready. You can try reports and practice recording or reversing a transaction. Tell the owner that the books and figures are fictional."
+                "The demo books are ready. Demo books are free and do not start the trial. The 30-day trial starts only when you set up your real books. You can try reports and practice recording or reversing a transaction. Tell the owner that the books and figures are fictional."
             }
             Self::Removed { .. } => {
-                "The fictional books and their practice entries were discarded. You can return to your own books."
+                "The demo books and their demo entries were discarded. You can return to your own books."
             }
-            Self::Absent => {
-                "There are no fictional books to discard. You can return to your own books."
-            }
+            Self::Absent => "There are no demo books to discard. You can return to your own books.",
         }
     }
 
@@ -233,14 +239,16 @@ impl fmt::Display for DemoError {
         f.write_str(match self {
             Self::Arguments => "Supply a JSON demo profile with supported interview choices, or omit it for the quick demo.",
             Self::RemoveArguments => "Demo removal takes no arguments.",
-            Self::AlreadyActive => "Fictional books are already active. Resume them by starting without a profile, or discard them before starting a tailored demo.",
-            Self::Create => "Beankeeper could not prepare the fictional books. Try starting the demo again.",
-            Self::Detach => "Beankeeper could not safely detach the fictional books. The demo file was kept.",
-            Self::Cleanup => "Beankeeper detached the fictional books but could not finish removing their files. Try removing the demo again.",
-            Self::Unavailable => "The selected fictional books are unavailable. Start the demo again or remove it to return to your own books.",
+            Self::AlreadyActive => "Demo books are already active. Resume them by starting without a profile, or discard them before starting a tailored demo.",
+            Self::Create => "Beankeeper could not prepare the demo books. Try starting the demo again.",
+            Self::Detach => "Beankeeper could not safely detach the demo books. The demo file was kept.",
+            Self::Cleanup => "Beankeeper detached the demo books but could not finish removing their files. Try removing the demo again.",
+            Self::Unavailable => "The selected demo books are unavailable. Start the demo again or remove it to return to your own books.",
         })
     }
 }
+
+impl std::error::Error for DemoError {}
 
 #[derive(Clone)]
 pub(crate) struct DemoBooks(Arc<Host>);
@@ -493,5 +501,59 @@ fn print_result(result: CallToolResult, json_output: bool) -> ExitCode {
     } else {
         println!("{output}");
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ExpiredOwner;
+
+    impl beankeeper_cli::db::LedgerWriteAuthorizer for ExpiredOwner {
+        fn authorize_write(
+            &self,
+            _: &beankeeper_cli::mcp::LedgerTarget,
+            _: beankeeper_cli::db::LedgerWriteKind,
+        ) -> Result<(), beankeeper_cli::db::WriteDenied> {
+            panic!("demo books must never consult the expired owner's license gate")
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_lifecycle_ignores_owner_gate_and_never_creates_owner_books()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let owner = root.path().join("owner.db");
+        let startup = Db::open_in_memory()?
+            .with_write_authorizer(beankeeper_cli::mcp::LedgerTarget::default(), ExpiredOwner);
+        let host = DemoBooks::new(
+            LedgerTargets::new(startup),
+            &owner,
+            CancellationToken::new(),
+        );
+        let started = host.start(StartArguments { profile: None }).await?;
+        assert!(matches!(started, DemoReport::Active { .. }));
+        assert!(!owner.exists());
+        let resumed = host.start(StartArguments { profile: None }).await?;
+        assert!(matches!(resumed, DemoReport::Active { .. }));
+        let removed = host.remove().await?;
+        assert!(matches!(removed, DemoReport::Removed { .. }));
+        assert_eq!(fs::read_dir(root.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn tools_explain_demo_books_without_trial() {
+        for operation in DemoOperation::ALL {
+            let tool = operation.definition().tool;
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(description.contains("demo books"));
+            assert!(!description.contains("practice books"));
+        }
+        let start = DemoOperation::Start.definition().tool;
+        let description = start.description.as_deref().unwrap_or_default();
+        assert!(description.contains("free and do not start the trial"));
+        assert!(description.contains("30-day trial starts only"));
     }
 }

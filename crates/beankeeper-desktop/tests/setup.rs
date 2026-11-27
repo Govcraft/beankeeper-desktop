@@ -159,10 +159,7 @@ fn encrypted_setup_preserves_configs_keeps_secrets_private_and_reads_keychain_on
 #[test]
 fn standalone_bookkeeper_uses_direct_mode_without_spend_limits() -> TestResult {
     let setup = Setup::new()?;
-    let output = setup
-        .setup()
-        .args(["--preset", "bookkeeper", "--demo"])
-        .output()?;
+    let output = setup.setup().args(["--preset", "bookkeeper"]).output()?;
     assert!(
         output.status.success(),
         "{}",
@@ -181,7 +178,7 @@ fn standalone_bookkeeper_uses_direct_mode_without_spend_limits() -> TestResult {
     }
     let limits = db::spend_limits::list(db.read(), agent.uri(), None)?;
     assert_eq!(limits.len(), 0, "unexpected spend limits: {limits:?}");
-    assert_eq!(db::list_companies(db.read())?.len(), 3);
+    assert_eq!(db::list_companies(db.read())?.len(), 1);
     Ok(())
 }
 
@@ -479,5 +476,50 @@ fn automatic_trial_network_failure_preserves_setup_and_informs_status() -> TestR
     let machine = fs::read_to_string(setup.path("state/machine-token"))?;
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&machine));
     assert!(!String::from_utf8_lossy(&status.stdout).contains(&machine));
+    Ok(())
+}
+
+#[test]
+fn demo_setup_without_host_never_provisions_owner_books_or_trial() -> TestResult {
+    let setup = Setup::new()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let output = setup
+        .setup()
+        .env("HOME", setup.path("home"))
+        .env("XDG_CONFIG_HOME", setup.path("config"))
+        .env("XDG_DATA_HOME", setup.path("data"))
+        .env("XDG_STATE_HOME", setup.path("xdg-state"))
+        .env(
+            "BEANKEEPER_LICENSE_SERVICE_URL",
+            format!("http://{}", listener.local_addr()?),
+        )
+        .arg("--demo")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("SERVICE_NOT_INSTALLED"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for name in [
+        "books.db",
+        "stored-secret",
+        "books.recovery.txt",
+        "books.agent-token",
+        "books.desktop.json",
+        "state/machine-token",
+        "state/licenses",
+        "state/license-bindings",
+    ] {
+        assert!(
+            !setup.path(name).exists(),
+            "unexpected demo side effect: {name}"
+        );
+    }
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
     Ok(())
 }

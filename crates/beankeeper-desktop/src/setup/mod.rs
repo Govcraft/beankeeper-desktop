@@ -62,9 +62,9 @@ pub struct SetupOptions {
     /// Do not prompt or display secrets; recovery kit remains private on disk.
     #[arg(long)]
     pub non_interactive: bool,
-    /// Seed upstream's sample companies and transactions.
-    #[arg(long)]
-    pub demo: bool,
+    /// Start free demo books on the running service, without setting up real books.
+    #[arg(long = "demo", num_args = 0, default_missing_value = "demo")]
+    pub books_kind: Option<BooksKind>,
     /// Agent capability preset for standalone setup (default: read-only).
     #[arg(long, value_enum)]
     pub preset: Option<Preset>,
@@ -83,6 +83,37 @@ pub struct SetupOptions {
     /// Local Desktop address; requires a nonzero port.
     #[arg(long, default_value = "127.0.0.1:8750")]
     pub bind: SocketAddr,
+}
+
+/// Selects the setup path without deriving intent from a ledger filename.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum BooksKind {
+    /// Set up the owner's real books and start their trial.
+    #[default]
+    Owner,
+    /// Use the isolated demo host without owner provisioning.
+    Demo,
+}
+
+impl std::str::FromStr for BooksKind {
+    type Err = SetupError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "owner" => Ok(Self::Owner),
+            "demo" => Ok(Self::Demo),
+            _ => Err(SetupError::Invalid("books kind must be owner or demo")),
+        }
+    }
+}
+
+/// Proof that setup selected the owner's books. Only owner setup constructs it.
+pub(crate) struct OwnerBooks<'a>(&'a Path);
+
+impl AsRef<Path> for OwnerBooks<'_> {
+    fn as_ref(&self) -> &Path {
+        self.0
+    }
 }
 
 /// Books selected for setup after applying the managed resume default.
@@ -220,6 +251,17 @@ impl From<crate::DesktopError> for SetupError {
 /// # Errors
 /// Fails closed on existing ledgers, conflicting client configs and secret storage errors.
 pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
+    match options.books_kind.unwrap_or_default() {
+        BooksKind::Owner => (),
+        BooksKind::Demo => {
+            return match crate::demo::run(&crate::demo::DemoOptions::default(), false) {
+                std::process::ExitCode::SUCCESS => Ok(()),
+                _ => Err(SetupError::Invalid(
+                    "could not start demo books on the managed service",
+                )),
+            };
+        }
+    }
     let mut options = options.clone();
     let registration = if options.force
         && crate::service::managed_books_match(&cli.db)
@@ -241,7 +283,7 @@ pub fn run(cli: &mut Cli, options: &SetupOptions) -> Result<(), SetupError> {
         registration,
         None,
     )?;
-    eprintln!("{}", crate::product::setup_trial(&cli.db));
+    eprintln!("{}", crate::product::setup_trial(&OwnerBooks(&cli.db)));
     Ok(())
 }
 
@@ -276,7 +318,10 @@ pub(crate) fn run_service(
 ) -> Result<(), SetupError> {
     run_service_with_native_store(cli, home, bind, registration, storage, &OsKeychain)
         .map_err(|error| error.at(&cli.db))?;
-    eprintln!("{}", crate::product::setup_trial_at(&cli.db, state));
+    eprintln!(
+        "{}",
+        crate::product::setup_trial_at(&OwnerBooks(&cli.db), state)
+    );
     Ok(())
 }
 
@@ -328,7 +373,7 @@ impl SetupOptions {
         Self {
             force: true,
             non_interactive: true,
-            demo: false,
+            books_kind: None,
             preset: None,
             recovery_kit: None,
             config_home: Some(home.into()),
@@ -492,7 +537,7 @@ fn run_with_store(
     cli.passphrase.passphrase_fd = None;
     cli.passphrase.passphrase_file = Some(temporary.path().into());
     if matches!(mode, SetupMode::Fresh) {
-        initialize_ledger(cli, &secret, options.demo)?;
+        initialize_ledger(cli, &secret)?;
     }
     let db = crate::backups::open_for_provisioning(&cli.db, &secret)?;
     provision(&db, provisioning, &token_file, &owner_file)?;
@@ -763,8 +808,8 @@ fn validate_distinct_outputs<'a>(
     Ok(())
 }
 
-fn initialize_ledger(cli: &Cli, secret: &SecretString, demo: bool) -> Result<(), SetupError> {
-    // SQLCipher and demo writes stay inside an owner-only staging directory.
+fn initialize_ledger(cli: &Cli, secret: &SecretString) -> Result<(), SetupError> {
+    // SQLCipher writes stay inside an owner-only staging directory.
     let parent = cli
         .db
         .parent()
@@ -778,15 +823,7 @@ fn initialize_ledger(cli: &Cli, secret: &SecretString, demo: bool) -> Result<(),
     let staging = staging_builder.tempdir_in(parent)?;
     keychain::restrict_directory(staging.path())?;
     let staged = staging.path().join("books.db");
-    if demo {
-        beankeeper_cli::commands::init::create_demo_ledger(
-            &staged,
-            Some(secret),
-            &cli.principal(),
-        )?;
-    } else {
-        Db::open(&staged, Some(secret))?;
-    }
+    Db::open(&staged, Some(secret))?;
     set_private(&staged)?;
     // An atomic no-clobber link also protects against a concurrent setup.
     fs::hard_link(&staged, &cli.db)?;
@@ -1490,7 +1527,7 @@ mod tests {
         if rustix::process::geteuid().as_raw() != 0 {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o500))?;
-            let failed = initialize_ledger(&cli, &first, false);
+            let failed = initialize_ledger(&cli, &first);
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
             assert!(failed.is_err());
         }

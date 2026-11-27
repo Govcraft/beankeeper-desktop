@@ -56,7 +56,7 @@ pub fn command() -> Command {
             Command::new("backups").about("List, create, and restore Desktop's local backups"),
         ))
         .subcommand(crate::demo::DemoOptions::augment_args(
-            Command::new("demo").about("Manage fictional books on the running service"),
+            Command::new("demo").about("Manage demo books on the running service"),
         ))
         .subcommand(crate::imports::command::ImportOptions::augment_args(
             Command::new("import").about("Import a statement through the running Desktop"),

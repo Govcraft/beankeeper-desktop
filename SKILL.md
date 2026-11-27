@@ -75,7 +75,7 @@ run them from an authorized shell in the owner's logged-in OS session.
 
 - **Claude Desktop chat.**
   Use the installed Beankeeper extension in this chat.
-  Call `setup_status` when the owner asks to set up books or try practice books.
+  Call `setup_status` when the owner asks to set up real books. Use `demo_start` for demo books when listed.
   If it returns `not_started`, call `setup` with no arguments. Poll
   `setup_status` while it reports `running`. If it reports `failed`, call
   `doctor` and explain the problem in plain words. When it reports `ready`,
@@ -85,7 +85,7 @@ run them from an authorized shell in the owner's logged-in OS session.
 
   The extension serves this skill over MCP to supported clients. Follow the
   [book setup tools](#guide-the-owner-through-book-setup) for real books or the
-  [demo interview](#tailor-a-demo-in-chat) for practice books.
+  [demo interview](#tailor-a-demo-in-chat) for demo books.
   [Claude Desktop setup](https://github.com/Govcraft/beankeeper-desktop/blob/main/docs/claude-desktop.md)
 - **ChatGPT desktop app in local Codex mode.** Choose **Codex**, then
   **Work in → This computer**. The owner can say **Install Beankeeper for me by
@@ -198,7 +198,7 @@ doctor succeeds, say “Beankeeper is installed. This chat needs to reload the
 connection. Choose **Restart** in **Settings → MCP servers**, then open a new
 **Codex** chat on **This computer**.” The owner can type `/mcp` to see
 `beankeeper` and `beankeeper-service`. Ask the owner to say **Set up my books**
-or **Create demo books**, then call `setup_status` in the connected chat.
+for real books, then call `setup_status` in the connected chat. For **Create demo books**, use `demo_start` when listed.
 For another local client, reload it if tools are still missing after doctor
 succeeds.
 
@@ -546,11 +546,13 @@ to tag or settle a hold.
 
 ## Try it with demo books
 
+Demo books are free and do not start the trial. The 30-day trial starts only when the owner sets up their real books. Call `setup` only for real books. If `demo_start` is not listed before setup, do not set up real books just to try a demo; pre-setup discovery arrives with #221.
+
 When the owner asks to try Beankeeper or see sample data, offer to tailor the
 demo in chat. If they want to get started right away, call `demo_start` with
 empty arguments to start the quick demo or resume the active one. Wait for
 `state: active` before asking the books for anything. The service creates
-encrypted fictional books and uses your existing access for every call.
+encrypted demo books and uses your existing access for every call.
 
 ### Tailor a demo in chat
 
@@ -591,18 +593,18 @@ company names, account names, and amounts. Keep real names, institution names,
 logins, account numbers, and amounts out of both the interview and the tool
 call. Never save the answers or profile to memory, notes, files, or real books.
 If `demo_start` returns `DEMO_ALREADY_ACTIVE`, explain that the existing demo
-contains their practice work. Resume it with empty arguments or use `demo_remove`
+contains their demo entries. Resume it with empty arguments or use `demo_remove`
 when the owner asks to discard it, then start the new demo.
 
-### Use the fictional books
+### Use the demo books
 
 1. On a managed stdio connection, a successful `demo_start` selects the demo
    for subsequent tool calls and tool discovery until `demo_remove` succeeds.
    An explicit `params._meta["beankeeper/ledgerTarget"]` takes precedence on
    inline requests. Over HTTP, send the returned `target` in the
-   `Beankeeper-Ledger-Target` header for each practice request. If the HTTP
-   client cannot send the header, skip practice writes on that connection.
-2. Use `company_list` and choose a sample book. Try a report, explain the
+   `Beankeeper-Ledger-Target` header for each demo request. If the HTTP
+   client cannot send the header, skip demo writes on that connection.
+2. Use `company_list` and choose a demo book. Try a report, explain the
    numbers in plain words, and label the figures and any chart **fictional**.
    Check that `_meta["beankeeper/ledgerTarget"]` matches the demo target.
    Demo results are for chat or a chart. Desktop links and change receipts
@@ -610,7 +612,7 @@ when the owner asks to discard it, then start the new demo.
 3. If asked to practice recording an entry, use `txn_post`. Report what
    happened and provide the transaction ID. Use `txn_reverse` for individual
    undo when your existing grant lists it. The owner can ask you to discard
-   all practice entries by removing the demo.
+   all demo entries by removing the demo.
 4. If asked to discard the demo, call `demo_remove`. Omit the explicit target
    on this control request so it reaches the startup books.
    A successful removal returns a managed chat to the owner's books. If the

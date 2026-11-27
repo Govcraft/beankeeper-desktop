@@ -84,12 +84,12 @@ bookkeeping question in the same chat. Say **Create demo books** and check
 that Claude can show fictional accounts. Record any OS or Claude warning and
 whether Claude had to reopen before it listed the tools. Repeat on each
 platform offered by the site. The packaging smoke test covers the bundled
-executable and the same setup and practice tools over stdio.
+executable and the same setup and demo tools over stdio.
 
 After the path ships, record the YouTube walkthrough on a clean Mac using
 the released download. Show the download, double-click, Claude's **Install**
 prompt, and **Create demo books** in chat. Then ask for a summary of the
-practice accounts to show the result. Link the video near the download on
+demo accounts to show the result. Link the video near the download on
 beankeeper.app.
 
 Linux binaries are built natively in Ubuntu 22.04 containers on both Linux

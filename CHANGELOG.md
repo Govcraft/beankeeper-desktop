@@ -7,6 +7,7 @@
 - Align the linked Claude setup guide with current installation steps and remove a private issuer link from the public license reference.
 
 - Launch Claude directly for Linux extension installation and ship a Claude Code/local Cowork plugin with prepared marketplace content.
+- Keep demo books free of trial setup and owner provisioning, and clarify when the real-books trial starts.
 
 - Give sandboxed agents read-only folder plans and resumable write-denied errors through CLI/MCP, prefer the Linux session bus, and repair systemd log redirects.
 

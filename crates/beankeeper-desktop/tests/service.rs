@@ -2344,13 +2344,23 @@ fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
     use secrecy::ExposeSecret;
 
     let fixture = LegacyService::new()?;
-    let mut host = fixture.host()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let license_url = format!("http://{}", listener.local_addr()?);
+    let state = fixture.root.path().join("state");
+    assert_no_demo_license_state(&state);
+    let mut host_command = fixture.command();
+    host_command
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", &license_url)
+        .args(["service", "run"]);
+    let mut host = common::Server::launch(host_command)?;
     let credential = fixture.secret("agent-token")?;
     let token = credential.expose_secret();
     let identity = identity::verify(fixture.db()?.read(), token)?;
     host.initialize(Some(token))?;
     let cli = fixture
         .command()
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", &license_url)
         .args(["demo", "start", "--json"])
         .output()?;
     assert!(
@@ -2359,6 +2369,7 @@ fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
         String::from_utf8_lossy(&cli.stderr)
     );
     let created: Value = serde_json::from_slice(&cli.stdout)?;
+    assert_demo_setup_alias(&fixture, &license_url)?;
     let start =
         common::rpc(host.request("tools/call", json!({"name":"demo_start"}), Some(token))?)?;
     let target = start["result"]["structuredContent"]["target"]
@@ -2415,7 +2426,40 @@ fn managed_demo_http_uses_the_startup_bearer_and_session() -> TestResult {
             .get(LEDGER_TARGET_META_KEY)
             .is_none()
     );
+    assert_no_demo_license_state(&state);
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_demo_setup_alias(fixture: &LegacyService, license_url: &str) -> TestResult {
+    let alias = fixture
+        .command()
+        .env("BEANKEEPER_LICENSE_SERVICE_URL", license_url)
+        .arg("--db")
+        .arg(fixture.root.path().join("never-owner.db"))
+        .args(["setup", "--demo"])
+        .output()?;
+    assert!(
+        alias.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+    assert!(!fixture.root.path().join("never-owner.db").exists());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn assert_no_demo_license_state(state: &std::path::Path) {
+    for name in ["machine-token", "licenses", "license-bindings"] {
+        assert!(
+            !state.join(name).exists(),
+            "unexpected demo license state: {name}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
