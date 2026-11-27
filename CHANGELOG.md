@@ -2,22 +2,22 @@
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-27
+
 - Adopt Beankeeper core 0.41.0, including cross-company statements before eliminations and atomic MCP journal imports with previews and retry references.
 - Update the bundled agent guide for both workflows and publish the generated Claude marketplace tree as a packaging artifact.
 - Fix automatic core release discovery and pin both core crates to beankeeper-cli-v0.41.0.
+- Back up existing books before automatically migrating ledger schema 39 to 51.
+- Refresh the issuer-signed revocation snapshot.
 - Advertise ledger and Desktop tools before extension setup so cached clients can use them immediately afterward, with recoverable NOT_SET_UP errors.
 - Point the README at the current install pages and correct public license and contribution facts.
 - Keep Linux service installation working with spaces or quotes in log folders by falling back to the system journal and reporting the destination through CLI/MCP.
 - Align the linked Claude setup guide with current installation steps and remove a private issuer link from the public license reference.
-
 - Launch Claude directly for Linux extension installation and ship a Claude Code/local Cowork plugin with prepared marketplace content.
 - Keep demo books free of trial setup and owner provisioning, and clarify when the real-books trial starts.
-
 - Give sandboxed agents read-only folder plans and resumable write-denied errors through CLI/MCP, prefer the Linux session bus, and repair systemd log redirects.
-
 - Fetch and verify a temporary cosign automatically when signed installation needs it.
 - Explain locked or missing keyrings in plain words, expose safe agent diagnostics, and verify Linux extension bundle architecture.
-
 - Keep trial notices specific to their books so a second set cannot show a bound-elsewhere warning on the licensed books.
 
 ## [1.0.3] - 2026-11-26
