@@ -112,3 +112,12 @@ stopped. Use `bk service uninstall` to remove background hosting. If you
 installed only the extension, its `bk` is in the `claude-extension`
 subdirectory of the per-user service state.
 [Service state directories](service.md#platform-behavior-and-files)
+
+If first setup cannot use the computer’s keyring, the agent explains whether it
+is locked or a Secret Service provider cannot be reached. A locked keyring needs
+a sign-out and sign-in before retrying. On Ubuntu or Debian the agent can help
+install `gnome-keyring` or enable an existing provider. No terminal instructions
+are required from the owner. `bk agents doctor` also reads the native keyring
+when the service is unavailable, without writing a credential; failures include a named code, an owner message,
+and a separate sanitized `technical_detail` field in its JSON `data.keyring`
+result. Backend error text and credential bytes are never included.

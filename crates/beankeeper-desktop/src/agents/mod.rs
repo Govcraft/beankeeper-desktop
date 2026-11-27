@@ -153,6 +153,8 @@ impl Error for AgentError {
 struct Failure {
     code: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    technical_detail: Option<&'static str>,
 }
 
 impl Failure {
@@ -160,6 +162,7 @@ impl Failure {
         Self {
             code,
             message: message.into(),
+            technical_detail: None,
         }
     }
 }
@@ -283,6 +286,8 @@ struct Report {
     service: Option<ServiceCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<crate::instance::PortWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keyring: Option<Failure>,
 }
 
 type Output = Envelope<Operation, Report, Failure>;
@@ -300,7 +305,8 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
     let output_meta = Metadata::new(operation);
     let output = match perform(operation, selected) {
         Ok(data) => {
-            let ok = data.agents.iter().all(|item| item.error.is_none())
+            let ok = data.keyring.is_none()
+                && data.agents.iter().all(|item| item.error.is_none())
                 && !matches!(data.service, Some(ServiceCheck::Unavailable { .. }));
             let error = (!ok).then(|| Failure::new(
                 "AGENT_CHECKS_FAILED",
@@ -368,6 +374,12 @@ fn write_text(output: &Output, writer: &mut impl Write, errors: &mut impl Write)
                 writeln!(errors, "Beankeeper: {}: {}", error.code, error.message)?;
             }
             None => {}
+        }
+        if let Some(error) = &data.keyring {
+            writeln!(errors, "Beankeeper: {}: {}", error.code, error.message)?;
+            if let Some(detail) = error.technical_detail {
+                writeln!(errors, "Technical detail: {detail}")?;
+            }
         }
         if let Some(warning) = &data.warning {
             writeln!(errors, "{}", warning.message())?;
@@ -468,12 +480,42 @@ fn perform_for(
     } else {
         None
     };
+    let keyring = if matches!(operation, Operation::Doctor)
+        && matches!(service, Some(ServiceCheck::Unavailable { .. }))
+    {
+        keyring_check(&locations.home)
+    } else {
+        None
+    };
     Ok(Report {
         agents,
         claude_overlap,
         service,
         warning,
+        keyring,
     })
+}
+
+// Read only: no probe credential is written, even before first setup.
+fn keyring_check(home: &std::path::Path) -> Option<Failure> {
+    use crate::setup::keychain::{OsKeychain, SecretStore};
+    let error = OsKeychain
+        .load(&home.join(".beankeeper-keyring-diagnostic"))
+        .err()?;
+    match error {
+        crate::setup::keychain::KeychainError::Keyring(failure) => Some(failure.into()),
+        _ => None,
+    }
+}
+
+impl From<crate::setup::keychain::KeyringFailure> for Failure {
+    fn from(error: crate::setup::keychain::KeyringFailure) -> Self {
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+            technical_detail: Some(error.technical_detail()),
+        }
+    }
 }
 
 fn mutation_lock() -> Result<fs::File, AgentError> {
@@ -638,4 +680,32 @@ fn registration_status(
         result = result.failure(Failure::new("AGENT_NOT_CONFIGURED", message));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_keeps_keyring_details_separate_from_owner_message() -> Result<(), Box<dyn Error>> {
+        for (error, code) in [
+            (
+                crate::setup::keychain::KeyringFailure::Locked,
+                "KEYRING_LOCKED",
+            ),
+            (
+                crate::setup::keychain::KeyringFailure::NoProvider,
+                "KEYRING_NO_PROVIDER",
+            ),
+        ] {
+            let failure = Failure::from(error);
+            let wire = serde_json::to_value(&failure)?;
+            assert_eq!(wire["code"], code);
+            assert!(wire["technical_detail"].is_string());
+            assert!(!failure.message.contains("keyring::Error"));
+            assert!(!failure.message.contains("terminal"));
+            assert_ne!(wire["message"], wire["technical_detail"]);
+        }
+        Ok(())
+    }
 }

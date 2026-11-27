@@ -403,6 +403,26 @@ class PackagingTests(unittest.TestCase):
                         "df800be58153b2c68c71f25466dec67fc358607d993352a9641550b2393a1da6",
                     )
 
+    def test_linux_mcp_bundles_preserve_elf_architecture(self):
+        for target, machine in (("x86_64-unknown-linux-gnu", 62),
+                                ("aarch64-unknown-linux-gnu", 183)):
+            with self.subTest(target=target):
+                # ELF64 little-endian executable header, no runnable payload.
+                header = bytearray(64)
+                header[:7] = b"\x7fELF\x02\x01\x01"
+                struct.pack_into("<HHI", header, 16, 2, machine, 1)
+                self.binary.write_bytes(header)
+                directory = release.stage(self.binary, "1.0.3", target, self.root / "work")
+                release.mcp_bundle(directory, "1.0.3", target, self.output)
+                with zipfile.ZipFile(self.output / f"{directory.name}.mcpb") as archive:
+                    manifest = json.loads(archive.read("manifest.json"))
+                    self.assertEqual(manifest["compatibility"]["platforms"], ["linux"])
+                    self.assertEqual(manifest["server"]["entry_point"], "server/bk")
+                    self.assertEqual(manifest["server"]["mcp_config"]["args"], ["mcp", "extension"])
+                    binary = archive.read("server/bk")
+                    self.assertEqual(binary[:7], b"\x7fELF\x02\x01\x01")
+                    self.assertEqual(struct.unpack_from("<H", binary, 18)[0], machine)
+
     def test_universal_macos_bundle_uses_both_packaged_slices(self):
         release_version = "1.2.3"
         targets = ("aarch64-apple-darwin", "x86_64-apple-darwin")
