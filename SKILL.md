@@ -1004,7 +1004,7 @@ several licenses are installed. The CLI equivalent is `bk license return`, with
 `--yes` for an agent acting on that confirmation. Report the structured outcome
 and receipt in plain words. A pending refund is recorded and is being submitted
 automatically. Failures preserve the local license; a closed window leaves it
-active. For a complimentary license, use `license_remove` to remove it locally without a refund.
+active. If a return reports that this license has no refund or in-app return, use `license_remove` to remove it locally without a refund.
 
 Offer **License and updates** using the report's `settings_url` if the owner
 wants the details in their paired browser. Cached update results show readable
