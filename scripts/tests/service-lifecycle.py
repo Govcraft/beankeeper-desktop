@@ -147,11 +147,11 @@ def extension_session(launcher, arguments, env):
 
 def setup_in_extension(launcher, arguments, env, definition):
     with extension_session(launcher, arguments, env) as (request, tool, notifications):
-        lifecycle_tools = {
-            "setup", "setup_status", "doctor", "agents_extension", "update_check", "update_status", "license_status", "license_start_trial", "license_activate", "license_return", "license_remove",
-        }
-        tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
-        assert tools == lifecycle_tools, tools
+        pre_setup_tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
+        assert "company_list" in pre_setup_tools, pre_setup_tools
+        unavailable = tool("company_list")
+        assert unavailable["isError"], unavailable
+        assert unavailable["structuredContent"]["code"] == "NOT_SET_UP", unavailable
         cache = Path(env["BEANKEEPER_DESKTOP_STATE_DIR"]) / "updates.json"
         cached_before = cache.read_bytes() if cache.exists() else None
         status = tool("update_status")
@@ -186,7 +186,10 @@ def setup_in_extension(launcher, arguments, env, definition):
         assert tool("setup")["structuredContent"]["state"] == "ready"
         assert tool("doctor")["structuredContent"]["state"] == "ready"
         tools = {entry["name"] for entry in request("tools/list", {})["tools"]}
-        assert (lifecycle_tools | {"company_list", "demo_start"}) <= tools, tools
+        assert pre_setup_tools == tools, {
+            "missing_after_attach": sorted(pre_setup_tools - tools),
+            "missing_before_setup": sorted(tools - pre_setup_tools),
+        }
 
         # Set up my books uses the existing onboarding tool on this connection.
         ledger = tool("setup_status")["structuredContent"]
