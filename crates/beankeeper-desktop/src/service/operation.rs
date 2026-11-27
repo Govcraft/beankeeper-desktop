@@ -14,38 +14,21 @@ pub(crate) const ACCESS_TOOL: &str = "access_set";
 pub(crate) const OPEN_TOOL: &str = "service_open";
 
 /// Options shared by the CLI and the `service_install` tool.
-#[derive(Args, Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Args, Clone, Copy, Debug, Default, Deserialize, serde::Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstallOptions {
     /// Use a private passphrase file instead of the native secret store for new books.
     #[arg(long)]
-    pub(super) file_store: bool,
+    pub(crate) file_store: bool,
     /// Leave all MCP client configurations unchanged.
     #[arg(long)]
-    pub(super) no_agents: bool,
+    pub(crate) no_agents: bool,
     /// List folder grants without changing any files or starting hosting.
     #[arg(long)]
-    pub(super) plan: bool,
+    pub(crate) plan: bool,
 }
 
 impl InstallOptions {
-    pub(super) fn resume(self) -> String {
-        self.resume_for(None)
-    }
-    pub(super) fn resume_for(self, books: Option<&Path>) -> String {
-        let books = books.map_or_else(String::new, |path| {
-            format!(
-                " --db '{}'",
-                path.to_string_lossy().replace('\'', "'\"'\"'")
-            )
-        });
-        format!(
-            "bk{books} service install{}{} --json",
-            if self.file_store { " --file-store" } else { "" },
-            if self.no_agents { " --no-agents" } else { "" }
-        )
-    }
-
     pub(super) fn storage(self) -> ServiceSecretStorage {
         if self.file_store {
             ServiceSecretStorage::PrivateFile
@@ -66,7 +49,7 @@ impl InstallOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum ServiceOperation {
+pub(crate) enum ServiceOperation {
     Install(InstallOptions),
     Uninstall,
     Start,

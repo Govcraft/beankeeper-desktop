@@ -14,7 +14,9 @@ use std::{
     process::ExitCode,
 };
 
-use crate::folders::{Directory, FolderPlan, WriteDenied};
+use crate::folders::{
+    Directory, FolderPlan, McpResume, ResumeCommand, WriteDenied, WriteDeniedDetails,
+};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -23,7 +25,8 @@ use crate::{
     output::{Envelope, Metadata},
     service,
 };
-use adapters::{Agent, ExtensionRegistration, Locations};
+pub(crate) use adapters::Agent;
+use adapters::{ExtensionRegistration, Locations};
 use config::{Change, Registration};
 
 /// Detect, register or verify a user's local agent connections.
@@ -49,7 +52,7 @@ enum AgentCommand {
 
 #[derive(Args, Debug, serde::Deserialize, Default)]
 #[serde(try_from = "ConnectInput")]
-struct ConnectOptions {
+pub(crate) struct ConnectOptions {
     #[command(flatten)]
     selection: Selection,
     /// List folder grants without changing any files.
@@ -68,18 +71,40 @@ struct Selection {
     agent: Option<Agent>,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-struct ConnectInput {
+pub(crate) struct ConnectInput {
     all: bool,
     agent: Option<Agent>,
-    plan: bool,
+    pub(crate) plan: bool,
 }
+impl ConnectOptions {
+    pub(crate) fn selected(&self) -> Option<Agent> {
+        selected_agent(&self.selection)
+    }
+}
+impl From<&ConnectOptions> for ConnectInput {
+    fn from(options: &ConnectOptions) -> Self {
+        Self {
+            all: options.selection.all,
+            agent: options.selection.agent,
+            plan: options.plan,
+        }
+    }
+}
+#[derive(Debug)]
+pub(crate) struct InvalidSelection;
+impl fmt::Display for InvalidSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Select either all or a single agent.")
+    }
+}
+impl Error for InvalidSelection {}
 impl TryFrom<ConnectInput> for ConnectOptions {
-    type Error = AgentError;
+    type Error = InvalidSelection;
     fn try_from(input: ConnectInput) -> Result<Self, Self::Error> {
         if input.all && input.agent.is_some() {
-            return Err(AgentError::Arguments);
+            return Err(InvalidSelection);
         }
         Ok(Self {
             selection: Selection {
@@ -105,7 +130,8 @@ enum Operation {
 
 #[derive(Debug)]
 enum AgentError {
-    Arguments,
+    Arguments(String),
+    Serialization(serde_json::Error),
     Home,
     Version,
     Binary(io::Error),
@@ -125,12 +151,15 @@ enum AgentError {
 
 impl AgentError {
     fn at(path: &std::path::Path, error: io::Error) -> Self {
-        WriteDenied::at(Directory::containing(path), &error)
+        Directory::try_from(path.parent().unwrap_or(std::path::Path::new(".")))
+            .ok()
+            .and_then(|directory| WriteDenied::at(directory, &error))
             .map_or_else(|| Self::Io(path.into(), error), Self::WriteDenied)
     }
     fn code(&self) -> &'static str {
         match self {
-            Self::Arguments => "AGENT_ARGUMENTS",
+            Self::Arguments(_) => "AGENT_ARGUMENTS",
+            Self::Serialization(_) => "AGENT_OUTPUT",
             Self::Home => "AGENT_HOME_UNAVAILABLE",
             Self::Version => "AGENT_VERSION_INVALID",
             Self::Binary(_) | Self::InvalidBinary(_) => "AGENT_BINARY_PATH",
@@ -147,7 +176,8 @@ impl AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Arguments => f.write_str("Select either all or a single agent."),
+            Self::Arguments(message) => f.write_str(message),
+            Self::Serialization(error) => write!(f, "cannot serialize agent result: {error}"),
             Self::Home => {
                 f.write_str("Beankeeper needs the desktop user's absolute home directory.")
             }
@@ -200,7 +230,7 @@ struct Failure {
     #[serde(skip_serializing_if = "Option::is_none")]
     technical_detail: Option<&'static str>,
     #[serde(flatten)]
-    details: Option<serde_json::Value>,
+    details: Option<WriteDeniedDetails>,
 }
 
 impl Failure {
@@ -218,7 +248,7 @@ impl From<AgentError> for Failure {
     fn from(error: AgentError) -> Self {
         let mut failure = Self::new(error.code(), error.to_string());
         if let AgentError::WriteDenied(error) = error {
-            failure.details = Some(error.details("bk agents connect --all --json"));
+            failure.details = Some(error.details(&ResumeCommand::from(None::<Agent>)));
         }
         failure
     }
@@ -389,7 +419,7 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
             error: Some(error.into()),
         },
     };
-    set_resume(&mut output, &connect_resume(selected));
+    set_resume(&mut output, &ResumeCommand::from(selected));
     let result = if json {
         write_json(&output, &mut io::stdout().lock())
     } else if !quiet || !output.ok {
@@ -408,22 +438,10 @@ pub fn run(options: AgentOptions, json: bool, quiet: bool) -> ExitCode {
     }
 }
 
-fn connect_resume(selected: Option<Agent>) -> String {
-    use clap::ValueEnum;
-    let selection = selected
-        .and_then(|agent| agent.to_possible_value())
-        .map_or_else(|| "--all".into(), |value| value.get_name().to_owned());
-    format!("bk agents connect {selection} --json")
-}
-
-fn set_resume(output: &mut Output, resume: &str) {
+fn set_resume(output: &mut Output, resume: &ResumeCommand) {
     let update = |failure: &mut Failure| {
-        if let Some(details) = failure
-            .details
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            details.insert("resume".into(), resume.into());
+        if let Some(details) = &mut failure.details {
+            details.resume = resume.clone();
         }
     };
     if let Some(error) = &mut output.error {
@@ -442,7 +460,14 @@ fn folder_plan(selected: Option<Agent>) -> Result<FolderPlan, AgentError> {
     let locations = Locations::discover()
         .filter(|paths| paths.home.is_absolute())
         .ok_or(AgentError::Home)?;
-    let mut directories = vec![Directory::containing(&mutation_lock_path()?)];
+    let mut directories = vec![
+        Directory::try_from(
+            mutation_lock_path()?
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        )
+        .map_err(|error| AgentError::Io(locations.home.clone(), error))?,
+    ];
     for agent in Agent::ALL
         .into_iter()
         .filter(|agent| selected.is_none_or(|selected| selected == *agent))
@@ -451,11 +476,18 @@ fn folder_plan(selected: Option<Agent>) -> Result<FolderPlan, AgentError> {
             && (selected.is_some() || adapter.installed())
             && adapter.extension_registration()?.is_none()
         {
-            directories.extend(adapter.directories());
+            directories.extend(
+                adapter
+                    .directories()
+                    .collect::<io::Result<Vec<_>>>()
+                    .map_err(|error| AgentError::Io(locations.home.clone(), error))?,
+            );
         }
     }
-    FolderPlan::try_from((directories, connect_resume(selected)))
-        .map_err(|error| AgentError::Io(locations.home, error))
+    Ok(FolderPlan::from((
+        directories,
+        ResumeCommand::from(selected),
+    )))
 }
 
 fn plan_output(options: &ConnectOptions) -> Output {
@@ -516,10 +548,14 @@ pub(crate) fn connect_call(
     let options = serde_json::from_value::<ConnectOptions>(serde_json::Value::Object(
         request.arguments.unwrap_or_default(),
     ));
-    let mut output = match options {
+    let output = match options {
         Ok(options) => {
             if options.plan {
-                plan_output(&options)
+                let mut output = plan_output(&options);
+                if let Some(plan) = output.data.as_mut().and_then(|data| data.plan.as_mut()) {
+                    plan.set_resume(ResumeCommand::from(McpResume(&options)));
+                }
+                output
             } else {
                 let selected = selected_agent(&options.selection);
                 let mut output = match perform(Operation::Connect, selected) {
@@ -531,18 +567,15 @@ pub(crate) fn connect_call(
                         error: Some(error.into()),
                     },
                 };
-                set_resume(&mut output, &connect_resume(selected));
+                set_resume(&mut output, &ResumeCommand::from(McpResume(&options)));
                 output
             }
         }
-        _ => Output {
+        Err(error) => Output {
             ok: false,
             meta: Metadata::new(Operation::Connect),
             data: None,
-            error: Some(Failure::new(
-                "AGENT_ARGUMENTS",
-                "Use the agents_connect tool schema; select agent or all.",
-            )),
+            error: Some(AgentError::Arguments(error.to_string()).into()),
         },
     };
     let ok = output.ok;
@@ -550,7 +583,14 @@ pub(crate) fn connect_call(
     let mut errors = Vec::new();
     let _ = write_text(&output, &mut message, &mut errors);
     message.extend(errors);
-    let value = serde_json::to_value(&mut output).unwrap_or_default();
+    let value = match serde_json::to_value(&output) {
+        Ok(value) => value,
+        Err(error) => {
+            return rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                AgentError::Serialization(error).to_string(),
+            )]);
+        }
+    };
     let mut result = if ok {
         rmcp::model::CallToolResult::structured(value)
     } else {
@@ -748,7 +788,8 @@ fn mutation_lock_path() -> Result<PathBuf, AgentError> {
 }
 fn mutation_lock() -> Result<fs::File, AgentError> {
     let path = mutation_lock_path()?;
-    let state = Directory::containing(&path);
+    let state = Directory::try_from(path.parent().unwrap_or(std::path::Path::new(".")))
+        .map_err(|error| AgentError::Io(path.clone(), error))?;
     let error_at = |error| AgentError::at(&path, error);
     state.prepare().map_err(error_at)?;
     if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {

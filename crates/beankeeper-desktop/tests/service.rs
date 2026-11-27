@@ -3393,7 +3393,18 @@ fn install_plan_is_read_only_and_matches_mcp_with_overrides() -> TestResult {
         "service_install",
         &json!({"plan":true,"file_store":true,"no_agents":true}),
     )?;
-    assert_eq!(result["structuredContent"]["data"], plan["data"]);
+    assert_eq!(
+        result["structuredContent"]["data"]["directories"],
+        plan["data"]["directories"]
+    );
+    assert_eq!(
+        plan["data"]["resume"],
+        "bk service install --file-store --no-agents --json"
+    );
+    assert_eq!(
+        result["structuredContent"]["data"]["resume"],
+        json!({"tool":"service_install","arguments":{"file_store":true,"no_agents":true,"plan":false}})
+    );
     assert!(!root.path().join("data").exists());
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("logs").exists());
@@ -3537,7 +3548,18 @@ fn agents_connect_plan_has_cli_mcp_parity() -> TestResult {
     mcp.args(["service", "mcp"]);
     let reply = stdio_tool_response(mcp, "agents_connect", &json!({"agent":"codex","plan":true}))?;
     assert_ne!(reply["isError"], true, "{reply}");
-    assert_eq!(report["data"], reply["structuredContent"]["data"]);
+    assert_eq!(
+        report["data"]["plan"]["directories"],
+        reply["structuredContent"]["data"]["plan"]["directories"]
+    );
+    assert_eq!(
+        report["data"]["plan"]["resume"],
+        "bk agents connect codex --json"
+    );
+    assert_eq!(
+        reply["structuredContent"]["data"]["plan"]["resume"],
+        json!({"tool":"agents_connect","arguments":{"all":false,"agent":"codex","plan":false}})
+    );
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("custom-codex").exists());
     Ok(())

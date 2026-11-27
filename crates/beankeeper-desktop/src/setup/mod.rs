@@ -146,17 +146,20 @@ impl SetupError {
     fn at(self, file: &Path) -> Self {
         match self {
             Self::Io(error) | Self::Keychain(keychain::KeychainError::Io(error)) => {
-                crate::folders::WriteDenied::at(crate::folders::Directory::containing(file), &error)
+                crate::folders::Directory::try_from(file.parent().unwrap_or(Path::new(".")))
+                    .ok()
+                    .and_then(|directory| crate::folders::WriteDenied::at(directory, &error))
                     .map_or_else(|| Self::Io(error), Self::WriteDenied)
             }
-            Self::Config(config::ConfigError::Io(path, error)) => crate::folders::WriteDenied::at(
-                crate::folders::Directory::containing(&path),
-                &error,
-            )
-            .map_or_else(
-                || Self::Config(config::ConfigError::Io(path, error)),
-                Self::WriteDenied,
-            ),
+            Self::Config(config::ConfigError::Io(path, error)) => {
+                crate::folders::Directory::try_from(path.parent().unwrap_or(Path::new(".")))
+                    .ok()
+                    .and_then(|directory| crate::folders::WriteDenied::at(directory, &error))
+                    .map_or_else(
+                        || Self::Config(config::ConfigError::Io(path, error)),
+                        Self::WriteDenied,
+                    )
+            }
             error => error,
         }
     }
@@ -481,7 +484,9 @@ fn run_with_store(
     }
     let temporary = temporary_passphrase(&secret).map_err(|error| {
         let directory = temporary_secret_directory();
-        crate::folders::WriteDenied::at(directory, &error)
+        directory
+            .ok()
+            .and_then(|directory| crate::folders::WriteDenied::at(directory, &error))
             .map_or_else(|| SetupError::Io(error), SetupError::WriteDenied)
     })?;
     cli.passphrase.passphrase_fd = None;
@@ -1012,11 +1017,11 @@ fn set_private(path: &Path) -> io::Result<()> {
     keychain::restrict_file(path)
 }
 
-pub(crate) fn temporary_secret_directory() -> crate::folders::Directory {
-    crate::folders::Directory::new(&std::env::temp_dir())
+pub(crate) fn temporary_secret_directory() -> io::Result<crate::folders::Directory> {
+    crate::folders::Directory::try_from(std::env::temp_dir())
 }
 pub(crate) fn temporary_passphrase(secret: &SecretString) -> io::Result<tempfile::NamedTempFile> {
-    let mut file = tempfile::NamedTempFile::new_in(temporary_secret_directory().as_ref())?;
+    let mut file = tempfile::NamedTempFile::new_in(temporary_secret_directory()?.as_ref())?;
     keychain::restrict_file(file.path())?;
     file.write_all(secret.expose_secret().as_bytes())?;
     file.flush()?;

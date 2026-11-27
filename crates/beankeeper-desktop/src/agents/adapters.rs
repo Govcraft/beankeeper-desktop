@@ -63,10 +63,16 @@ pub(super) enum ExtensionRegistration {
 }
 
 impl Adapter {
-    pub(super) fn directories(&self) -> impl Iterator<Item = crate::folders::Directory> {
+    pub(super) fn directories(
+        &self,
+    ) -> impl Iterator<Item = std::io::Result<crate::folders::Directory>> {
         std::iter::once(&self.config)
             .chain(self.skill.iter())
-            .map(|path| crate::folders::Directory::containing(path))
+            .map(|path| {
+                crate::folders::Directory::try_from(
+                    path.parent().unwrap_or(std::path::Path::new(".")),
+                )
+            })
     }
 
     pub fn installed(&self) -> bool {

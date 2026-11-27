@@ -26,8 +26,48 @@ pub(super) struct UserSessionEnv(
 
 #[cfg(target_os = "linux")]
 enum SessionTransport {
-    Bus(OsString),
+    Bus(BusAddress),
     PrivateSocket(PathBuf),
+}
+
+/// Parse address syntax once, preserving the exact address passed to the manager.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq)]
+enum BusAddress {
+    Path { address: OsString, path: PathBuf },
+    Other(OsString),
+}
+
+#[cfg(target_os = "linux")]
+impl TryFrom<&OsStr> for BusAddress {
+    type Error = ServiceError;
+
+    fn try_from(address: &OsStr) -> Result<Self, Self::Error> {
+        if address.is_empty() {
+            return Err(ServiceError::SessionEnvUnavailable);
+        }
+        let path = address
+            .to_str()
+            .and_then(|value| value.strip_prefix("unix:path="))
+            .and_then(|value| value.split(',').next())
+            .filter(|value| !value.is_empty() && !value.contains(';'));
+        Ok(match path {
+            Some(path) => Self::Path {
+                address: address.into(),
+                path: path.into(),
+            },
+            None => Self::Other(address.into()),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AsRef<OsStr> for BusAddress {
+    fn as_ref(&self) -> &OsStr {
+        match self {
+            Self::Path { address, .. } | Self::Other(address) => address,
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -119,8 +159,8 @@ impl UserSessionEnv {
     #[cfg(target_os = "linux")]
     fn inherit_bus(address: Option<&OsStr>) -> Option<Self> {
         address
-            .filter(|address| !address.is_empty())
-            .map(|address| Self(SessionTransport::Bus(address.into()), None))
+            .and_then(|address| BusAddress::try_from(address).ok())
+            .map(|address| Self(SessionTransport::Bus(address), None))
     }
 
     pub(super) fn fallback(&self) -> Option<Self> {
@@ -139,13 +179,10 @@ impl UserSessionEnv {
         {
             use std::os::unix::net::UnixStream;
             let path = match &self.0 {
-                SessionTransport::Bus(address) => PathBuf::from(
-                    address
-                        .to_str()?
-                        .strip_prefix("unix:path=")?
-                        .split(',')
-                        .next()?,
-                ),
+                SessionTransport::Bus(BusAddress::Path { path, .. }) => path.clone(),
+                // Other D-Bus transports are handled by the manager itself. A Unix
+                // socket probe cannot establish whether those transports are reachable.
+                SessionTransport::Bus(BusAddress::Other(_)) => return None,
                 SessionTransport::PrivateSocket(runtime) => runtime.join("systemd/private"),
             };
             UnixStream::connect(path)
@@ -163,7 +200,7 @@ impl UserSessionEnv {
         #[cfg(target_os = "linux")]
         match &self.0 {
             SessionTransport::Bus(address) => {
-                command.env(BUS, address).env_remove(RUNTIME);
+                command.env(BUS, address.as_ref()).env_remove(RUNTIME);
             }
             SessionTransport::PrivateSocket(runtime) => {
                 command.env(RUNTIME, runtime).env_remove(BUS);
@@ -251,6 +288,32 @@ mod tests {
         );
         assert!(UserSessionEnv::inherit_bus(None).is_none());
         assert!(UserSessionEnv::inherit_bus(Some(OsStr::new(""))).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bus_address_parses_once_and_preserves_other_transports() -> Result<(), ServiceError> {
+        let address = OsStr::new("unix:path=/custom/bus,guid=1234");
+        let parsed = BusAddress::try_from(address)?;
+        assert!(
+            matches!(&parsed, BusAddress::Path { path, .. } if path == Path::new("/custom/bus"))
+        );
+        assert_eq!(parsed.as_ref(), address);
+        for address in [
+            "unix:abstract=bus",
+            "tcp:host=localhost,port=1234",
+            "unix:path=",
+        ] {
+            let parsed = BusAddress::try_from(OsStr::new(address))?;
+            assert!(matches!(&parsed, BusAddress::Other(_)));
+            assert_eq!(parsed.as_ref(), OsStr::new(address));
+            assert!(
+                UserSessionEnv(SessionTransport::Bus(parsed), None)
+                    .connection_failure()
+                    .is_none()
+            );
+        }
+        assert!(BusAddress::try_from(OsStr::new("")).is_err());
         Ok(())
     }
 

@@ -3,7 +3,7 @@
 pub(crate) mod extension;
 mod manager;
 mod mcp;
-mod operation;
+pub(crate) mod operation;
 mod session;
 
 use std::{
@@ -40,7 +40,7 @@ use operation::ServiceOperation;
 pub(crate) use operation::{ACCESS_TOOL, OPEN_TOOL, access_tool, open_tool};
 use session::UserSessionEnv;
 
-use crate::folders::{Directory, FolderPlan, WriteDenied};
+use crate::folders::{Directory, FolderPlan, ResumeCommand, WriteDenied, WriteDeniedDetails};
 
 const SERVICE_STATE_LIMIT: usize = 64 * 1024;
 
@@ -112,6 +112,9 @@ impl fmt::Display for ManagerFailure {
         f.write_str(match self {
             Self::Connection => "Cannot connect to the OS service manager. The agent should use the owner's active session bus, then retry the same operation.",
             Self::PermissionDenied => "Access to the OS service manager was denied. The agent should restore access to the owner's session socket and retry.",
+            #[cfg(target_os = "windows")]
+            Self::Operation => "The OS service manager could not complete the task operation. The agent should inspect Task Scheduler history and the private service log, then retry.",
+            #[cfg(not(target_os = "windows"))]
             Self::Operation => "The OS service manager could not complete the unit operation. The agent should inspect the private service log and manager status, then retry.",
         })
     }
@@ -166,22 +169,33 @@ pub enum ServiceError {
     NotReady,
 }
 
+#[derive(Serialize)]
+pub(crate) struct ServiceErrorDetails<'a> {
+    code: &'static str,
+    message: String,
+    #[serde(flatten)]
+    details: Option<WriteDeniedDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a ManagerFailure>,
+}
+
 impl ServiceError {
     pub(crate) fn at(directory: Directory, error: io::Error) -> Self {
         WriteDenied::at(directory, &error).map_or_else(|| Self::Io(error), Self::WriteDenied)
     }
-    pub(crate) fn structured(&self, resume: &str) -> serde_json::Value {
-        let mut value = serde_json::json!({"code": self.code(), "message": self.to_string()});
-        if let Self::WriteDenied(error) = self
-            && let (Some(object), Some(details)) =
-                (value.as_object_mut(), error.details(resume).as_object())
-        {
-            object.extend(details.clone());
+    pub(crate) fn structured(&self, resume: &ResumeCommand) -> ServiceErrorDetails<'_> {
+        ServiceErrorDetails {
+            code: self.code(),
+            message: self.to_string(),
+            details: match self {
+                Self::WriteDenied(error) => Some(error.details(resume)),
+                _ => None,
+            },
+            reason: match self {
+                Self::Manager(reason) => Some(reason),
+                _ => None,
+            },
         }
-        if let Self::Manager(reason) = self {
-            value["reason"] = serde_json::json!(reason);
-        }
-        value
     }
     /// Stable error name returned by lifecycle MCP tools.
     #[must_use]
@@ -331,11 +345,14 @@ impl Paths {
     pub fn log(&self) -> PathBuf {
         self.logs.join("service.log")
     }
-    fn directories(&self) -> [Directory; 3] {
-        [&self.data, &self.state, &self.logs].map(|path| Directory::new(path))
+    fn directories(&self) -> io::Result<Vec<Directory>> {
+        [&self.data, &self.state, &self.logs]
+            .into_iter()
+            .map(|path| Directory::try_from(path.as_path()))
+            .collect()
     }
     fn prepare(&self) -> Result<(), ServiceError> {
-        for directory in self.directories() {
+        for directory in self.directories()? {
             directory
                 .prepare()
                 .map_err(|error| ServiceError::at(directory, error))?;
@@ -741,9 +758,9 @@ pub fn run(options: &ServiceOptions, cli: Cli, explicit_db: bool) -> Result<(), 
         );
     let resume = match operation {
         ServiceOperation::Install(options) => {
-            options.resume_for(explicit_db.then_some(cli.db.as_path()))
+            ResumeCommand::from((options, explicit_db.then_some(cli.db.as_path())))
         }
-        _ => "bk service status --json".into(),
+        _ => ResumeCommand::default(),
     };
     let reply = match execute(operation, Some((cli, explicit_db)), None) {
         Ok(reply) => reply,
@@ -851,11 +868,17 @@ fn install_plan(
     ledger: Option<&(Cli, bool)>,
     options: InstallOptions,
 ) -> Result<FolderPlan, ServiceError> {
-    let mut directories = paths.directories().to_vec();
-    directories.push(setup::temporary_secret_directory());
-    directories.push(Directory::containing(&paths.definition));
+    let mut directories = paths.directories()?;
+    directories.push(setup::temporary_secret_directory()?);
+    directories.push(Directory::try_from(
+        paths.definition.parent().unwrap_or(Path::new(".")),
+    )?);
     if cfg!(target_os = "linux") {
-        directories.push(Directory::containing(&manager::linux_artifact(paths)));
+        directories.push(Directory::try_from(
+            manager::linux_artifact(paths)
+                .parent()
+                .unwrap_or(Path::new(".")),
+        )?);
     }
     let explicit = ledger
         .filter(|(_, explicit)| *explicit)
@@ -868,15 +891,21 @@ fn install_plan(
         },
         |path| std::path::absolute(path).map_err(Into::into),
     )?;
-    directories.push(Directory::containing(&books));
+    directories.push(Directory::try_from(
+        books.parent().unwrap_or(Path::new(".")),
+    )?);
     if !options.no_agents {
         directories.extend(
             setup::config::service_config_paths(&paths.home)
                 .iter()
-                .map(|path| Directory::containing(path)),
+                .map(|path| Directory::try_from(path.parent().unwrap_or(Path::new("."))))
+                .collect::<io::Result<Vec<_>>>()?,
         );
     }
-    FolderPlan::try_from((directories, options.resume_for(explicit))).map_err(Into::into)
+    Ok(FolderPlan::from((
+        directories,
+        ResumeCommand::from((options, explicit)),
+    )))
 }
 
 fn execute(
@@ -1186,7 +1215,12 @@ fn bind_listener(preferred: u16) -> io::Result<TcpListener> {
 }
 pub(crate) fn lock(path: &Path) -> Result<fs::File, ServiceError> {
     lock_at(path).map_err(|error| match error {
-        ServiceError::Io(error) => ServiceError::at(Directory::containing(path), error),
+        ServiceError::Io(error) => {
+            match Directory::try_from(path.parent().unwrap_or(Path::new("."))) {
+                Ok(directory) => ServiceError::at(directory, error),
+                Err(_) => ServiceError::Io(error),
+            }
+        }
         error => error,
     })
 }
@@ -1218,12 +1252,17 @@ pub(crate) fn private_json(path: &Path, value: &impl Serialize) -> Result<(), Se
 }
 pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
     private_write_at(path, bytes).map_err(|error| match error {
-        ServiceError::Io(error) => ServiceError::at(Directory::containing(path), error),
+        ServiceError::Io(error) => {
+            match Directory::try_from(path.parent().unwrap_or(Path::new("."))) {
+                Ok(directory) => ServiceError::at(directory, error),
+                Err(_) => ServiceError::Io(error),
+            }
+        }
         error => error,
     })
 }
 fn private_write_at(path: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
-    let parent = Directory::containing(path);
+    let parent = Directory::try_from(path.parent().unwrap_or(Path::new(".")))?;
     parent.create()?;
     match PrivateFile::open(path) {
         Ok(_) => {}

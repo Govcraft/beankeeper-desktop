@@ -1,5 +1,6 @@
 //! Local OS-authority lifecycle channel, separate from the ledger's bearer grants.
 
+use crate::folders::{McpResume, ResumeCommand};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -83,7 +84,12 @@ impl ServerHandler for Lifecycle {
         };
         let result = tokio::task::spawn_blocking(move || execute(operation, None, None)).await;
         Ok(match result {
-            Ok(Ok(status)) => reply(status),
+            Ok(Ok(mut status)) => {
+                if let ServiceReply::Plan(plan) = &mut status {
+                    plan.set_resume(ResumeCommand::from(McpResume(operation)));
+                }
+                reply(status)
+            }
             Ok(Err(error)) => failure_for(&error, operation),
             Err(_) => failure(&ServiceError::Worker),
         }
@@ -135,18 +141,25 @@ fn reply(reply: ServiceReply) -> CallToolResult {
 }
 fn failure_for(error: &ServiceError, operation: ServiceOperation) -> CallToolResult {
     let resume = match operation {
-        ServiceOperation::Install(options) => options.resume(),
-        _ => "bk service status --json".into(),
+        ServiceOperation::Install(options) => ResumeCommand::from(McpResume(options)),
+        _ => ResumeCommand::from(McpResume(operation)),
     };
-    let mut result = CallToolResult::structured_error(error.structured(&resume));
-    result.content = vec![ContentBlock::text(error.to_string())];
-    result
+    failure_with_resume(error, &resume)
 }
 fn failure(error: &ServiceError) -> CallToolResult {
-    let message = error.to_string();
-    let mut result =
-        CallToolResult::structured_error(error.structured("bk service install --json"));
-    result.content = vec![ContentBlock::text(message)];
+    failure_with_resume(
+        error,
+        &ResumeCommand::from(McpResume(super::InstallOptions::default())),
+    )
+}
+fn failure_with_resume(error: &ServiceError, resume: &ResumeCommand) -> CallToolResult {
+    let Ok(value) = serde_json::to_value(error.structured(resume)) else {
+        return CallToolResult::error(vec![ContentBlock::text(
+            ServiceError::Configuration("cannot serialize service error").to_string(),
+        )]);
+    };
+    let mut result = CallToolResult::structured_error(value);
+    result.content = vec![ContentBlock::text(error.to_string())];
     result
 }
 

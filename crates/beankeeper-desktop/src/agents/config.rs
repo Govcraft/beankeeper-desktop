@@ -190,7 +190,7 @@ enum WriteMode {
 }
 
 fn write_private(path: &Path, content: &[u8], mode: WriteMode) -> io::Result<()> {
-    let parent = crate::folders::Directory::containing(path);
+    let parent = crate::folders::Directory::try_from(path.parent().unwrap_or(Path::new(".")))?;
     parent.create()?;
     let mut temp = tempfile::NamedTempFile::new_in(parent.as_ref())?;
     crate::setup::keychain::restrict_file(temp.path())?;
