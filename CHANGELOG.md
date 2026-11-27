@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [1.0.4] - 2026-11-27
+## [1.0.4-rc.1] - 2026-11-27
 
 - Pin the ledger library and CLI to the beankeeper-cli-v0.40.0 release tag, and open a PR when a newer core release appears.
 - Advertise ledger and Desktop tools before extension setup so cached clients can use them immediately afterward, with recoverable NOT_SET_UP errors.

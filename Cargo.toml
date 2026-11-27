@@ -3,7 +3,7 @@ members = ["crates/beankeeper-desktop"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.4"
+version = "1.0.4-rc.1"
 edition = "2024"
 rust-version = "1.91"
 repository = "https://github.com/Govcraft/beankeeper-desktop"
