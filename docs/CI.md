@@ -7,7 +7,7 @@ CI runs only the checks a change can affect, restores compiler caches that only
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| `ci.yml` | pull requests, `main` pushes, manual, daily | Runs selected Rust, service and packaging checks behind `ci-gate`, and checks the latest Beankeeper main on the daily schedule |
+| `ci.yml` | pull requests, `main` pushes, manual, daily | Runs selected Rust, service and packaging checks behind `ci-gate`, and checks the latest Beankeeper main (switching from the pinned core tag) on the daily schedule |
 | `packaging.yml` | called by `ci.yml` and `release.yml` | Builds, packages and exercises installers for a list of targets |
 | `live-install.yml` | pull requests changing the guide, installers, or smoke test, manual | Runs the guide with the checked-out installers and verifies public signed releases on all five native targets |
 | `release.yml` | tags, manual, nightly | Packages every target; tags also sign and publish |

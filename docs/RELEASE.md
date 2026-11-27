@@ -7,13 +7,15 @@ Program and Azure Artifact Signing accounts are **pending Roland's setup**.
 Paid signing hooks are disabled by default. No production credentials are
 required to build or merge this work.
 
-Until Beankeeper ships a stable release, both upstream crates track the Git
-`main` branch. `Cargo.lock` is the sole lock, and regular CI and releases build
-with `--locked`. The `upstream-main` job refreshes both crates when CI selects
-Rust checks and on a daily schedule. It reports the revisions before building,
-linting and testing them. Once Beankeeper ships a stable release, switch both
-crates to stable release tags or crates.io versions and retire or repurpose the
-job.
+Desktop consumes a released core, not core `main`. Both upstream crates are
+pinned to the same `beankeeper-cli-vX.Y.Z` Git tag in
+`crates/beankeeper-desktop/Cargo.toml` (currently `beankeeper-cli-v0.40.0`), so
+every Desktop build contains an identifiable core release. To move to a newer
+core release, change both tags and run `cargo update -p beankeeper -p
+beankeeper-cli`. `Cargo.lock` is the sole lock, and regular CI and releases build
+with `--locked`. The `upstream-main` job temporarily switches both crates to core
+`main` and refreshes them, reporting the revisions before building, linting and
+testing, so drift shows up before the next core release.
 
 ## Artifacts and versions
 

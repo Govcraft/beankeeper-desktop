@@ -161,6 +161,9 @@ jobs:
           family: dev-linux
       - name: Resolve upstream main and report the revision
         run: |
+          # Releases pin a core tag; this job checks drift against core main.
+          sed -i -E 's|tag = "beankeeper-cli-v[^"]+"|branch = "main"|' crates/beankeeper-desktop/Cargo.toml
+          grep -q 'branch = "main"' crates/beankeeper-desktop/Cargo.toml
           cargo update -p beankeeper -p beankeeper-cli
           python3 - <<'PY'
           import tomllib

@@ -45,3 +45,7 @@ cargo test --workspace --locked --doc
 ```
 
 See the [CI guide](CI.md) for helper tests and checks selected by changed paths.
+
+Desktop builds against a released core: `beankeeper` and `beankeeper-cli` are pinned to
+one `beankeeper-cli-vX.Y.Z` tag. Don't switch them back to `branch = "main"`; to
+adopt a newer core release, see [Release packaging](RELEASE.md).
