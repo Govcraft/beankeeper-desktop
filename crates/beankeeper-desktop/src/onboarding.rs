@@ -250,9 +250,9 @@ pub(crate) struct DesktopTools {
     pub(crate) company: Option<beankeeper_cli::db::companies::CompanySlug>,
 }
 
-impl HostToolHandler for DesktopTools {
-    fn tools(&self) -> Vec<HostTool> {
-        let mut tools = self.navigation.tools();
+impl DesktopTools {
+    pub(crate) fn definitions(include_demo: bool) -> Vec<HostTool> {
+        let mut tools = Navigation::definitions();
         tools.push(link_tool::definition());
         tools.extend(changes::definitions());
         tools.push(HostTool {
@@ -274,10 +274,16 @@ impl HostToolHandler for DesktopTools {
             capability: Capability::Read,
             effect: HostToolEffect::ReadOnly,
         });
-        if self.demo.is_some() {
+        if include_demo {
             tools.extend(DemoOperation::ALL.map(DemoOperation::definition));
         }
         tools
+    }
+}
+
+impl HostToolHandler for DesktopTools {
+    fn tools(&self) -> Vec<HostTool> {
+        Self::definitions(self.demo.is_some())
     }
 
     async fn call_tool(

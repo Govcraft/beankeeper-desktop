@@ -695,28 +695,39 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     let root = tempfile::tempdir()?;
     let mut command = isolated(root.path());
     command.args(["mcp", "extension"]);
-    let mut pipe = McpPipe::start(&mut command)?;
+    let mut pipe = McpPipe::spawn(&mut command)?;
+    let initialized = pipe.request(
+        "initialize",
+        &json!({
+            "protocolVersion":"2025-11-25", "capabilities":{},
+            "clientInfo":{"name":"cached-catalog-test","version":"1"}
+        }),
+    )?;
+    assert_eq!(initialized["capabilities"]["tools"]["listChanged"], true);
     let listed = pipe.request("tools/list", &json!({}))?;
     let tools = listed["tools"].as_array().ok_or("missing setup tools")?;
-    assert_eq!(
-        tools.iter().map(|tool| &tool["name"]).collect::<Vec<_>>(),
-        [
-            "setup",
-            "setup_status",
-            "doctor",
-            "agents_extension",
-            "update_status",
-            "update_check",
-            "license_status",
-            "license_start_trial",
-            "license_activate",
-            "license_return",
-            "license_remove",
-        ]
-    );
-    for tool in tools {
-        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    for name in [
+        "setup",
+        "setup_status",
+        "doctor",
+        "agents_extension",
+        "license_status",
+        "company_list",
+        "txn_post",
+        "audit_undo",
+        "txn_reverse",
+        "ui_get_link",
+        "demo_start",
+        "demo_remove",
+    ] {
+        assert!(
+            tools.iter().any(|tool| tool["name"] == name),
+            "missing {name}"
+        );
     }
+    let names: std::collections::BTreeSet<_> =
+        tools.iter().map(|tool| tool["name"].as_str()).collect();
+    assert_eq!(names.len(), tools.len());
     let status = pipe.tool("setup_status", &json!({}))?;
     assert_eq!(status["structuredContent"]["state"], "not_started");
     let cli = isolated(root.path())
@@ -729,11 +740,18 @@ fn extension_discovers_setup_in_an_empty_home_and_rejects_model_supplied_command
     );
     let rejected = pipe.tool("setup", &json!({"command":"fixture", "url":"fixture"}))?;
     assert_eq!(rejected["structuredContent"]["code"], "SERVICE_ARGUMENTS");
-    let unavailable = pipe.tool("demo_start", &json!({}))?;
+    let unavailable = pipe.tool("company_list", &json!({}))?;
+    assert_eq!(unavailable["structuredContent"]["code"], "NOT_SET_UP");
+    assert_eq!(unavailable["isError"], true);
     assert_eq!(
-        unavailable["structuredContent"]["code"],
-        "EXTENSION_SETUP_REQUIRED"
+        unavailable["structuredContent"]["message"],
+        "Beankeeper isn't set up on this computer yet. Call setup, then try again."
     );
+    for name in ["ui_get_link", "demo_start", "audit_undo"] {
+        let result = pipe.tool(name, &json!({}))?;
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["code"], "NOT_SET_UP");
+    }
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("data").exists());
     Ok(())
@@ -3830,5 +3848,68 @@ fn interrupted_install_steps_resume_without_second_books_or_trial() -> TestResul
     }
     let _ = stop.send(());
     server.join().map_err(|_| "trial server panicked")??;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn extension_catalog_matches_attached_default_managed_access() -> TestResult {
+    use std::collections::BTreeMap;
+    let root = tempfile::tempdir()?;
+    let mut command = isolated(root.path());
+    command.args(["mcp", "extension"]);
+    let mut before = McpPipe::start(&mut command)?;
+    let fixture = LegacyService::new()?;
+    let _host = fixture.host()?;
+    fixture.service_access(&["access-set", "--preset", "bookkeeper", "--json"])?;
+    let mut command = fixture.command();
+    command.args(["mcp", "extension"]);
+    let mut after = McpPipe::start(&mut command)?;
+    let catalog = |value: &Value| -> TestResult<BTreeMap<String, Value>> {
+        value["tools"]
+            .as_array()
+            .ok_or("missing tool catalog")?
+            .iter()
+            .map(|tool| {
+                Ok((
+                    tool["name"].as_str().ok_or("missing name")?.to_owned(),
+                    tool.clone(),
+                ))
+            })
+            .collect()
+    };
+    let mut files = inline_params(json!({}));
+    files["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"] =
+        json!({"io.modelcontextprotocol/files":{"upload":{}}});
+    for params in [json!({}), inline_params(json!({})), files] {
+        let initial = catalog(&before.request("tools/list", &params)?)?;
+        let attached = catalog(&after.request("tools/list", &params)?)?;
+        assert_eq!(
+            initial.keys().collect::<Vec<_>>(),
+            attached.keys().collect::<Vec<_>>()
+        );
+        for (name, tool) in initial {
+            assert_eq!(
+                tool["inputSchema"], attached[&name]["inputSchema"],
+                "schema for {name}"
+            );
+            assert_eq!(
+                tool["annotations"], attached[&name]["annotations"],
+                "annotations for {name}"
+            );
+        }
+    }
+    let status = after.tool("setup_status", &json!({}))?;
+    assert_eq!(
+        status["structuredContent"]["agent_access"]["preset"],
+        "bookkeeper"
+    );
+    assert_eq!(
+        status["structuredContent"]["agent_access"]["write_mode"],
+        "direct"
+    );
+    let text = serde_json::to_string(&status)?;
+    assert!(text.contains("audit_undo"));
+    assert!(text.contains("txn_reverse"));
     Ok(())
 }

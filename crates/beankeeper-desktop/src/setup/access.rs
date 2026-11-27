@@ -126,6 +126,22 @@ impl TryFrom<AccessOptions> for ManagedAccess {
 }
 
 impl ManagedAccess {
+    /// Project the managed preset onto the upstream static discovery catalog.
+    /// Bookkeeper presets also carry upstream's chart and correction grants.
+    pub(crate) fn catalog_includes(self, capability: Capability) -> bool {
+        let (grants, mode) = self.grants();
+        (grants.contains(&capability)
+            && !matches!(
+                (mode, capability),
+                (WriteMode::ProposeOnly, Capability::Post)
+            ))
+            || matches!((self, capability), (Self::Bookkeeper(_), Capability::Chart))
+            || matches!(
+                (self, mode, capability),
+                (Self::Bookkeeper(_), WriteMode::Direct, Capability::Reverse)
+            )
+    }
+
     pub(super) const fn selection(self) -> (Preset, WriteMode) {
         match self {
             Self::ReadOnly => (Preset::ReadOnly, WriteMode::Direct),

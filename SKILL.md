@@ -79,8 +79,9 @@ run them from an authorized shell in the owner's logged-in OS session.
   If it returns `not_started`, call `setup` with no arguments. Poll
   `setup_status` while it reports `running`. If it reports `failed`, call
   `doctor` and explain the problem in plain words. When it reports `ready`,
-  refresh the tool list and continue in the same chat. Call `setup_status`
-  again for real books. Keep setup in chat using the available tools.
+  continue in the same chat using the tools already listed. If a tool returns
+  `NOT_SET_UP`, finish setup and retry it. No restart is needed. Call
+  `setup_status` again for real books. Keep setup in chat using the available tools.
   Never ask for a terminal, token or passphrase.
 
   The extension serves this skill over MCP to supported clients. Follow the

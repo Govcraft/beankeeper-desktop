@@ -114,6 +114,7 @@ pub(super) struct InlineProtocol<'a> {
     method: RequestMethod<'a>,
     name: Option<HeaderValue>,
     ledger_target: Option<NamedLedgerTarget>,
+    file_imports: bool,
 }
 
 impl<'a> InlineProtocol<'a> {
@@ -164,7 +165,16 @@ impl<'a> InlineProtocol<'a> {
             method,
             name,
             ledger_target,
+            file_imports: crate::imports::supports_file_imports(
+                &params["_meta"][INLINE_CAPABILITIES]["extensions"],
+            ),
         }))
+    }
+
+    pub(super) fn desktop_file_imports(&self) -> bool {
+        self.version == ProtocolVersion::STANDARD_HEADERS
+            && self.ledger_target.is_none()
+            && self.file_imports
     }
 
     pub(super) fn ledger_target(&self) -> Option<&NamedLedgerTarget> {

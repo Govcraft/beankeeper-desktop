@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 - Pin the ledger library and CLI to the beankeeper-cli-v0.40.0 release tag, and open a PR when a newer core release appears.
-
+- Advertise ledger and Desktop tools before extension setup so cached clients can use them immediately afterward, with recoverable NOT_SET_UP errors.
 - Point the README at the current install pages and correct public license and contribution facts.
 - Keep Linux service installation working with spaces or quotes in log folders by falling back to the system journal and reporting the destination through CLI/MCP.
 - Align the linked Claude setup guide with current installation steps and remove a private issuer link from the public license reference.

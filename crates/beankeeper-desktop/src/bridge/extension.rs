@@ -64,6 +64,61 @@ pub(super) fn tools(include_status: bool) -> Vec<Tool> {
         .collect()
 }
 
+fn ledger_catalog(
+    tools: Vec<Tool>,
+) -> Result<std::collections::BTreeMap<std::borrow::Cow<'static, str>, Tool>, BridgeError> {
+    use beankeeper_cli::operation::{Exposure, Operation};
+
+    let access = crate::setup::ManagedAccess::default();
+    let mut definitions: std::collections::BTreeMap<_, _> = tools
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+    let mut catalog = std::collections::BTreeMap::new();
+    for operation in Operation::ALL {
+        let name = match operation.exposure() {
+            Exposure::Both(name) | Exposure::McpOnly(name, _) => name,
+            Exposure::Grouped(_) | Exposure::CliOnly(_) => continue,
+        };
+        if let Some(tool) = definitions.remove(name) {
+            let capability = operation
+                .primary_capability()
+                .map_err(|_| BridgeError::Protocol)?;
+            if access.catalog_includes(capability) {
+                catalog.insert(tool.name.clone(), tool);
+            }
+        }
+    }
+    // Upstream currently returns unpaired definitions. Refuse catalog drift instead
+    // of silently hiding a tool that has no typed authorization mapping.
+    if !definitions.is_empty() {
+        return Err(BridgeError::Protocol);
+    }
+    Ok(catalog)
+}
+
+fn initial_tools(file_imports: bool) -> Result<Vec<Tool>, BridgeError> {
+    let access = crate::setup::ManagedAccess::default();
+    let mut catalog = ledger_catalog(beankeeper_cli::mcp::LedgerAccess::ReadWrite.tools())?;
+    for host in crate::onboarding::DesktopTools::definitions(true) {
+        if access.catalog_includes(host.capability) {
+            catalog.insert(host.tool.name.clone(), host.tool);
+        }
+    }
+    for tool in service::access_tool()
+        .into_iter()
+        .chain(service::open_tool())
+        .chain(tools(false))
+    {
+        catalog.insert(tool.name.clone(), tool);
+    }
+    let mut tools: Vec<_> = catalog.into_values().collect();
+    if file_imports {
+        crate::imports::amend_tool_definitions(&mut tools);
+    }
+    Ok(tools)
+}
+
 #[derive(Default)]
 enum Worker {
     #[default]
@@ -104,6 +159,29 @@ impl Worker {
                 registration: Some(registration),
             }),
             Self::Finished(Err(error)) => Some(Progress::Failed { code: error.code() }),
+        }
+    }
+}
+
+/// Why a ledger call cannot yet be attached, keeping setup and transport failures distinct.
+enum PreAttach {
+    NeverSetUp,
+    SetupRunning,
+    SetupFailed { code: &'static str },
+    ServiceUnavailable(BridgeError),
+}
+
+impl From<(&Worker, Option<BridgeError>)> for PreAttach {
+    fn from((worker, unavailable): (&Worker, Option<BridgeError>)) -> Self {
+        match worker {
+            Worker::Running(_) => Self::SetupRunning,
+            Worker::Finished(Err(error)) => Self::SetupFailed { code: error.code() },
+            Worker::Idle if matches!(&unavailable, Some(BridgeError::Service(error)) if matches!(error.as_ref(), ServiceError::NotInstalled)) => {
+                Self::NeverSetUp
+            }
+            Worker::Idle | Worker::Finished(Ok(_)) => {
+                Self::ServiceUnavailable(unavailable.unwrap_or(BridgeError::Protocol))
+            }
         }
     }
 }
@@ -198,7 +276,7 @@ impl Session {
             Some(command @ ExtensionCommand::Status) if status_is_local => {
                 self.call(command, unavailable.as_ref(), message, id, output)
             }
-            _ => self.forward(&request, id, output, unavailable.as_ref()),
+            _ => self.forward(&request, id, output, unavailable),
         }
     }
 
@@ -333,24 +411,35 @@ impl Session {
         request: &BridgeRequest<'_>,
         id: &Value,
         output: &mut impl Write,
-        unavailable: Option<&BridgeError>,
+        unavailable: Option<BridgeError>,
     ) -> Result<(), BridgeError> {
         match request.kind() {
             MethodKind::ToolsList if self.transport.is_none() => {
-                let result = ListToolsResult::with_all_items(tools(true))
-                    .with_ttl_ms(0)
-                    .with_cache_scope(CacheScope::Private);
+                let result = ListToolsResult::with_all_items(initial_tools(
+                    request
+                        .inline()
+                        .is_some_and(InlineProtocol::desktop_file_imports),
+                )?)
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Private);
                 return response(output, id, result);
             }
             MethodKind::ToolsCall if self.transport.is_none() => {
-                let result = match self.progress(unavailable) {
-                    progress @ Progress::Failed { .. } => {
-                        progress.result().map_err(|_| BridgeError::Protocol)?
+                let result = match PreAttach::from((&self.worker, unavailable)) {
+                    PreAttach::NeverSetUp => {
+                        let error = BridgeError::NotSetUp;
+                        failure(error.diagnostic_code(), &error.to_string())
                     }
-                    _ => failure(
+                    PreAttach::SetupRunning => failure(
                         "EXTENSION_SETUP_REQUIRED",
-                        "Call setup to set up Beankeeper, then check setup_status.",
+                        "Beankeeper is setting up locally. Check setup_status again shortly.",
                     ),
+                    PreAttach::SetupFailed { code } => Progress::Failed { code }
+                        .result()
+                        .map_err(|_| BridgeError::Protocol)?,
+                    PreAttach::ServiceUnavailable(error) => {
+                        failure(error.diagnostic_code(), &error.to_string())
+                    }
                 };
                 return response(output, id, result);
             }
@@ -457,4 +546,105 @@ fn failure(code: &str, message: &str) -> CallToolResult {
     let mut result = CallToolResult::structured_error(json!({"code":code,"message":message}));
     result.content = vec![ContentBlock::text(message)];
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unattached_call(
+        worker: Worker,
+        error: Option<BridgeError>,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"company_list","arguments":{}}});
+        let request = BridgeRequest::try_from(&message)?;
+        let mut session = Session {
+            worker,
+            ..Session::default()
+        };
+        let mut output = Vec::new();
+        session.forward(&request, &json!(1), &mut output, error)?;
+        let reply: Value = serde_json::from_slice(&output)?;
+        assert_eq!(reply["result"]["isError"], true);
+        Ok(reply["result"]["structuredContent"].clone())
+    }
+
+    #[test]
+    fn failed_setup_preserves_failure_on_ledger_call() -> Result<(), Box<dyn std::error::Error>> {
+        let result = unattached_call(
+            Worker::Finished(Err(ServiceError::Worker)),
+            Some(ServiceError::NotInstalled.into()),
+        )?;
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["code"], ServiceError::Worker.code());
+        Ok(())
+    }
+
+    #[test]
+    fn completed_setup_with_unreachable_service_preserves_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for error in [
+            BridgeError::from(ServiceError::NotReady),
+            BridgeError::InvalidToken,
+            BridgeError::Rejected(reqwest::StatusCode::UNAUTHORIZED),
+            BridgeError::from(ServiceError::NotInstalled),
+        ] {
+            let code = error.diagnostic_code();
+            let result = unattached_call(
+                Worker::Finished(Ok(Registration::Checked(Vec::new()))),
+                Some(error),
+            )?;
+            assert_eq!(result["code"], code);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn completed_setup_with_http_failure_preserves_transport_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        // Accept and close without a response, making the attach handshake fail.
+        let server = thread::spawn(move || listener.accept().map(|_| ()));
+        let error = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()?
+            .get(format!("http://{address}/mcp"))
+            .send()
+            .expect_err("the service must fail the handshake");
+        server.join().expect("fixture thread panicked")?;
+        let result = unattached_call(
+            Worker::Finished(Ok(Registration::Checked(Vec::new()))),
+            Some(error.into()),
+        )?;
+        assert_eq!(result["code"], "AGENT_MCP_UNREACHABLE");
+        Ok(())
+    }
+
+    #[test]
+    fn never_set_up_is_the_only_not_set_up_state() -> Result<(), Box<dyn std::error::Error>> {
+        let result = unattached_call(Worker::Idle, Some(ServiceError::NotInstalled.into()))?;
+        assert_eq!(result["code"], "NOT_SET_UP");
+        let worker = thread::spawn(|| Err(ServiceError::Worker));
+        let result = unattached_call(Worker::Running(worker), None)?;
+        assert_eq!(result["code"], "EXTENSION_SETUP_REQUIRED");
+        Ok(())
+    }
+
+    #[test]
+    fn every_upstream_tool_has_a_typed_capability_mapping() -> Result<(), BridgeError> {
+        ledger_catalog(beankeeper_cli::mcp::LedgerAccess::ReadWrite.tools())?;
+        Ok(())
+    }
+
+    #[test]
+    fn unmapped_upstream_tool_is_rejected_instead_of_hidden() {
+        let mut tools = beankeeper_cli::mcp::LedgerAccess::ReadWrite.tools();
+        let mut unknown = tools[0].clone();
+        unknown.name = "future_unmapped_tool".into();
+        tools.push(unknown);
+        assert!(matches!(ledger_catalog(tools), Err(BridgeError::Protocol)));
+    }
 }
