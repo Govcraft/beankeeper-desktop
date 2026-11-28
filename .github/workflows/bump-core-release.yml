@@ -35,7 +35,11 @@ jobs:
         run: |
           set -euo pipefail
           current="$(python3 scripts/ci/bump_core_release.py current)"
-          latest="$(gh release view --repo Govcraft/beankeeper --json tagName --jq .tag_name)"
+          latest="$(gh release view --repo Govcraft/beankeeper --json tagName --jq .tagName)"
+          if [ -z "$latest" ]; then
+            echo "The latest Beankeeper release returned no tagName." >&2
+            exit 1
+          fi
           printf 'current=%s latest=%s\n' "$current" "$latest"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"

@@ -716,6 +716,23 @@ receipt and Desktop undo link for a direct import.
 
 [Statement imports from chat and the CLI](docs/statement-imports.md)
 
+### Import historical journals
+
+For a general-ledger export, match source accounts to the destination book and
+group the source lines into balanced journals. Agree on the cutover and check
+for amounts already represented by opening journals or by invoices or bills the
+owner will recreate separately. Leave those source journals out of the batch.
+
+Use `txn_import` with `company`, `transactions` and `dry_run: true`. Include
+each journal's source reference, date, currency, description and debit/credit
+entries with decimal strings for fractional amounts. Require Direct posting
+authority. Send at most 500 journals, 5,000 entries and 1 MiB of encoded journal
+JSON per batch. Report the preview and confirm the owner wants the batch
+recorded. Submit the same journals with `dry_run: false`. Reuse the source
+references when retrying and report the imported and skipped counts. Use the
+statement import flow for CSV, OFX or QFX bank and card statements.
+[Journal example](docs/statement-imports.md#import-historical-journals).
+
 ### Report each setup change and offer undo
 
 After each successful setup write, tell the owner in plain words what was
@@ -945,6 +962,14 @@ are omitted. The form shows the effective dates, and empty ranges include a
 note and a link to company transactions across all dates. For historical books,
 pass explicit `from` and `to` dates, such as `2025-01-01` and `2025-12-31` for
 the 2025 demo. Zero totals alone do not mean the company has no activity.
+
+For cross-company reports use `group_income_statement` with inclusive `from`
+and `to`, or `group_balance_sheet` with `as_of`. Pass at least two distinct active
+company slugs in `members` and their common `currency`. Read all members on the
+same ledger connection. Show the results by company and label the combined
+figures **before eliminations**. Call out intercompany links with a missing
+reciprocal posting in the selected scope. Share the combined results in chat
+or export them with `bk group-report`. Browser report URLs are company-scoped.
 
 The review queue at `/review?company=SLUG` lists pending agent proposals. Link
 the human to `/review/PROPOSAL_ID?company=SLUG` to inspect entries, metadata and

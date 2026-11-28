@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-- Pin the ledger library and CLI to the beankeeper-cli-v0.40.0 release tag, and open a PR when a newer core release appears.
+- Adopt Beankeeper core 0.41.0, including cross-company statements before eliminations and atomic MCP journal imports with previews and retry references.
+- Update the bundled agent guide for both workflows and publish the generated Claude marketplace tree as a packaging artifact.
+- Fix automatic core release discovery and pin both core crates to beankeeper-cli-v0.41.0.
 - Advertise ledger and Desktop tools before extension setup so cached clients can use them immediately afterward, with recoverable NOT_SET_UP errors.
 - Point the README at the current install pages and correct public license and contribution facts.
 - Keep Linux service installation working with spaces or quotes in log folders by falling back to the system journal and reporting the destination through CLI/MCP.

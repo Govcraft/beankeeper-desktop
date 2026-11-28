@@ -18,7 +18,8 @@ CHANGELOG = ROOT / "CHANGELOG.md"
 TAG_RE = re.compile(r"^beankeeper-cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 DEP_RE = re.compile(
     r'^(beankeeper(?:-cli)?) = \{ git = "https://github.com/Govcraft/beankeeper", '
-    r'(?:branch = "main"|tag = "(beankeeper-cli-v[0-9]+\.[0-9]+\.[0-9]+)") \}\n',
+    r'(?:branch = "main"|tag = "(beankeeper-cli-v[0-9]+\.[0-9]+\.[0-9]+)")'
+    r'(?:, version = "[^"]+")? \}\n',
     re.MULTILINE,
 )
 CRATES = ("beankeeper", "beankeeper-cli")
@@ -60,7 +61,7 @@ def current_tag(manifest: str) -> str:
 
 def apply_tag(manifest: str, tag: str) -> str:
     require_tag(tag)
-    pins = parse_pins(manifest)
+    parse_pins(manifest)
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -73,8 +74,6 @@ def apply_tag(manifest: str, tag: str) -> str:
     current_tag(updated)
     if current_tag(updated) != tag:
         raise BumpError("rewrite did not pin the requested tag")
-    if pins == parse_pins(updated) and pins[CRATES[0]] == tag:
-        return manifest
     return updated
 
 

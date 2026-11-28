@@ -18,8 +18,8 @@ workspace = true
 age = "0.12.1"
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
 base64 = "0.23.1"
-beankeeper = { git = "https://github.com/Govcraft/beankeeper", tag = "beankeeper-cli-v0.40.0" }
-beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", tag = "beankeeper-cli-v0.40.0" }
+beankeeper = { git = "https://github.com/Govcraft/beankeeper", tag = "beankeeper-cli-v0.41.0" }
+beankeeper-cli = { git = "https://github.com/Govcraft/beankeeper", tag = "beankeeper-cli-v0.41.0" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 ed25519-dalek = "3.0.0"
