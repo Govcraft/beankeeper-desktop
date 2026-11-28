@@ -364,7 +364,7 @@ no source manifest version is maintained separately. The guide is copied from
 root `SKILL.md`, and the plugin references installed `bk` via PATH, with no
 `bin/` directory or bundled binary. `.mcpb` remains the chat extension artifact.
 
-The PM publishes the generated marketplace tree to
-Govcraft/beankeeper-claude-plugins in a follow-up. This tooling creates no
-GitHub repositories. Retain the generated tree locally when preparing that
-publication; only `claude-plugin.zip` is a signed release asset.
+Download the `claude-marketplace` workflow artifact to get the publishing tree,
+including the hidden `.claude-plugin` catalogs. The PM publishes it to
+Govcraft/beankeeper-claude-plugins after the Desktop release.
+`claude-plugin.zip` is the signed release download.

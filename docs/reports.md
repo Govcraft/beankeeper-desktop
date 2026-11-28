@@ -40,6 +40,26 @@ minus sign. Formatting uses a fixed decimal point. Counts, IDs and percentages
 keep their original units. JSON retains the integer minor-unit amounts and
 `_display` fields in the CLI contract. Tax CSV retains integer minor units.
 
+## Cross-company statements
+
+Ask your agent to run `group_income_statement` with `members`, `currency`,
+`from` and `to`. For a balance sheet, call `group_balance_sheet` with
+`members`, `currency` and `as_of`. Supply at least two distinct active companies
+from one ledger. Dates are inclusive. Each company's postings in the report
+scope must use the requested currency.
+
+```sh
+bk --json group-report income-statement --member acme --member beta \
+  --currency USD --from 2026-01-01 --to 2026-03-31
+bk --format csv group-report balance-sheet --member acme --member beta \
+  --currency USD --as-of 2026-03-31
+```
+
+The figures include booked intercompany activity before eliminations. The
+report preserves company-specific account detail and lists matching intercompany
+journal pairs separately. Use the CLI or MCP for the combined report. Browser
+report URLs display one company.
+
 ## Date and report filters
 
 Dates use inclusive `YYYY-MM-DD` bounds. As in the CLI, an omitted `to` means

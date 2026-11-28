@@ -1,4 +1,4 @@
-# Import a bank statement
+# Import statements and historical journals
 
 Share a CSV, OFX or QFX statement with your agent and identify the book and bank
 account. Beankeeper applies matching categorization rules and uses the selected
@@ -54,3 +54,47 @@ phase changes on stderr. `--json` produces one result on stdout.
 The existing `bk setup statement-import` command can still read statement text
 from stdin directly against the ledger. It also accepts custom CSV mappings.
 The receipt and transaction history remain available after Desktop restarts.
+
+## Import historical journals
+
+When migrating a general ledger, map its source accounts and group the exported
+lines into balanced journals. Agree on the migration date and avoid overlapping
+opening balances or repeating journals created by separately issued invoices and
+bills. Use a stable source reference for each journal, such as
+`old-ledger:journal-42`, even when splitting the export across batches.
+
+Send the mapped journals to `txn_import` using a Direct bookkeeper connection:
+
+```json
+{
+  "company": "acme",
+  "dry_run": true,
+  "transactions": [
+    {
+      "reference": "old-ledger:journal-42",
+      "date": "2026-03-31",
+      "description": "Consulting sale",
+      "currency": "USD",
+      "entries": [
+        {"account_code": "1000", "direction": "debit", "amount": "120.00"},
+        {"account_code": "4000", "direction": "credit", "amount": "120.00"}
+      ]
+    }
+  ]
+}
+```
+
+Review the preview, then submit the same journals with `dry_run: false`. A
+failed batch leaves the ledger unchanged. A replay skips duplicate references by
+default. Send `on_conflict: "error"` to reject the entire batch on a duplicate.
+MCP accepts up to 500 journals, 5,000 entries and 1 MiB of encoded journal JSON.
+Use the same transaction array with the CLI's dry run:
+
+```sh
+bk --company acme --json txn import --file journals.json --dry-run
+```
+
+Journal imports carry accounting entries and their metadata. To migrate source
+contacts, open invoices or bills and payments, use the corresponding
+counterparty and document tools. Desktop's file attachment and task workflow
+above handles bank and card statements.

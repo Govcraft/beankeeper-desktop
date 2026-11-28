@@ -217,6 +217,13 @@ jobs:
         run: python scripts/release.py bootstrap-installers
       - name: Package the Claude plugin and prepare the marketplace
         run: python scripts/release.py claude-plugin
+      - name: Upload the Claude marketplace publishing tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-marketplace
+          path: staging/claude-marketplace/
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Hash all final archives and installers
         run: python scripts/release.py checksums
       - name: Generate signed-update metadata

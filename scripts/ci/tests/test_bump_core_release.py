@@ -51,6 +51,16 @@ class BumpCoreReleaseTests(unittest.TestCase):
         # Already at the requested tag is a no-op rewrite that still parses.
         self.assertEqual(apply_tag(MANIFEST, "beankeeper-cli-v0.40.0"), MANIFEST)
 
+    def test_cargo_generated_git_versions_are_normalized(self):
+        cargo_add_manifest = MANIFEST.replace(
+            'tag = "beankeeper-cli-v0.40.0" }',
+            'tag = "beankeeper-cli-v0.40.0", version = "0.40.0" }',
+        )
+        self.assertEqual(current_tag(cargo_add_manifest), "beankeeper-cli-v0.40.0")
+        self.assertEqual(apply_tag(cargo_add_manifest, "beankeeper-cli-v0.40.0"), MANIFEST)
+        expected = MANIFEST.replace("beankeeper-cli-v0.40.0", "beankeeper-cli-v0.41.0")
+        self.assertEqual(apply_tag(cargo_add_manifest, "beankeeper-cli-v0.41.0"), expected)
+
     def test_apply_tag_can_leave_main(self):
         updated = apply_tag(MAIN_MANIFEST, "beankeeper-cli-v0.40.0")
         self.assertEqual(current_tag(updated), "beankeeper-cli-v0.40.0")

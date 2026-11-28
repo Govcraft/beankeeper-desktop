@@ -214,6 +214,23 @@ without proxies or redirects, before opening a fresh pairing link in the default
 browser. With no `--bind`, it prefers the running managed service. Ctrl-C stops the
 listener and cancels upstream MCP sessions before HTTP shutdown completes.
 
+## Cross-company statements and historical journals
+
+Run an income statement or balance sheet for selected companies in one ledger
+and currency. Ask your agent to use `group_income_statement` or
+`group_balance_sheet`, or run `bk group-report`. Results keep each company's
+accounts separate and show combined totals before eliminations. The browser
+Reports page renders one company per view. [Report arguments](docs/reports.md#cross-company-statements).
+
+Use `txn_import` to preview and import a converted general ledger as balanced
+JSON journals over MCP. `bk txn import` accepts the same JSON from a file or
+stdin. Keep source journal references stable across retries.
+[Historical journals and bank statement imports](docs/statement-imports.md#import-historical-journals).
+
+For Wise vendor payments, the signed Beankeeper CLI archives supply the
+`bk-wise-bridge` companion. Configure the bridge on the host that runs the
+ledger connection. [Wise bridge setup](https://github.com/Govcraft/beankeeper/blob/beankeeper-cli-v0.41.0/docs/wise-bridge.md).
+
 ## Automatic local backups
 
 Desktop keeps local backups of your books and attachments automatically. Ask
